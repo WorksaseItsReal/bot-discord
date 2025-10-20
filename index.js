@@ -1,36 +1,22 @@
 // Dépendances de base (necessite 'discord.js' et 'axios')
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes } = require('discord.js');
 const axios = require('axios');
-const fs = require('fs');
-
-// --- CONFIGURATION ET PERSISTANCE (simulée avec JSON) ---
-const CONFIG_FILE = 'config.json';
-let config = {}; // { 'guildId': { 'channelId': 'id', 'dmEnabled': false } }
-
-function loadConfig() {
-    if (fs.existsSync(CONFIG_FILE)) {
-        config = JSON.parse(fs.readFileSync(CONFIG_FILE));
-    } else {
-        saveConfig();
-    }
-}
-
-function saveConfig() {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-}
 
 // --- INITIALISATION DU BOT & TOKEN ---
 
-// *** Remplacer par ton jeton réel : ***
-const TOKEN = "TON_JETON_SECRET_DISCORD_ICI"; 
-// *** Remplacer par ton ID utilisateur Discord : ***
-const OWNER_ID = "TON_PROPRE_ID_UTILISATEUR_DISCORD"; 
+// *** ⚠️ ATTENTION: REMPLACER PAR TON JETON RÉEL ⚠️ ***
+const TOKEN = "MTQxMjA0NTM0MzExMzM1MTI2OQ.GiN5bZ.n-Fnf-KwQUgPmM5jIbYayOZlmxP9yhaXSTNEhM"; 
+// *** REMPLACER PAR TON ID UTILISATEUR DISCORD (pour /admin) ***
+const OWNER_ID = "736906288453386261"; 
+
+let notificationChannelId = null;
+let dmNotificationsEnabled = false;
 
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.DirectMessages, // Pour les DM
+        GatewayIntentBits.DirectMessages,
     ] 
 });
 
@@ -134,7 +120,6 @@ const commands = [
 
 client.on('ready', () => {
     console.log(`Bot connecté en tant que ${client.user.tag}`);
-    loadConfig();
     
     // Déploiement des Slash Commands
     const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -152,14 +137,12 @@ client.on('ready', () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return; // Utiliser isChatInputCommand pour les Slash Commands
+    if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
-    const guildId = interaction.guildId;
-
+    
     let games;
-    if (commandName === 'gratuit') {
-        // Fetcher les jeux uniquement quand c'est demandé
+    if (commandName === 'gratuit' || commandName === 'config') {
         games = await fetchEpicGamesFreeGames();
     }
 
@@ -172,7 +155,7 @@ client.on('interactionCreate', async interaction => {
             .setColor(0x3498DB)
             .addFields(
                 { name: 'Latence Discord', value: `${ping}ms`, inline: true },
-                { name: 'Uptime (Ping PM2)', value: 'Vérifiez pm2 list', inline: true },
+                { name: 'Uptime (PM2)', value: 'Vérifiez pm2 list', inline: true },
                 { name: 'Serveurs', value: `${client.guilds.cache.size}`, inline: true },
             );
         await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -180,35 +163,26 @@ client.on('interactionCreate', async interaction => {
 
     // Commande /gratuit
     else if (commandName === 'gratuit') {
-        // Par défaut, envoi dans le canal où la commande a été tapée
         await sendFreeGames(interaction, games, interaction.channelId, false);
     }
     
     // Commande /config
     else if (commandName === 'config') {
-        if (!guildId) {
-            return interaction.reply({ content: "Cette commande doit être utilisée dans un serveur.", ephemeral: true });
-        }
-        
         const channelOption = interaction.options.getChannel('channel');
         const dmOption = interaction.options.getBoolean('dm_active');
         
-        if (!config[guildId]) {
-            config[guildId] = {};
-        }
-
         if (channelOption) {
-            config[guildId].channelId = channelOption.id;
+            notificationChannelId = channelOption.id;
             interaction.channel.send(`Le canal de notification a été défini sur **${channelOption.name}**.`);
         }
 
         if (dmOption !== null) {
-            config[guildId].dmEnabled = dmOption;
-            interaction.channel.send(`Les notifications en DM sont maintenant **${dmOption ? 'activées' : 'désactivées'}** pour cet utilisateur.`);
+            dmNotificationsEnabled = dmOption;
+            interaction.channel.send(`Les notifications en DM sont maintenant **${dmOption ? 'activées' : 'désactivées'}** globalement.`);
         }
-
-        saveConfig();
-        interaction.reply({ content: "Configuration sauvegardée.", ephemeral: true });
+        
+        // Envoi immédiat des jeux aux canaux/DM configurés
+        await sendFreeGames(interaction, games, notificationChannelId, dmNotificationsEnabled);
     }
     
     // Commande /admin
@@ -225,8 +199,9 @@ client.on('interactionCreate', async interaction => {
                 .setColor(0xFFA500)
                 .setDescription("L'exécution est gérée par PM2 sur AWS.")
                 .addFields(
-                    { name: 'Temps de fonctionnement (PM2)', value: 'Vérifiez `pm2 list` dans la console', inline: false },
-                    { name: 'Logs Détaillés', value: 'Utilisez `pm2 logs EpicBot` sur le serveur.', inline: true }
+                    { name: 'Canal Configuré', value: notificationChannelId ? client.channels.cache.get(notificationChannelId).name : 'Aucun', inline: true },
+                    { name: 'DM Activés', value: dmNotificationsEnabled ? 'Oui' : 'Non', inline: true },
+                    { name: 'Logs Détaillés', value: 'Utilisez `pm2 logs EpicBot` sur le serveur.', inline: false }
                 );
             return interaction.reply({ embeds: [embed], ephemeral: true });
         }
