@@ -15,6 +15,9 @@ module.exports = {
   async execute(client, interaction) {
     if (interaction.isAutocomplete()) return handleAutocomplete(client, interaction);
     if (interaction.isChatInputCommand()) return handleCommand(client, interaction);
+    if (interaction.isButton() || interaction.isAnySelectMenu() || interaction.isModalSubmit()) {
+      return handleComponent(client, interaction);
+    }
   },
 };
 
@@ -23,6 +26,16 @@ async function handleCommand(client, interaction) {
   if (!command) return;
   try {
     await command.execute(interaction, client);
+  } catch (err) {
+    await reportError(interaction, err);
+  }
+}
+
+async function handleComponent(client, interaction) {
+  const handler = client.componentHandler?.resolve(interaction.customId);
+  if (!handler) return; // laissé aux collectors locaux (confirmation, pagination, help…)
+  try {
+    await handler.execute(interaction, client);
   } catch (err) {
     await reportError(interaction, err);
   }

@@ -42,6 +42,36 @@ class SchedulerService {
   async tick() {
     await this.#processExpiredBans();
     await this.#processDueReminders();
+    await this.#processDueGiveaways();
+    await this.#processAutobackup();
+  }
+
+  async #processDueGiveaways() {
+    const giveaways = this.client.services?.giveaways;
+    const repo = this.client.repositories?.giveaways;
+    if (!giveaways || !repo) return;
+    for (const g of repo.findDue()) {
+      await giveaways.end(g.id).catch((e) => logger.debug('giveaway end', e?.message));
+    }
+  }
+
+  async #processAutobackup() {
+    const backup = this.client.services?.backup;
+    const config = this.client.services?.config;
+    if (!backup || !config) return;
+    for (const guild of this.client.guilds.cache.values()) {
+      const cfg = config.get(guild.id).autobackup;
+      if (!cfg?.enabled) continue;
+      const dueAt = (cfg.lastRun || 0) + (cfg.intervalHours || 24) * 3_600_000;
+      if (Date.now() < dueAt) continue;
+      try {
+        backup.create(guild, this.client.user, 'Auto-backup');
+        config.update(guild.id, { autobackup: { lastRun: Date.now() } });
+        logger.info(`Auto-backup créé pour ${guild.id}`);
+      } catch (e) {
+        logger.debug('autobackup', e?.message);
+      }
+    }
   }
 
   async #processExpiredBans() {
