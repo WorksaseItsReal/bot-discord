@@ -1,6 +1,6 @@
 {
   "name": "inspecteur-gadget-bot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Inspecteur Gadget — bot Discord de gestion tout-en-un (modération, sécurité, automod, antiraid, logs, tickets, giveaways, utilitaires) construit avec discord.js.",
   "type": "commonjs",
   "main": "src/index.js",

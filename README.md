@@ -6,18 +6,24 @@ Un **seul bot**, une **immense boîte à outils** pour administrer, modérer, s�
 
 ---
 
-## ✨ Fonctionnalités (état actuel)
+## ✨ Fonctionnalités
 
-Le projet est construit **par phases**. Ce qui est **déjà livré et fonctionnel** :
+**48 slash commands** réparties en catégories. La [ROADMAP](./ROADMAP.md) est **entièrement implémentée** (phases 1 à 8).
 
 - 📊 **Informations** — `/help` (menu interactif), `/serverinfo`, `/user`, `/roleinfo`, `/channel`, `/avatar`, `/botinfo`
-- 🔨 **Modération** — `/ban` (perm. + temporaire), `/kick`, `/timeout`, `/untimeout`, `/warn`, `/unban`, `/clear`, `/sanctions` (list/remove/clear)
+- 🔨 **Modération** — `/ban` `/tempban` `/unban` `/kick` `/warn` `/mute` `/unmute` `/timeout` `/untimeout` `/clear` `/sanctions` `/banlist` `/lock` `/unlock` `/lockall` `/unlockall` `/hide` `/unhide`
 - 🧮 **Sanctions & Strikes** — historique persistant + escalade automatique configurable
-- ⚙️ **Configuration** — `/settings` (salons de logs, options modération), `/diagnostics`, `/health`
-- 📋 **Logs** — arrivées/départs, messages supprimés/édités, actions de modération
-- 🔧 **Utilitaires** — `/ping`
-
-Les phases suivantes (AutoMod, AntiRaid, Tickets, Giveaways, Backups…) sont planifiées dans la [ROADMAP](./ROADMAP.md). L'architecture est prête à les accueillir sans refonte.
+- 🤖 **AutoMod** — `/automod` : anti-spam, flood, liens, invites, mentions, caps, mots interdits, répétition, emojis, doublons
+- 🛡️ **Sécurité** — `/antiraid` (vagues d'arrivées, âge de compte, actions destructrices via audit log), `/whitelist`, `/lockdown`
+- 🎫 **Tickets & ModMail** — `/ticket` (panel, claim, transcript…), `/modmail` (DM ↔ staff)
+- 🎉 **Giveaways** — `/giveaway` (persistants, participation par bouton, fin auto, reroll)
+- 💡 **Suggestions** — `/suggestion` (votes 👍/👎, approve/deny)
+- 🎭 **Rôles** — `/role`, `/derank`, `/massrole`, `/rolemenu` (auto-attribution)
+- 🔊 **Vocaux** — `/voice` (move/kick/mute/cleanup…), `/tempvoice` (join-to-create)
+- 💾 **Backups** — `/backup` (create/list/restore/auto — structure uniquement)
+- 🧰 **Outils** — `/embed` (builder), `/custom` + `/tag` (commandes personnalisées), `/reminder`
+- ⚙️ **Configuration** — `/settings`, `/diagnostics`, `/health`
+- 📋 **Logs** — modération, membres, messages, rôles, salons, vocaux, bans, automod, sécurité
 
 ---
 
