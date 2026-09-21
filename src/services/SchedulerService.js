@@ -78,11 +78,20 @@ class SchedulerService {
     const due = this.sanctions.findDue();
     for (const s of due) {
       this.sanctions.deactivate(s.id);
-      if (s.type !== 'tempban') continue;
       const guild = this.client.guilds.cache.get(s.guild_id);
       if (!guild) continue;
-      await guild.bans.remove(s.user_id, 'Fin du bannissement temporaire').catch(() => {});
-      logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
+      if (s.type === 'tempban') {
+        await guild.bans.remove(s.user_id, 'Fin du bannissement temporaire').catch(() => {});
+        logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
+      } else if (s.type === 'mute') {
+        const cfg = this.client.services.config.get(guild.id);
+        const roleId = cfg.moderation?.mutedRoleId;
+        const member = roleId ? await guild.members.fetch(s.user_id).catch(() => null) : null;
+        if (member && member.roles.cache.has(roleId)) {
+          await member.roles.remove(roleId, 'Fin du mute temporaire').catch(() => {});
+          logger.info(`Mute temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
+        }
+      }
     }
   }
 

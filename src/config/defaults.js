@@ -21,6 +21,7 @@ const defaultGuildConfig = Object.freeze({
     dmOnSanction: true,
     requireReason: false,
     confirmDangerous: true,
+    mutedRoleId: null,
   },
   strikes: {
     enabled: true,
