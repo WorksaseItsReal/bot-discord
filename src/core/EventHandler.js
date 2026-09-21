@@ -21,17 +21,20 @@ class EventHandler {
     if (!fs.existsSync(dir)) return 0;
     for (const entry of fs.readdirSync(dir)) {
       if (!entry.endsWith('.js')) continue;
-      const event = require(path.join(dir, entry));
-      if (!event?.name || typeof event.execute !== 'function') {
-        logger.warn(`Événement ignoré (structure invalide) : ${entry}`);
-        continue;
+      const mod = require(path.join(dir, entry));
+      const events = Array.isArray(mod) ? mod : [mod];
+      for (const event of events) {
+        if (!event?.name || typeof event.execute !== 'function') {
+          logger.warn(`Événement ignoré (structure invalide) : ${entry}`);
+          continue;
+        }
+        const bound = (...args) => Promise.resolve(event.execute(this.client, ...args)).catch((err) =>
+          logger.error(`Erreur dans l'événement ${event.name} :`, err),
+        );
+        if (event.once) this.client.once(event.name, bound);
+        else this.client.on(event.name, bound);
+        this.count += 1;
       }
-      const bound = (...args) => Promise.resolve(event.execute(this.client, ...args)).catch((err) =>
-        logger.error(`Erreur dans l'événement ${event.name} :`, err),
-      );
-      if (event.once) this.client.once(event.name, bound);
-      else this.client.on(event.name, bound);
-      this.count += 1;
     }
     logger.info(`${this.count} événement(s) chargé(s).`);
     return this.count;

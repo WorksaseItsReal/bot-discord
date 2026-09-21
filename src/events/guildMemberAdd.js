@@ -7,6 +7,7 @@ module.exports = {
   name: 'guildMemberAdd',
   /** @param {import('../core/GadgetClient').GadgetClient} client */
   async execute(client, member) {
+    await client.services.antiraid.handleJoin(member).catch(() => {});
     const embed = embeds.neutral('📥 Arrivée d\'un membre').addFields(
       { name: 'Membre', value: `${member.user} (${member.id})`, inline: false },
       { name: 'Compte créé', value: discordTimestamp(member.user.createdTimestamp), inline: true },
