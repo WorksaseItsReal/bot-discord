@@ -3,6 +3,24 @@
 Statuts : `[x]` terminé · `[~]` en cours · `[ ]` prévu.
 Une fonctionnalité n'est marquée terminée que si elle fonctionne réellement.
 
+## État d'avancement
+
+| Phase | Thème | État |
+| ----- | ----- | ---- |
+| 1 | Foundation | ✅ Terminée |
+| 2 | Core | ✅ Terminée |
+| 3 | Modération | ✅ Terminée |
+| 4 | Logs | ✅ Terminée |
+| 5 | AutoMod | ✅ Terminée |
+| 6 | Sécurité | ✅ Terminée |
+| 7 | Community | ✅ Terminée |
+| 8 | Advanced tools | ✅ Terminée |
+| 9 | Raffinements & compléments | 🔜 Prévue |
+| 10+ | Plateforme (dashboard, API, IA…) | 🔒 Volontairement reporté |
+
+**Chiffres actuels** : 48 slash commands · 5 composants persistants · 18 événements ·
+2 migrations · 35 tests unitaires (verts). Dernière mise à jour : v0.2.0.
+
 ## Phase 1 — Foundation
 - [x] Architecture modulaire (core / config / database / services / utils / commands / events / components)
 - [x] Configuration centralisée + `.env` / `.env.example`
@@ -63,5 +81,29 @@ Une fonctionnalité n'est marquée terminée que si elle fonctionne réellement.
 - [x] Vocaux temporaires (`/tempvoice` join-to-create)
 - [x] Actions de masse (`/massrole`, par lots)
 
-## Fondations préparées pour plus tard (non développées volontairement)
-- [ ] Dashboard web · API · IA · statistiques avancées · SaaS/abonnements · plugins
+## Phase 9 — Raffinements & compléments (prévu)
+
+Améliorations concrètes identifiées après la couverture complète des phases 1→8.
+
+- [ ] `/permissions` — mapping commande/catégorie → rôles/utilisateurs autorisés (spec §30),
+      en complément des permissions Discord natives.
+- [ ] Tickets : formulaire d'ouverture (modal), fermeture automatique après inactivité.
+- [ ] Suggestions : statistiques (taux d'approbation, top contributeurs).
+- [ ] Giveaways : conditions supplémentaires (ancienneté sur le serveur, nombre de messages).
+- [ ] Reminders : rappels récurrents/répétés.
+- [ ] Backups : inclure emojis & stickers (dans les limites de l'API Discord).
+- [ ] Internationalisation (i18n) : utiliser réellement le champ `locale` (fr/en).
+- [ ] `/logs` : commande unifiée pour configurer toutes les catégories de logs d'un coup.
+- [ ] Cooldowns par commande + anti-abus des interactions.
+- [ ] Tests d'intégration supplémentaires (services tickets/giveaways avec mocks Discord).
+
+## Phase 10+ — Plateforme (volontairement reporté)
+- [ ] Dashboard web
+- [ ] API publique
+- [ ] IA / modération assistée
+- [ ] Statistiques avancées
+- [ ] SaaS / abonnements / plugins / intégrations externes
+
+> Ces éléments ne sont **pas** développés pour l'instant afin de garder le projet
+> focalisé sur le bot Discord. L'architecture (services, repositories, config par
+> serveur) est déjà prête à les accueillir sans refonte.
