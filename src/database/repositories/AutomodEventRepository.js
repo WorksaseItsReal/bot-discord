@@ -25,10 +25,23 @@ class AutomodEventRepository {
       'SELECT user_id, COUNT(*) AS n FROM automod_events WHERE guild_id = ? AND created_at >= ? GROUP BY user_id ORDER BY n DESC LIMIT ?',
     );
     this.pruneStmt = db.prepare('DELETE FROM automod_events WHERE created_at < ?');
+    this.getStmt = db.prepare('SELECT * FROM automod_events WHERE id = ? AND guild_id = ?');
+    this.removeStmt = db.prepare('DELETE FROM automod_events WHERE id = ? AND guild_id = ?');
   }
 
+  /** @returns {number} identifiant de l'infraction (bouton « Faux positif » du log) */
   add({ guildId, userId, filter, action, channelId = null, at = Date.now() }) {
-    this.insertStmt.run(guildId, userId, filter, action, channelId, at);
+    return Number(this.insertStmt.run(guildId, userId, filter, action, channelId, at).lastInsertRowid);
+  }
+
+  /** Infraction d'un serveur (jamais celle d'un autre serveur), ou null. */
+  get(guildId, id) {
+    return this.getStmt.get(id, guildId) ?? null;
+  }
+
+  /** Supprime une infraction (faux positif) : elle ne compte plus pour l'escalade. @returns {boolean} */
+  remove(guildId, id) {
+    return this.removeStmt.run(id, guildId).changes > 0;
   }
 
   /** Infractions d'un membre depuis `since` (ms). */

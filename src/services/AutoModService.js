@@ -5,7 +5,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const { parseDuration, formatDuration } = require('../utils/time');
 const { truncate } = require('../utils/embeds');
 const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, subtext } = require('../utils/ui');
-const { logCard } = require('./LoggingService');
+const { logCard, fitList } = require('./LoggingService');
 const { historyButton } = require('./ModerationService');
 const { createLogger } = require('../core/logger');
 const { findBadWord } = require('../utils/automod/words');
@@ -17,7 +17,7 @@ const shape = require('../utils/automod/detectors');
 const logger = createLogger('automod');
 
 /** Libellés des actions AutoMod. */
-const ACTION_LABELS = { delete: 'Message supprimé', warn: 'Avertissement', timeout: 'Timeout', kick: 'Expulsion' };
+const ACTION_LABELS = { delete: 'Message supprimé', warn: 'Avertissement', timeout: 'Timeout', kick: 'Expulsion', quarantine: 'Quarantaine' };
 
 /** Inactivité au-delà de laquelle l'état d'un membre est oublié (mémoire bornée). */
 const TRACKER_TTL_MS = 10 * 60 * 1000;
@@ -34,6 +34,20 @@ const DUPLICATE_MIN_LENGTH = 8;
 const BURST_WINDOW_MS = 15 * 1000;
 /** Au-delà, l'analyse lourde (normalisation, liens) ne porte que sur le début du message. */
 const MAX_SCAN_LENGTH = 4000;
+/** Quarantaine : messages récents mémorisés par membre (ids seulement), bornés en nombre et en âge. */
+const POSTED_MAX = 100;
+const POSTED_MAX_MS = 60 * 60 * 1000;
+/** Durée maximale d'un timeout Discord. */
+const MAX_TIMEOUT_MS = 28 * 86_400_000;
+
+/** Nom du champ du log de quarantaine qui mémorise les rôles retirés (relu à la levée). */
+const QUARANTINE_ROLES_FIELD = 'Rôles retirés';
+
+/** Bouton « Faux positif » d'un log AutoMod (identifiant de l'infraction enregistrée). */
+function falsePositiveButton(eventId) {
+  if (!Number.isInteger(eventId) || eventId <= 0) return null;
+  return actionButton({ command: 'automod', action: 'fp', args: [eventId], label: 'Faux positif', emoji: '🙅' });
+}
 
 /** Hôtes toujours tolérés par l'anti-liens (GIF du sélecteur, liens de messages Discord…). */
 const BUILTIN_ALLOWED_HOSTS = ['discord.gg', 'discord.com', 'discordapp.com', 'discordapp.net', 'discord.gift', 'tenor.com'];
@@ -51,8 +65,8 @@ function blockedInvites(invites, antiInvite = {}, guild = null) {
   return invites.filter((c) => !allowed.has(c) && c !== vanity);
 }
 
-/** Sévérité des actions : la violation la plus sévère l'emporte. */
-const SEVERITY = { delete: 1, warn: 2, timeout: 3, kick: 4 };
+/** Sévérité des actions : la violation la plus sévère l'emporte (la quarantaine d'un compte piraté passe avant tout). */
+const SEVERITY = { delete: 1, warn: 2, timeout: 3, kick: 4, quarantine: 5 };
 
 function severity(v) {
   if (!v) return 0;
@@ -75,6 +89,35 @@ function escalationStep(steps = [], count) {
   let best = null;
   for (const s of steps) if (count >= s.count && (!best || s.count > best.count)) best = s;
   return best;
+}
+
+/** Ce filtre est-il levé pour ce message (salon, salon parent d'un fil ou rôle exempté du filtre) ? Pur. */
+function isFilterExempt(fc, message) {
+  const channels = fc?.exemptChannels ?? [];
+  const roles = fc?.exemptRoles ?? [];
+  if (!channels.length && !roles.length) return false;
+  const channel = message?.channel;
+  if (channel?.id && (channels.includes(channel.id) || (channel.parentId && channels.includes(channel.parentId)))) return true;
+  return roles.length > 0 && Boolean(message?.member?.roles?.cache?.some?.((r) => roles.includes(r.id)));
+}
+
+/** Filtres effectifs pour un message : ceux dont il est exempté sont désactivés (copie). Pur. */
+function effectiveFilters(filters = {}, message = null) {
+  let out = filters;
+  for (const [key, fc] of Object.entries(filters)) {
+    if (!fc?.enabled || !isFilterExempt(fc, message)) continue;
+    if (out === filters) out = { ...filters };
+    out[key] = { ...fc, enabled: false };
+  }
+  return out;
+}
+
+/** Empreinte d'un lot de pièces jointes (nom + taille + type, ordre indifférent), ou '' sans fichier. Pur. */
+function attachmentsFingerprint(attachments) {
+  const list = attachments?.values ? [...attachments.values()] : Array.isArray(attachments) ? attachments : [];
+  if (!list.length) return '';
+  const keys = list.map((a) => `${String(a?.name ?? '').toLowerCase()}|${Number(a?.size) || 0}|${a?.contentType ?? ''}`).sort();
+  return createHash('sha1').update(keys.join('\n')).digest('base64url').slice(0, 16);
 }
 
 /** Texte analysé : contenu + messages transférés (sinon « Transférer » contourne tout). */
@@ -131,9 +174,18 @@ class AutoModService {
         logger.debug('Nettoyage du journal AutoMod :', err?.message);
       }
     }
-    for (const [key, state] of this.tracker) if (now - state.seen > TRACKER_TTL_MS) this.tracker.delete(key);
+    for (const [key, state] of this.tracker) {
+      // Un membre suivi pour la quarantaine garde ses messages récents un peu plus longtemps.
+      const ttl = state.posted?.length ? POSTED_MAX_MS : TRACKER_TTL_MS;
+      if (now - state.seen > ttl) this.tracker.delete(key);
+    }
     for (const [key, at] of this.notices) if (now - at > NOTICE_COOLDOWN_MS) this.notices.delete(key);
     for (const [key, s] of this.lastSanction) if (now - s.at > BURST_WINDOW_MS) this.lastSanction.delete(key);
+  }
+
+  /** Oublie la dernière sanction d'un membre (faux positif, quarantaine levée) : la suivante ne sera pas fusionnée. */
+  forget(guildId, userId) {
+    this.lastSanction.delete(this.#key(guildId, userId));
   }
 
   #key(guildId, userId) {
@@ -182,7 +234,8 @@ class AutoModService {
    */
   inspect(message, filters = {}, { temporal = true, newMembers = null } = {}) {
     const text = messageText(message);
-    const f = filters;
+    // Exemptions propres à chaque filtre (ex. liens autorisés dans #médias).
+    const f = effectiveFilters(filters, message);
     const hits = [];
     const hit = (key, reason, detail, extra = {}) => hits.push({ ...this.#v(key, f[key]), reason, detail, ...extra });
 
@@ -193,9 +246,13 @@ class AutoModService {
       const bad = blockedInvites(invites, f.antiInvite, message.guild);
       if (bad.length) hit('antiInvite', 'Invitation Discord interdite', bad.map((c) => `discord.gg/${c}`).join(', '));
     }
-    if (f.antiPhishing?.enabled && links.length) {
-      const scan = phishingScore(text, { mentionsEveryone: message.mentions?.everyone, allowedDomains: f.antiLink?.allowedDomains });
-      if (scan.score >= (f.antiPhishing.threshold ?? 3)) hit('antiPhishing', 'Lien d\'arnaque probable', scan.reasons.join(' · '));
+    const scan = (f.antiPhishing?.enabled || f.antiHacked?.enabled) && links.length
+      ? phishingScore(text, { mentionsEveryone: message.mentions?.everyone, allowedDomains: f.antiLink?.allowedDomains })
+      : null;
+    if (f.antiPhishing?.enabled && scan && scan.score >= (f.antiPhishing.threshold ?? 3)) hit('antiPhishing', 'Lien d\'arnaque probable', scan.reasons.join(' · '));
+    // Lien d'arnaque très probable : le compte est sans doute piraté → quarantaine.
+    if (f.antiHacked?.enabled && scan && scan.score >= (f.antiHacked.scamScore ?? 5)) {
+      hit('antiHacked', 'Compte piraté probable', `lien d'arnaque (score ${scan.score}) · ${scan.reasons.join(' · ')}`);
     }
     if (f.antiLink?.enabled && links.length) {
       const bad = blockedLinks(links, f.antiLink);
@@ -221,7 +278,7 @@ class AutoModService {
     if (temporal) this.#inspectTemporal(message, text, links, f, hit);
     const best = mostSevere(hits);
     // Les copies d'un spam multi-salons sont supprimées même si un autre filtre l'emporte.
-    const related = hits.flatMap((h) => h.related ?? []);
+    const related = [...new Map(hits.flatMap((h) => h.related ?? []).map((r) => [r.messageId, r])).values()];
     return best && related.length ? { ...best, related } : best;
   }
 
@@ -290,29 +347,67 @@ class AutoModService {
       state.lastAt = now;
     }
 
-    // 3) Spam multi-salons : signe typique d'un compte piraté (même message partout).
-    const cc = f.antiCrossChannel;
-    if (cc?.enabled && message.channel?.id && (fp.length >= (cc.minLength ?? 12) || links.length)) {
-      const win = (cc.windowSeconds || 60) * 1000;
-      state.recent = state.recent.filter((r) => now - r.at < win).slice(-30);
-      state.recent.push({ fp: digest, channelId: message.channel.id, messageId: message.id, at: now });
-      const same = state.recent.filter((r) => r.fp === digest);
-      const channels = new Set(same.map((r) => r.channelId));
-      if (channels.size >= (cc.channels || 3)) {
-        state.recent = state.recent.filter((r) => r.fp !== digest);
-        hit('antiCrossChannel', 'Spam multi-salons (compte piraté ?)', `même message dans ${channels.size} salons`, {
-          related: same.filter((r) => r.messageId !== message.id),
-        });
+    // 3) Spam multi-salons (et compte piraté) : même message posté partout en peu de temps.
+    const cc = f.antiCrossChannel?.enabled ? f.antiCrossChannel : null;
+    const hk = f.antiHacked?.enabled ? f.antiHacked : null;
+    const channelId = message.channel?.id;
+    if ((cc || hk) && channelId) {
+      const ccWin = (cc?.windowSeconds || 60) * 1000;
+      const hkWin = (hk?.windowSeconds || 60) * 1000;
+      const keep = Math.max(cc ? ccWin : 0, hk ? hkWin : 0);
+      const eligible = (minLength) => fp.length >= minLength || links.length > 0;
+      state.recent = state.recent.filter((r) => now - r.at < keep).slice(-30);
+      if ((cc && eligible(cc.minLength ?? 12)) || (hk && eligible(hk.minLength ?? 20))) {
+        state.recent.push({ fp: digest, channelId, messageId: message.id, at: now });
+      }
+      const spread = (win) => {
+        const same = state.recent.filter((r) => r.fp === digest && now - r.at < win);
+        return { same, channels: new Set(same.map((r) => r.channelId)).size };
+      };
+      if (hk && eligible(hk.minLength ?? 20)) {
+        const { same, channels } = spread(hkWin);
+        if (channels >= (hk.channels || 3)) {
+          hit('antiHacked', 'Compte piraté probable', `même message dans ${channels} salons`, { related: same.filter((r) => r.messageId !== message.id) });
+        }
+      }
+      if (cc && eligible(cc.minLength ?? 12)) {
+        const { same, channels } = spread(ccWin);
+        if (channels >= (cc.channels || 3)) {
+          state.recent = state.recent.filter((r) => r.fp !== digest);
+          hit('antiCrossChannel', 'Spam multi-salons (compte piraté ?)', `même message dans ${channels} salons`, {
+            related: same.filter((r) => r.messageId !== message.id),
+          });
+        }
+      }
+    }
+
+    // 4) Compte piraté : même lot de pièces jointes dans plusieurs salons, et suivi des
+    //    messages récents (ids) pour pouvoir tout supprimer lors d'une quarantaine.
+    if (hk && channelId && message.id) {
+      state.posted = (state.posted ?? []).filter((p) => now - p.at < POSTED_MAX_MS).slice(-(POSTED_MAX - 1));
+      state.posted.push({ channelId, messageId: message.id, at: now });
+      const files = attachmentsFingerprint(message.attachments);
+      if (files) {
+        const win = (hk.windowSeconds || 60) * 1000;
+        state.files = (state.files ?? []).filter((r) => now - r.at < win).slice(-30);
+        state.files.push({ fp: files, channelId, messageId: message.id, at: now });
+        const same = state.files.filter((r) => r.fp === files);
+        const channels = new Set(same.map((r) => r.channelId)).size;
+        if (channels >= (hk.channels || 3)) {
+          state.files = state.files.filter((r) => r.fp !== files);
+          hit('antiHacked', 'Compte piraté probable', `mêmes fichiers dans ${channels} salons`, { related: same.filter((r) => r.messageId !== message.id) });
+        }
       }
     }
   }
 
   #v(key, filter = {}) {
-    return { filter: key, action: filter.action || 'delete', duration: filter.duration || null };
+    return { filter: key, action: filter.action || (key === 'antiHacked' ? 'quarantine' : 'delete'), duration: filter.duration || null };
   }
 
   /** Supprime, sanctionne (avec escalade), prévient le membre et journalise. */
   async #apply(message, violation, cfg) {
+    if (violation.action === 'quarantine') return this.#quarantine(message, violation, cfg);
     const guild = message.guild;
     const reason = `AutoMod: ${violation.reason}`;
     this.logging?.suppressMessage?.(message.id); // pas de « Message supprimé » en double dans les logs
@@ -355,6 +450,7 @@ class AutoModService {
     const memberKey = this.#key(guild.id, message.author.id);
     const previous = this.lastSanction.get(memberKey);
     const merged = action !== 'delete' && previous && Date.now() - previous.at < BURST_WINDOW_MS && previous.severity >= severity({ action, duration });
+    let eventId = null;
     if (merged) {
       action = 'delete';
       duration = null;
@@ -363,7 +459,7 @@ class AutoModService {
       if (action !== 'delete') this.lastSanction.set(memberKey, { at: Date.now(), severity: severity({ action, duration }) });
       try {
         // Journalisé avec l'action FINALE (les statistiques montrent les sanctions réelles).
-        this.events?.add({ guildId: guild.id, userId: message.author.id, filter: violation.filter ?? 'autre', action, channelId: message.channel?.id });
+        eventId = this.events?.add({ guildId: guild.id, userId: message.author.id, filter: violation.filter ?? 'autre', action, channelId: message.channel?.id }) ?? null;
       } catch (err) {
         logger.warn('Journal AutoMod indisponible :', err?.message);
       }
@@ -402,8 +498,124 @@ class AutoModService {
         ? actionButton({ command: 'untimeout', action: 'revoke', args: [message.author.id], label: 'Retirer le timeout', emoji: ICONS.unmute, style: ButtonStyle.Success })
         : null,
       historyButton(message.author.id),
+      falsePositiveButton(eventId),
     );
     await this.logging.send(guild.id, 'automod', embed, components, { event: 'automod', channelId: message.channel?.id });
+  }
+
+  /**
+   * Quarantaine d'un compte piraté : timeout long, suppression de ses messages récents
+   * dans tous les salons, retrait des rôles (optionnel, rendus à la levée) et log d'alerte
+   * avec « Lever la quarantaine » / « Bannir ».
+   */
+  async #quarantine(message, violation, cfg) {
+    const guild = message.guild;
+    const fc = cfg.filters?.antiHacked ?? {};
+    const reason = `AutoMod: ${violation.reason} (quarantaine)`;
+    const memberKey = this.#key(guild.id, message.author.id);
+    this.logging?.suppressMessage?.(message.id);
+    const deleted = await message.delete().then(() => true, () => false);
+    // Messages des X dernières minutes, partout où il a écrit (et copies détectées).
+    const purge = await this.purgeRecent(guild, message.author.id, (fc.purgeMinutes ?? 10) * 60_000, {
+      extra: violation.related ?? [],
+      exclude: [message.id],
+    });
+
+    // Rafale : déjà mis en quarantaine il y a quelques secondes → seulement la suppression.
+    const previous = this.lastSanction.get(memberKey);
+    if (previous && Date.now() - previous.at < BURST_WINDOW_MS && previous.severity >= severity({ action: 'quarantine' })) return;
+    this.lastSanction.set(memberKey, { at: Date.now(), severity: severity({ action: 'quarantine' }) });
+
+    const me = guild.members?.me;
+    const ms = Math.min(parseDuration(fc.duration || '1d') || 86_400_000, MAX_TIMEOUT_MS);
+    const member = message.member;
+    const until = member?.communicationDisabledUntilTimestamp ?? 0;
+    let timeout;
+    if (until >= Date.now() + ms) timeout = { ok: true, text: `déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:f>` };
+    else {
+      const res = await this.moderation.timeout(guild, member, me, reason, ms).then((r) => r, () => null);
+      timeout = { ok: Boolean(res), text: res ? `Timeout ${fc.duration || formatDuration(ms)}${res?.id ? ` · sanction #${res.id}` : ''}` : 'Timeout impossible (hiérarchie ou permission)' };
+    }
+
+    // Rôles retirés (désactivé par défaut) : mémorisés dans le log pour être rendus à la levée.
+    let removedRoles = [];
+    if (fc.removeRoles && member?.roles?.cache) {
+      const removable = [...member.roles.cache.values()].filter((r) => r.id !== guild.id && !r.managed && r.editable !== false);
+      if (removable.length) {
+        const ok = await member.roles.remove(removable.map((r) => r.id), reason).then(() => true, () => false);
+        if (ok) removedRoles = removable.map((r) => r.id);
+      }
+    }
+
+    try {
+      this.events?.add({ guildId: guild.id, userId: message.author.id, filter: 'antiHacked', action: 'quarantine', channelId: message.channel?.id });
+    } catch (err) {
+      logger.warn('Journal AutoMod indisponible :', err?.message);
+    }
+
+    const total = purge.count + (deleted ? 1 : 0);
+    const embed = logCard({
+      category: 'automod',
+      tone: 'danger',
+      icon: ICONS.lock,
+      title: 'Compte piraté · quarantaine',
+      description: [
+        `${message.author} semble piraté : son compte est placé en **quarantaine**.`,
+        deleted ? null : '⚠️ Je n\'ai pas pu supprimer le message : vérifiez ma permission **Gérer les messages**.',
+        subtext('Vérifiez avec le membre (autre moyen de contact) avant de lever la quarantaine.'),
+      ],
+      user: message.author,
+      fields: [
+        field(ICONS.user, 'Membre', userLine(message.author)),
+        field(ICONS.warning, 'Règle', violation.reason),
+        field(ICONS.shield, 'Action', timeout.text),
+        violation.detail ? wide(ICONS.search, 'Détail', truncate(violation.detail, 1024)) : null,
+        field(ICONS.delete, 'Messages supprimés', `**${total}** · ${purge.channels} salon(s) · ${fc.purgeMinutes ?? 10} dernières min`),
+        fc.removeRoles ? wide(ICONS.role, QUARANTINE_ROLES_FIELD, fitList(removedRoles.map((id) => `<@&${id}>`), 1000) ?? '*Aucun*') : null,
+        wide(ICONS.channel, 'Message', message.content ? truncate(message.content, 1024) : '*Aucun contenu texte*'),
+      ],
+    });
+    const components = buttonRows(
+      actionButton({ command: 'automod', action: 'qlift', args: [message.author.id], label: 'Lever la quarantaine', emoji: ICONS.unlock, style: ButtonStyle.Success }),
+      actionButton({ command: 'automod', action: 'qban', args: [message.author.id], label: 'Bannir', emoji: ICONS.ban, style: ButtonStyle.Danger }),
+      historyButton(message.author.id),
+    );
+    await this.logging.send(guild.id, 'automod', embed, components, { event: 'automod', channelId: message.channel?.id });
+  }
+
+  /**
+   * Supprime les messages récents d'un membre (suivis en mémoire) dans tous les salons.
+   * @param {{ extra?: Array<{ channelId: string, messageId: string }>, exclude?: string[] }} [opts]
+   * @returns {Promise<{ count: number, channels: number }>}
+   */
+  async purgeRecent(guild, userId, windowMs, { extra = [], exclude = [] } = {}) {
+    const state = this.tracker.get(this.#key(guild.id, userId));
+    const now = Date.now();
+    const skip = new Set(exclude);
+    const byChannel = new Map();
+    for (const p of [...(state?.posted ?? []).filter((x) => now - x.at < windowMs), ...extra]) {
+      if (!p?.messageId || !p.channelId || skip.has(p.messageId)) continue;
+      skip.add(p.messageId);
+      if (!byChannel.has(p.channelId)) byChannel.set(p.channelId, []);
+      byChannel.get(p.channelId).push(p.messageId);
+    }
+    let count = 0;
+    let channels = 0;
+    for (const [channelId, ids] of byChannel) {
+      const ch = guild.channels?.cache?.get(channelId);
+      if (!ch?.messages) continue;
+      for (const id of ids) this.logging?.suppressMessage?.(id);
+      let n = 0;
+      if (ids.length > 1 && typeof ch.bulkDelete === 'function') {
+        n = await ch.bulkDelete(ids, true).then((r) => r?.size ?? ids.length, () => 0);
+      }
+      // Suppression unitaire : un seul message, ou suppression groupée refusée.
+      if (!n) for (const id of ids) n += await ch.messages.delete(id).then(() => 1, () => 0);
+      count += n;
+      if (n) channels += 1;
+    }
+    if (state?.posted) state.posted = state.posted.filter((p) => !skip.has(p.messageId));
+    return { count, channels };
   }
 
   /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean }} */
@@ -472,4 +684,21 @@ class AutoModService {
   }
 }
 
-module.exports = { AutoModService, mostSevere, escalationStep, messageText, severity, blockedLinks, blockedInvites, DUPLICATE_WINDOW_MS, BURST_WINDOW_MS };
+module.exports = {
+  AutoModService,
+  mostSevere,
+  escalationStep,
+  messageText,
+  severity,
+  blockedLinks,
+  blockedInvites,
+  isFilterExempt,
+  effectiveFilters,
+  attachmentsFingerprint,
+  falsePositiveButton,
+  ACTION_LABELS,
+  BUILTIN_ALLOWED_HOSTS,
+  QUARANTINE_ROLES_FIELD,
+  DUPLICATE_WINDOW_MS,
+  BURST_WINDOW_MS,
+};

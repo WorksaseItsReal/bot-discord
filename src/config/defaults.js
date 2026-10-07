@@ -71,7 +71,7 @@ const defaultGuildConfig = Object.freeze({
       blockInvites: true,
       blockMedia: false,
     },
-    // Chaque filtre : { enabled, action, ...seuils }. action : delete | warn | timeout
+    // Chaque filtre : { enabled, action, ...seuils }. action : delete | warn | timeout | kick (antiHacked : quarantine)
     filters: {
       antiSpam: { enabled: false, limit: 5, windowSeconds: 5, action: 'timeout', duration: '5m' },
       antiFlood: { enabled: false, limit: 7, windowSeconds: 10, action: 'delete' },
@@ -87,7 +87,14 @@ const defaultGuildConfig = Object.freeze({
       antiDuplicate: { enabled: false, action: 'delete' },
       antiWall: { enabled: false, maxLines: 15, maxLength: 1500, action: 'delete' },
       antiZalgo: { enabled: false, action: 'delete' },
+      // Compte piraté : même lot de pièces jointes ou même message dans `channels` salons en
+      // `windowSeconds` s, ou lien d'arnaque d'un score ≥ `scamScore`. Action « quarantine » :
+      // timeout (`duration`) + suppression de ses messages des `purgeMinutes` dernières minutes
+      // (+ retrait des rôles si `removeRoles`, rendus à la levée).
+      antiHacked: { enabled: false, channels: 3, windowSeconds: 60, minLength: 20, scamScore: 5, action: 'quarantine', duration: '1d', purgeMinutes: 10, removeRoles: false },
     },
+    // Exemptions propres à un filtre (en plus des exemptions globales) : chaque filtre accepte
+    // `exemptChannels: []` et `exemptRoles: []` (réglables dans la vue du filtre).
   },
   antiraid: {
     enabled: false,

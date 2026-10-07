@@ -116,6 +116,31 @@ function imitatesBrand(host, extraAllowed = []) {
   return null;
 }
 
+/** Lien Markdown « [texte](url) » (avec ou sans chevrons autour de l'URL). */
+const MASKED_RE = /\[([^\[\]\n]{1,200})\]\(\s*<?(https?:\/\/[^\s<>()]+)>?(?:\s+"[^"]*")?\s*\)/gi;
+
+/** Même site (égal ou sous-domaine l'un de l'autre). */
+const sameSite = (a, b) => a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+
+/**
+ * Liens masqués trompeurs : le texte affiché ressemble à un domaine (« discord.com/gift »)
+ * différent de la vraie cible (« https://evil.ru »). « [clique ici](…) » n'est pas concerné,
+ * ni un texte qui désigne le même site, ni une cible officielle ou autorisée. Pur.
+ * @returns {Array<{ shown: string, host: string }>}
+ */
+function maskedLinks(text, allowedDomains = []) {
+  const out = [];
+  for (const m of String(text ?? '').matchAll(MASKED_RE)) {
+    const target = extractLinks(m[2])[0];
+    if (!target || isOfficial(target.host, allowedDomains)) continue;
+    // Le texte doit lui-même désigner un site, et aucun ne doit correspondre à la cible.
+    const shown = extractLinks(m[1]);
+    if (!shown.length || shown.some((l) => sameSite(l.host, target.host))) continue;
+    out.push({ shown: shown[0].host, host: target.host });
+  }
+  return out;
+}
+
 /**
  * @param {string} text
  * @param {{ mentionsEveryone?: boolean, allowedDomains?: string[] }} [ctx]
@@ -150,6 +175,11 @@ function phishingScore(text, ctx = {}) {
       reasons.push(`lien raccourci ou traceur (${l.host})`);
     }
   }
+  // « [discord.com/gift](https://evil.ru) » : le texte affiché ment sur la destination.
+  for (const m of maskedLinks(text, allowed)) {
+    linkScore += 3;
+    reasons.push(`lien masqué (affiche « ${m.shown} » mais mène à ${m.host})`);
+  }
   score += linkScore;
   // Les indices de texte ne comptent que si un lien est déjà suspect : un lien officiel
   // accompagné de « gratuit » ou « vite » n'est pas une arnaque.
@@ -171,4 +201,4 @@ function phishingScore(text, ctx = {}) {
   return { score, reasons: [...new Set(reasons)], links };
 }
 
-module.exports = { phishingScore, imitatesBrand, isOfficial, distance, OFFICIAL, KNOWN_LEGIT, SHORTENERS };
+module.exports = { phishingScore, maskedLinks, imitatesBrand, isOfficial, distance, OFFICIAL, KNOWN_LEGIT, SHORTENERS };
