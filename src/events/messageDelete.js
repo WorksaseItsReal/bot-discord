@@ -28,6 +28,6 @@ module.exports = {
       ],
       id: author?.id ?? message.id,
     });
-    await client.services.logging.send(message.guild.id, 'messages', embed);
+    await client.services.logging.send(message.guild.id, 'messages', embed, undefined, { event: 'messageDelete', channelId: message.channelId, parentId: message.channel?.parentId, bot: message.author?.bot });
   },
 };

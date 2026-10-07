@@ -365,7 +365,7 @@ class AutoModService {
         : null,
       historyButton(message.author.id),
     );
-    await this.logging.send(guild.id, 'automod', embed, components);
+    await this.logging.send(guild.id, 'automod', embed, components, { event: 'automod', channelId: message.channel?.id });
   }
 
   /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean }} */

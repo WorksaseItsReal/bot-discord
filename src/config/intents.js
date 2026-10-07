@@ -11,7 +11,8 @@ const { GatewayIntentBits, Partials } = require('discord.js');
  *  - GuildMessages .............. réception des messages (automod, logs messages).
  *  - MessageContent ............. contenu des messages (automod: liens, mots interdits). [Privilégié]
  *  - GuildVoiceStates ........... gestion vocale (déplacement, logs vocaux, vocaux temporaires).
- *  - DirectMessages ............. base pour un futur ModMail (DM -> staff).
+ *  - DirectMessages ............. ModMail (DM -> staff).
+ *  - GuildExpressions ........... logs des emojis ajoutés / supprimés.
  *
  * Les intents "Privilégiés" (GuildMembers, MessageContent) doivent être
  * activés dans le Developer Portal (Bot > Privileged Gateway Intents).
@@ -24,6 +25,7 @@ const intents = [
   GatewayIntentBits.MessageContent,
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.DirectMessages,
+  GatewayIntentBits.GuildExpressions,
 ];
 
 const partials = [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.User];

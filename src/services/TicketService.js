@@ -200,8 +200,7 @@ class TicketService {
         title: 'Ticket ouvert',
         description: `${userLine(user)} a ouvert un ticket : ${channel}.`,
         fields: [field(ICONS.id, 'Ticket', code(`#${ticket.id}`)), field(ICONS.channel, 'Salon', `${channel}`)],
-      }),
-    );
+      }), undefined, { event: 'ticket' });
     return channel;
   }
 

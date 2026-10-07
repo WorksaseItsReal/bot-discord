@@ -32,6 +32,6 @@ module.exports = {
         wide('➡️', 'Après', newMessage.content ? truncate(newMessage.content, 1024) : '*Vide*'),
       ],
     });
-    await client.services.logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)));
+    await client.services.logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)), { event: 'messageEdit', channelId: newMessage.channelId, parentId: newMessage.channel?.parentId, bot: newMessage.author?.bot });
   },
 };

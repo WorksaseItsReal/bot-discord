@@ -1,21 +1,14 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { progressBar } = require('../../utils/embeds');
 const { card, field, wide, blank, subtext, status, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 
-/** Catégories de logs → libellé et icône affichés. */
-const LOG_CATEGORIES = Object.freeze({
-  moderation: { label: 'Modération', emoji: '🔨' },
-  messages: { label: 'Messages', emoji: ICONS.channel },
-  members: { label: 'Membres', emoji: ICONS.members },
-  roles: { label: 'Rôles', emoji: ICONS.role },
-  channels: { label: 'Salons', emoji: ICONS.category },
-  voice: { label: 'Vocal', emoji: ICONS.voice },
-  security: { label: 'Sécurité', emoji: ICONS.shield },
-  automod: { label: 'AutoMod', emoji: ICONS.automod },
-});
+/** Catégories de logs → libellé et icône (catalogue commun, cf. /logs). */
+const LOG_CATEGORIES = Object.freeze(
+  Object.fromEntries(Object.entries(require('../../utils/logCatalog').LOG_CATEGORIES).map(([k, c]) => [k, { label: c.label, emoji: c.emoji }])),
+);
 
 const ACTION_LABELS = { warn: `${ICONS.warn} Avertissement`, mute: `${ICONS.mute} Mute`, timeout: `${ICONS.mute} Exclusion temporaire`, kick: `${ICONS.kick} Expulsion`, ban: `${ICONS.ban} Bannissement`, tempban: `${ICONS.ban} Ban temporaire` };
 
@@ -111,7 +104,7 @@ function renderDashboard(guild, cfg) {
     ],
     thumbnail: guild.iconURL?.({ size: 128 }) ?? null,
     fields,
-    footer: 'Modifier : /settings logs · /settings moderation',
+    footer: 'Modifier : /logs · /settings moderation',
   });
 }
 
@@ -134,7 +127,7 @@ function renderLogs(guild, cfg) {
       subtext(`${ON} opérationnel · ${ICONS.warning} accès refusé · ${ICONS.error} introuvable · ${UNSET} non défini`),
     ],
     fields: entries.map((e) => field(e.meta.emoji, e.meta.label, `${e.dot} ${e.text}`)),
-    footer: 'Modifier : /settings logs categorie:… salon:…',
+    footer: 'Tout se configure dans /logs (bouton ci-dessous)',
   });
 }
 
@@ -189,19 +182,6 @@ module.exports = {
     .addSubcommand((s) => s.setName('view').setDescription('Affiche la configuration actuelle.'))
     .addSubcommand((s) =>
       s
-        .setName('logs')
-        .setDescription('Définit le salon de logs d\'une catégorie.')
-        .addStringOption((o) =>
-          o.setName('categorie').setDescription('Catégorie de logs').setRequired(true).addChoices(
-            ...Object.entries(LOG_CATEGORIES).map(([value, c]) => ({ name: c.label, value })),
-          ),
-        )
-        .addChannelOption((o) =>
-          o.setName('salon').setDescription('Salon cible (laisser vide pour désactiver).').addChannelTypes(ChannelType.GuildText),
-        ),
-    )
-    .addSubcommand((s) =>
-      s
         .setName('moderation')
         .setDescription('Règle les options de modération.')
         .addBooleanOption((o) => o.setName('dm_sanction').setDescription('Envoyer un DM au membre sanctionné.'))
@@ -216,32 +196,6 @@ module.exports = {
 
     if (sub === 'view') {
       return interaction.reply({ ...dashboardView(guild, config.get(guild.id)), ephemeral: true });
-    }
-
-    if (sub === 'logs') {
-      const category = interaction.options.getString('categorie');
-      const meta = LOG_CATEGORIES[category];
-      if (!meta) throw new UserError('Catégorie de logs inconnue.');
-      const channel = interaction.options.getChannel('salon');
-      const cfg = config.update(guild.id, { logChannels: { [category]: channel?.id ?? null } });
-      const [dot] = logChannelState(guild, cfg.logChannels[category]);
-      const blocked = channel && dot !== ON;
-      return interaction.reply({
-        embeds: [
-          card({
-            tone: blocked ? 'warning' : channel ? 'success' : 'neutral',
-            section: 'configuration',
-            icon: channel ? ICONS.success : ICONS.list,
-            title: channel ? 'Salon de logs défini' : 'Logs désactivés',
-            description: channel
-              ? [`Les logs **${meta.label}** seront envoyés dans ${channel}.`, blocked ? `${ICONS.warning} Je ne peux pas écrire dans ce salon : accordez-moi **Voir le salon**, **Envoyer des messages** et **Intégrer des liens**.` : null]
-              : `Les logs **${meta.label}** ne sont plus envoyés.`,
-            fields: [field(meta.emoji, 'Catégorie', meta.label), field(ICONS.channel, 'Salon', channel ? `${channel}` : UNSET), field(ICONS.status, 'État', `${dot} ${channel ? (blocked ? 'À corriger' : 'Opérationnel') : 'Désactivé'}`)],
-          }),
-        ],
-        components: buttonRows(actionButton({ command: 'settings', action: 'logs', label: 'Tous les logs', emoji: ICONS.list })),
-        ephemeral: true,
-      });
     }
 
     if (sub === 'moderation') {
@@ -289,7 +243,13 @@ module.exports = {
     /** cmd:settings:logs — détail des salons de logs. */
     async logs(interaction, client) {
       assertManageGuild(interaction);
-      await interaction.update({ embeds: [renderLogs(interaction.guild, client.services.config.get(interaction.guildId))], components: tabsFor('logs') });
+      await interaction.update({
+        embeds: [renderLogs(interaction.guild, client.services.config.get(interaction.guildId))],
+        components: [
+          ...tabsFor('logs'),
+          ...buttonRows(actionButton({ command: 'logs', action: 'go', args: ['home'], label: 'Configurer les logs', emoji: '📋', style: ButtonStyle.Primary })),
+        ],
+      });
     },
     /** cmd:settings:moderation — options de modération et paliers de strikes. */
     async moderation(interaction, client) {

@@ -250,7 +250,7 @@ class AntiRaidService {
       const channel = await this.client.channels.fetch(alertChannelId).catch(() => null);
       if (channel?.isTextBased()) await channel.send({ embeds: [embed], components }).catch(() => {});
     }
-    await this.logging.send(guild.id, 'security', embed, components);
+    await this.logging.send(guild.id, 'security', embed, components, { event: 'antiraid' });
   }
 }
 

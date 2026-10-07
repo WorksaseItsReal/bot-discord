@@ -28,6 +28,6 @@ module.exports = {
         wide(ICONS.role, `Rôles (${roles.length})`, fitList(roles) ?? '*Aucun*'),
       ],
     });
-    await client.services.logging.send(member.guild.id, 'members', embed);
+    await client.services.logging.send(member.guild.id, 'members', embed, undefined, { event: 'memberLeave' });
   },
 };

@@ -42,8 +42,7 @@ module.exports = [
             field(ICONS.count, 'Position', `${role.position}`),
           ],
           id: role.id,
-        }),
-      );
+        }), undefined, { event: 'roleCreate' });
     },
   },
   {
@@ -65,8 +64,7 @@ module.exports = [
             field(ICONS.moderator, 'Par', executor ? `<@${executor}>` : '*Inconnu*'),
           ],
           id: role.id,
-        }),
-      );
+        }), undefined, { event: 'roleDelete' });
     },
   },
   {
@@ -86,8 +84,7 @@ module.exports = [
       await client.services.logging.send(
         newR.guild.id,
         'roles',
-        logCard({ category: 'roles', tone: 'info', icon: ICONS.role, title: 'Rôle modifié', description: `Le rôle ${newR} a été modifié.`, fields, id: newR.id }),
-      );
+        logCard({ category: 'roles', tone: 'info', icon: ICONS.role, title: 'Rôle modifié', description: `Le rôle ${newR} a été modifié.`, fields, id: newR.id }), undefined, { event: 'roleUpdate' });
     },
   },
 ];

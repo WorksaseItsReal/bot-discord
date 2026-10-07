@@ -15,11 +15,12 @@ module.exports = {
 
     let log = null;
     if (!oldState.channelId && newState.channelId) {
-      log = { tone: 'success', title: 'Connexion vocale', description: `${user} a rejoint ${newState.channel}.`, fields: [field(ICONS.voice, 'Salon', `${newState.channel}`)] };
+      log = { event: 'voiceJoin', tone: 'success', title: 'Connexion vocale', description: `${user} a rejoint ${newState.channel}.`, fields: [field(ICONS.voice, 'Salon', `${newState.channel}`)] };
     } else if (oldState.channelId && !newState.channelId) {
-      log = { tone: 'neutral', title: 'Déconnexion vocale', description: `${user} a quitté ${oldState.channel}.`, fields: [field(ICONS.voice, 'Salon', `${oldState.channel}`)] };
+      log = { event: 'voiceLeave', tone: 'neutral', title: 'Déconnexion vocale', description: `${user} a quitté ${oldState.channel}.`, fields: [field(ICONS.voice, 'Salon', `${oldState.channel}`)] };
     } else if (oldState.channelId !== newState.channelId) {
       log = {
+        event: 'voiceMove',
         tone: 'info',
         title: 'Changement de salon vocal',
         description: `${user} est passé de ${oldState.channel} à ${newState.channel}.`,
@@ -31,7 +32,6 @@ module.exports = {
     await client.services.logging.send(
       newState.guild.id,
       'voice',
-      logCard({ category: 'voice', icon: ICONS.voice, user, ...log, fields: [field(ICONS.user, 'Membre', userLine(user)), ...log.fields] }),
-    );
+      logCard({ category: 'voice', icon: ICONS.voice, user, tone: log.tone, title: log.title, description: log.description, fields: [field(ICONS.user, 'Membre', userLine(user)), ...log.fields] }), undefined, { event: log.event });
   },
 };

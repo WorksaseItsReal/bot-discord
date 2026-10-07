@@ -30,6 +30,6 @@ module.exports = {
         recent ? wide(ICONS.warning, 'Compte récent', `Ce compte a moins de ${NEW_ACCOUNT_DAYS} jours.`) : null,
       ],
     });
-    await client.services.logging.send(member.guild.id, 'members', embed);
+    await client.services.logging.send(member.guild.id, 'members', embed, undefined, { event: 'memberJoin' });
   },
 };

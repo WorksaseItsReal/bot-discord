@@ -20,6 +20,15 @@ Ce projet suit un versionnage sémantique.
     menu, réglage de chaque filtre (activation, sanction, durée, seuil, fenêtre), listes par formulaire,
     sanctions progressives, nouveaux venus, notifications, salons/rôles ignorés par sélecteurs natifs,
     préréglages, test d'un message, statistiques, synchronisation avec l'AutoMod natif de Discord.
+- **Logs refondus** :
+  - **`/logs`**, tableau de bord unique : état de chaque catégorie (salon supprimé, permission manquante,
+    pause), salon par sélecteur, événements cochés un par un, pause par catégorie ou globale, logs de test ;
+  - **création automatique des salons** : catégorie « 📋 Logs » privée, disposition au choix (un salon par
+    catégorie, trois regroupés, un seul), rôle staff en lecture seule, relance sans doublon, suppression ;
+  - options : ignorer les bots, ignorer des salons ou des catégories (fils compris) ;
+  - 9 catégories et 29 événements : nouveaux logs des rôles et pseudos des membres, boosts,
+    suppressions en masse, fils, paramètres du serveur, emojis (intent GuildExpressions) ;
+  - jamais de log sur l'activité des salons de logs eux-mêmes ; `/settings logs` remplacé par `/logs`.
 - Migrations #4 (décisions de suggestions) et #5 (journal AutoMod, gagnants de giveaways).
 
 ### Fixed

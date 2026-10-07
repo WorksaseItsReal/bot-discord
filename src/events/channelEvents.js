@@ -64,8 +64,7 @@ module.exports = [
             field(ICONS.category, 'Catégorie', parentLabel(channel)),
           ],
           id: channel.id,
-        }),
-      );
+        }), undefined, { event: 'channelCreate' });
     },
   },
   {
@@ -99,8 +98,7 @@ module.exports = [
             field(ICONS.moderator, 'Par', executor ? `<@${executor}>` : '*Inconnu*'),
           ],
           id: channel.id,
-        }),
-      );
+        }), undefined, { event: 'channelDelete' });
     },
   },
   {
@@ -120,8 +118,7 @@ module.exports = [
           description: `Le salon ${newC} a été modifié.`,
           fields: changes,
           id: newC.id,
-        }),
-      );
+        }), undefined, { event: 'channelUpdate' });
     },
   },
 ];

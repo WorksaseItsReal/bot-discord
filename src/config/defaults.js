@@ -16,6 +16,19 @@ const defaultGuildConfig = Object.freeze({
     voice: null,
     security: null,
     automod: null,
+    server: null,
+  },
+  // Réglages des logs (/logs). Les salons par catégorie sont dans logChannels.
+  logs: {
+    enabled: true,
+    disabledEvents: [],      // événements désactivés (clés de utils/logCatalog.js)
+    disabledCategories: [],  // catégories en pause (le salon est conservé)
+    ignoredChannels: [],     // messages de ces salons (et de leurs fils) non journalisés
+    ignoreBots: true,        // messages des bots non journalisés
+    staffRoleId: null,       // rôle qui peut lire les salons de logs créés automatiquement
+    categoryId: null,        // catégorie « Logs » créée automatiquement
+    createdChannels: [],     // salons créés par le bot (pour le nettoyage)
+    setup: { layout: 'perCategory', categories: ['moderation', 'messages', 'members', 'roles', 'channels', 'voice', 'security', 'automod', 'server'] },
   },
   moderation: {
     dmOnSanction: true,

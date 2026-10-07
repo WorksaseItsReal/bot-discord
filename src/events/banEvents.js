@@ -45,8 +45,7 @@ module.exports = [
             field(ICONS.moderator, 'Par', executor ? `<@${executor}>` : '*Inconnu*'),
             wide(ICONS.reason, 'Raison', ban.reason ? truncate(ban.reason, 1024) : '*Aucune raison fournie*'),
           ],
-        }),
-      );
+        }), undefined, { event: 'manualBan' });
     },
   },
   {
@@ -71,8 +70,7 @@ module.exports = [
             field(ICONS.user, 'Membre', userLine(ban.user)),
             field(ICONS.moderator, 'Par', executor ? `<@${executor}>` : '*Inconnu*'),
           ],
-        }),
-      );
+        }), undefined, { event: 'manualBan' });
     },
   },
   {

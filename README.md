@@ -4,12 +4,12 @@
 
 **Le bot Discord tout-en-un pour administrer, modérer, sécuriser et animer votre serveur.**
 
-67 slash commands · plus de 140 actions · embeds soignés · multi-serveurs · 100 % en français
+68 slash commands · plus de 140 actions · embeds soignés · multi-serveurs · 100 % en français
 
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-embarqu%C3%A9-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-252%20verts-57F287)
+![Tests](https://img.shields.io/badge/tests-259%20verts-57F287)
 ![Licence](https://img.shields.io/badge/licence-MIT-lightgrey)
 
 </div>
@@ -21,6 +21,7 @@
 - [Points forts](#-points-forts)
 - [Projets : la vitrine de votre serveur](#-projets--la-vitrine-de-votre-serveur)
 - [AutoMod](#-automod)
+- [Logs](#-logs)
 - [Toutes les commandes](#-toutes-les-commandes)
 - [Installation](#-installation)
 - [Premiers pas sur un serveur](#-premiers-pas-sur-un-serveur)
@@ -39,10 +40,10 @@
 | 🤖 **AutoMod** | 14 filtres résistants aux contournements, anti-arnaques, détection des comptes piratés, sanctions progressives, AutoMod natif Discord. |
 | 🛡️ **Sécurité** | AntiRaid (vagues d'arrivées, comptes récents, suppressions en masse), whitelist, verrouillage d'urgence. |
 | 🎫 **Communauté** | Tickets avec transcript, ModMail, giveaways, suggestions avec votes, menus de rôles, sondages. |
-| 📋 **Logs** | Modération, membres, messages, rôles, salons, vocaux, bans, automod, sécurité. |
+| 📋 **Logs** | 9 catégories et 29 événements activables un par un, tableau de bord `/logs` et création automatique des salons. |
 | 💾 **Backups** | Sauvegarde et restauration de la structure du serveur, permissions comprises. |
 | 🎨 **Design soigné** | Chaque réponse est un embed cohérent, avec des boutons utiles et un bouton 🗑️ sur les réponses publiques. |
-| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, 252 tests automatiques. |
+| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, 259 tests automatiques. |
 
 ---
 
@@ -126,6 +127,33 @@ Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, a
 | 🧱 AutoMod de Discord | Synchroniser les règles natives, qui bloquent avant l'envoi même bot hors ligne. |
 | 🎚️ Préréglages | Faible, Équilibré ou Strict en un clic, sans toucher à vos listes. |
 | 📊 Statistiques | Infractions sur 24 h, 7 ou 30 jours, par filtre et par membre. |
+
+---
+
+## 📋 Logs
+
+**Un seul tableau de bord : `/logs`**
+
+| Section | Ce qu'on y fait |
+| --- | --- |
+| 🏠 Accueil | État de chaque catégorie (🟢 actif, ❌ salon supprimé, 🔒 permission manquante, ⏸️ en pause), pause globale, test. |
+| 🔨 💬 👥 … Catégories | Choisir le salon, cocher les événements à journaliser, mettre en pause, envoyer un log de test. |
+| ⚡ Création automatique | Crée une catégorie **📋 Logs** privée et ses salons : un par catégorie, trois regroupés ou un seul. Le rôle staff choisi peut lire sans écrire. Relancer complète sans dupliquer ; suppression en deux clics. |
+| ⚙️ Options | Ignorer les messages des bots, ignorer des salons ou des catégories entières (fils compris). |
+
+**Ce qui est journalisé**
+
+| Catégorie | Événements |
+| --- | --- |
+| 🔨 Modération | Sanctions, levées de sanction, bans/débans manuels, tickets |
+| 💬 Messages | Suppressions, modifications, suppressions en masse |
+| 👥 Membres | Arrivées, départs, rôles ajoutés/retirés, pseudos, boosts |
+| 🎭 Rôles | Créations, suppressions, modifications (permissions comprises) |
+| 🗂️ Salons | Salons et fils créés, supprimés, modifiés |
+| 🔊 Vocal | Connexions, déconnexions, changements de salon |
+| 🛡️ Sécurité | Alertes AntiRaid, verrouillages |
+| 🤖 AutoMod | Messages filtrés et sanctions automatiques |
+| 🏠 Serveur | Paramètres du serveur, emojis ajoutés/supprimés |
 
 ---
 
@@ -235,11 +263,12 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 </details>
 
 <details>
-<summary><b>⚙️ Configuration</b> (4) 🔒</summary>
+<summary><b>⚙️ Configuration</b> (5) 🔒</summary>
 
 | Commande | Description |
 | --- | --- |
-| `/settings` | Salons de logs par catégorie, options de modération. |
+| `/logs` | Tableau de bord des logs : salons, événements, création automatique des salons. |
+| `/settings` | Vue d'ensemble de la configuration, options de modération. |
 | `/diagnostics` | Analyse la configuration et signale les permissions manquantes. |
 | `/backup` | Sauvegarde, restauration et sauvegarde automatique de la structure du serveur. |
 | `/health` | État technique du bot : latence, base de données, services. |
@@ -300,6 +329,7 @@ Dans le Developer Portal, onglet **Bot**, activez les deux intents privilégiés
 | `MessageContent` 🔒 | Contenu des messages : AutoMod, logs d'édition. |
 | `GuildVoiceStates` | Vocaux temporaires, gestion et logs vocaux. |
 | `DirectMessages` | ModMail. |
+| `GuildExpressions` | Logs des emojis. |
 
 ### Inviter le bot
 
@@ -311,7 +341,7 @@ Placez ensuite le rôle du bot **au-dessus** des rôles qu'il doit gérer : Disc
 ## 🧭 Premiers pas sur un serveur
 
 1. **`/diagnostics`** vérifie les permissions et la position du rôle du bot.
-2. **`/settings logs`** choisit un salon pour chaque catégorie de logs.
+2. **`/logs`** puis **⚡ Création automatique** crée et branche tous les salons de logs en un clic.
 3. **`/automod`** : choisissez le préréglage **Équilibré**, puis synchronisez l'**AutoMod de Discord** ; ensuite **`/antiraid enable`**.
 4. **`/ticket setup`** puis **`/ticket panel`** installent le support par tickets.
 5. **`/projet config`** règle le module projets, puis **`/projet creer`** crée votre premier projet.
@@ -329,7 +359,7 @@ Chaque interaction passe par une couche de sûreté commune, avant même d'attei
 - **Résistance aux pannes** : bans temporaires et giveaways repris après un redémarrage, reconnexion automatique, arrêt propre.
 
 ```bash
-npm test        # 252 tests, dont la validation des 67 commandes contre les limites de Discord
+npm test        # 259 tests, dont la validation des 68 commandes contre les limites de Discord
 npm run check   # healthcheck : base, commandes, événements, sans connexion
 ```
 

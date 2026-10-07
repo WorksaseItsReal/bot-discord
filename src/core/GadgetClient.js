@@ -40,6 +40,7 @@ const { BackupService } = require('../services/BackupService');
 const { ModmailService } = require('../services/ModmailService');
 const { TempVoiceService } = require('../services/TempVoiceService');
 const { ProjectService } = require('../services/ProjectService');
+const { LogSetupService } = require('../services/LogSetupService');
 
 const logger = createLogger('client');
 
@@ -112,6 +113,7 @@ class GadgetClient extends Client {
       modmail: new ModmailService({ client: this, modmail: this.repositories.modmail, config: configService }),
       tempVoice: new TempVoiceService({ tempVoice: this.repositories.tempVoice, config: configService }),
       projects: new ProjectService({ client: this, projects: this.repositories.projects, config: configService }),
+      logSetup: new LogSetupService({ config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));

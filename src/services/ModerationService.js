@@ -387,7 +387,7 @@ class ModerationService {
     if (!role || !targetMember.roles.cache.has(role.id)) throw new UserError('Ce membre n\'est pas mute.');
     await targetMember.roles.remove(role, reason || undefined);
     this.#deactivateActive(guild.id, targetMember.id, 'mute');
-    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }));
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true };
   }
 
@@ -423,7 +423,7 @@ class ModerationService {
       expiresAt,
     });
 
-    await this.logging.send(guild.id, 'moderation', sanctionCard({ id, type, user: targetUser, moderator, reason, durationMs, expiresAt }));
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ id, type, user: targetUser, moderator, reason, durationMs, expiresAt }), undefined, { event: 'sanction' });
     return { id, expiresAt };
   }
 
@@ -450,7 +450,7 @@ class ModerationService {
     }
     await targetMember.timeout(null, reason || undefined);
     this.#deactivateActive(guild.id, targetMember.id, 'timeout');
-    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'untimeout', user: targetMember.user, moderator, reason }));
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'untimeout', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true };
   }
 
@@ -511,7 +511,7 @@ class ModerationService {
     await this.#asBot('unban', guild.id, user.id, () => guild.bans.remove(user.id, reason || undefined));
     // Désactive les bans temporaires actifs correspondants
     this.#deactivateActive(guild.id, user.id, 'tempban');
-    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId: user.id, moderator, reason }));
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId: user.id, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true, user };
   }
 

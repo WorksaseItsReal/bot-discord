@@ -210,7 +210,7 @@ class LockdownService {
   async enable(guild, moderator, reason = 'Lockdown', { log = true } = {}) {
     const channels = [...guild.channels.cache.values()].filter((c) => LOCKABLE_TYPES.has(c.type) && c.manageable);
     const n = await inBatches(channels, (c) => this.lockChannel(c, moderator, reason, { scope: SCOPES.lockdown }));
-    if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }));
+    if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }), undefined, { event: 'lockdown' });
     return n;
   }
 
@@ -229,7 +229,7 @@ class LockdownService {
       await this.unlockChannel(channel, 'Fin du lockdown');
       return true;
     });
-    await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }));
+    await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }), undefined, { event: 'lockdown' });
     return n;
   }
 
