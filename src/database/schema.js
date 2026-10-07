@@ -262,6 +262,44 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 7,
+    name: 'sanction_cases',
+    up: `
+      -- Fiches de sanction : qui a levé la sanction, quand et pourquoi ; message de log associé.
+      ALTER TABLE sanctions ADD COLUMN revoked_by TEXT;
+      ALTER TABLE sanctions ADD COLUMN revoked_at INTEGER;
+      ALTER TABLE sanctions ADD COLUMN revoke_reason TEXT;
+      ALTER TABLE sanctions ADD COLUMN log_channel_id TEXT;
+      ALTER TABLE sanctions ADD COLUMN log_message_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_sanctions_guild_user_type ON sanctions (guild_id, user_id, type, created_at);
+
+      -- Historique des modifications de raison (l'ancienne raison est conservée).
+      CREATE TABLE IF NOT EXISTS sanction_edits (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        sanction_id INTEGER NOT NULL REFERENCES sanctions(id) ON DELETE CASCADE,
+        guild_id    TEXT NOT NULL,
+        editor_id   TEXT NOT NULL,
+        old_reason  TEXT,
+        new_reason  TEXT,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sanction_edits_sanction ON sanction_edits (guild_id, sanction_id, created_at);
+
+      -- Notes de modération internes (sans effet sur le membre), éventuellement liées à une sanction.
+      CREATE TABLE IF NOT EXISTS mod_notes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id    TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        author_id   TEXT NOT NULL,
+        sanction_id INTEGER REFERENCES sanctions(id) ON DELETE SET NULL,
+        content     TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mod_notes_user ON mod_notes (guild_id, user_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_mod_notes_sanction ON mod_notes (guild_id, sanction_id);
+    `,
+  },
 ];
 
 module.exports = { migrations };
