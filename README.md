@@ -22,8 +22,10 @@
 - [Projets : la vitrine de votre serveur](#-projets--la-vitrine-de-votre-serveur)
 - [AutoMod](#-automod)
 - [Logs](#-logs)
+- [Accueil, niveaux et vocaux](#-accueil-niveaux-et-vocaux)
 - [Toutes les commandes](#-toutes-les-commandes)
 - [Installation](#-installation)
+- [Exploitation : Docker, supervision, sauvegardes](#-exploitation--docker-supervision-sauvegardes)
 - [Premiers pas sur un serveur](#-premiers-pas-sur-un-serveur)
 - [Fiabilité](#%EF%B8%8F-fiabilité)
 - [Architecture](#-architecture)
@@ -36,14 +38,17 @@
 | | |
 | --- | --- |
 | 📁 **Projets** | Fiches de projet en embed avec progression, équipe, tâches et liens, mises à jour en direct. |
-| 🔨 **Modération complète** | Ban, tempban, mute, timeout, warn avec strikes et escalade automatique, historique persistant. |
-| 🤖 **AutoMod** | 14 filtres résistants aux contournements, anti-arnaques, détection des comptes piratés, sanctions progressives, AutoMod natif Discord. |
-| 🛡️ **Sécurité** | AntiRaid (vagues d'arrivées, comptes récents, suppressions en masse), whitelist, verrouillage d'urgence. |
-| 🎫 **Communauté** | Tickets avec transcript, ModMail, giveaways, suggestions avec votes, menus de rôles, sondages. |
+| 🔨 **Modération complète** | Ban, tempban, mute, timeout, warn avec strikes et escalade, fiches de sanction, raisons modifiables, notes internes. |
+| 🤖 **AutoMod** | 15 filtres résistants aux contournements, anti-arnaques (liens masqués compris), quarantaine des comptes piratés, bouton « Faux positif », exemptions par filtre, AutoMod natif Discord. |
+| 🛡️ **Sécurité** | Tableau de bord `/antiraid` (vagues d'arrivées, comptes récents, suppressions en masse, simulation), whitelist, verrouillage d'urgence. |
+| 👋 **Accueil** | Bienvenue et départ personnalisés, rôles automatiques, vérification anti-robot par bouton. |
+| 📈 **Niveaux** | XP par message et en vocal, rôles de récompense, classement, tableau de bord `/niveaux`. |
+| 🎫 **Communauté** | Tickets configurables avec `/tickets` (motifs, panneau, statistiques), ModMail avec transcript, giveaways, suggestions, menus de rôles, sondages. |
+| 🔊 **Vocaux temporaires** | Panneau de contrôle dans le chat du vocal : verrou, nom, limite, expulsion, transfert, débit, région. |
 | 📋 **Logs** | 9 catégories et 29 événements activables un par un, tableau de bord `/logs` et création automatique des salons. |
 | 💾 **Backups** | Sauvegarde et restauration de la structure du serveur, permissions comprises. |
 | 🎨 **Design soigné** | Chaque réponse est un embed cohérent, avec des boutons utiles et un bouton 🗑️ sur les réponses publiques. |
-| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, 259 tests automatiques. |
+| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, plus de 470 tests automatiques, CI GitHub Actions. |
 
 ---
 
@@ -97,7 +102,8 @@ Un AutoMod pensé pour les vraies attaques, pas seulement les gros mots.
 
 | Filtre | Ce qu'il bloque |
 | --- | --- |
-| 🎣 Anti-arnaques | Faux « Nitro gratuit », faux domaines Discord/Steam (`dlscord-gift.com`, `steamcornmunity.ru`), punycode, liens raccourcis piégés. |
+| 🎣 Anti-arnaques | Faux « Nitro gratuit », faux domaines Discord/Steam (`dlscord-gift.com`, `dіscord.com` en cyrillique, `steamcommunity.co`), liens déguisés (`https://discord.com@evil.ru`), liens masqués (`[discord.com/gift](https://evil.ru)`), punycode, liens raccourcis piégés. |
+| 🦠 Compte piraté | Mêmes fichiers ou même message dans plusieurs salons, ou lien d'arnaque très probable : **quarantaine** (timeout, suppression des messages récents partout, retrait facultatif des rôles rendus à la levée) et alerte avec « Lever la quarantaine » / « Bannir ». |
 | 🏴‍☠️ Spam multi-salons | Le même message posté dans plusieurs salons en quelques secondes : signe typique d'un **compte piraté**. Toutes les copies sont supprimées. |
 | 🚫 Mots interdits | Résiste aux contournements : `c0n`, `cooon`, `c.o.n`, `c o n`, accents, lettres cyrilliques identiques, caractères invisibles. `mot*` bloque aussi les dérivés. Sans faux positif sur « conseil » ou « classe ». |
 | 🔗 Liens et ✉️ invitations | Liens avec ou sans `https://`, invitations masquées (`discord . gg / code`), listes blanches de domaines et d'invitations. |
@@ -110,7 +116,8 @@ Un AutoMod pensé pour les vraies attaques, pas seulement les gros mots.
 - **Sanctions progressives** : 3 infractions en 30 minutes donnent un timeout de 10 minutes, 5 un timeout d'une heure, 8 une expulsion. Le compteur survit aux redémarrages.
 - **Nouveaux venus** : liens, invitations et fichiers bloqués pour les comptes récents ou les membres tout juste arrivés.
 - **Prévenir le membre** : message dans le salon supprimé après 8 secondes, ou message privé.
-- **Logs détaillés** : règle déclenchée, indices, sanction, boutons « Retirer le timeout » et « Sanctions ».
+- **Logs détaillés** : règle déclenchée, indices, sanction, boutons « Retirer le timeout », « Sanctions » et **« Faux positif »** (l'infraction sort du compteur, le timeout est levé, le domaine ou le mot est corrigé en un clic, le message peut être renvoyé à son auteur en MP).
+- **Rafales** : un compte qui poste 20 fois n'est sanctionné qu'une fois, et un timeout plus long n'est jamais raccourci.
 
 **Un seul tableau de bord : `/automod`**
 
@@ -119,7 +126,7 @@ Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, a
 | Section | Ce qu'on y fait |
 | --- | --- |
 | 🏠 Accueil | Vue d'ensemble, activer/désactiver, tester un message, préréglages. |
-| 🛡️ 💬 ✍️ Filtres | Choisir un filtre, l'activer, choisir sa sanction, régler durée, seuil et fenêtre. |
+| 🛡️ 💬 ✍️ Filtres | Choisir un filtre, l'activer, choisir sa sanction (jusqu'à l'expulsion), régler durée, seuil et fenêtre, salons et rôles exemptés **pour ce filtre seulement** (ex. liens autorisés dans #médias). |
 | 📋 Listes | Ajouter ou retirer des mots interdits, des domaines et des invitations autorisés. |
 | 📈 Sanctions progressives | Activer, régler la fenêtre et les paliers (`3=timeout 10m, 8=kick`). |
 | 🐣 Nouveaux venus | Âge du compte, ancienneté, blocage des liens, invitations et fichiers. |
@@ -160,6 +167,26 @@ Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, a
 
 ---
 
+## 👋 Accueil, niveaux et vocaux
+
+**`/bienvenue`** (Gérer le serveur) règle tout l'accueil depuis un tableau de bord :
+
+- **Bienvenue et départ** : salon, titre, texte, couleur, bannière ; variables `{membre}`, `{pseudo}`, `{serveur}`, `{nombre}`, `{compte}` ; mention du membre et copie en MP facultatives ; aperçu et envoi de test.
+- **Rôles automatiques** séparés humains / bots (10 chacun), hiérarchie vérifiée, rôles Administrateur refusés.
+- **Vérification par bouton** : rôle « vérifié » donné (ou « non vérifié » retiré), question anti-robot (petit calcul ou mot à recopier), âge minimal du compte, log « Vérifications réussies ». Les rôles automatiques ne sont donnés qu'après vérification.
+- L'accueil passe **après l'AntiRaid** (un raider puni ne reçoit rien) et attend l'acceptation de l'écran d'adhésion Discord ; @everyone et @here ne sont jamais mentionnés.
+
+**Niveaux et XP** (désactivés par défaut) — `/niveaux` (Gérer le serveur) :
+
+- 15 à 25 XP par message, une fois par minute et par membre (réglable) ; les bots, messages de moins de 3 caractères et messages supprimés par l'AutoMod ne comptent pas.
+- XP vocale optionnelle : par minute passée micro ouvert, à plusieurs, hors salon AFK.
+- Annonces de niveau (même salon, salon dédié, MP ou désactivées ; `{membre}`, `{niveau}`), rôles de récompense cumulatifs ou seulement le plus haut, multiplicateurs par rôle, salons et rôles exclus, gestion de l'XP (donner, retirer, définir, importer, réinitialiser).
+- Les membres consultent leur carte avec **`/rang [membre]`** et le classement paginé avec **`/classement`**.
+
+**Vocaux temporaires** — rejoindre le salon créateur crée un vocal personnel (permissions de la catégorie conservées), supprimé quand il est vide. Un **panneau de contrôle** est posté dans son chat : 🔒 verrouiller, 👁️ masquer, ✏️ renommer, 👥 limite, 🚪 expulser, ⛔ bannir du salon, ✅ autoriser, 👑 transférer, 🙋 réclamer, 🎚️ débit, 🌍 région. Seuls le propriétaire et les modérateurs s'en servent ; les noms sont filtrés (mots interdits de l'AutoMod compris). Le nom, la limite et le verrou sont mémorisés pour les prochains vocaux. `/tempvoice config` règle le salon créateur, la catégorie, le nom par défaut (`{pseudo}`, `{username}`, `{n}`) et la limite.
+
+---
+
 ## 📚 Toutes les commandes
 
 Tapez `/help` sur Discord pour un menu interactif, ou `/help commande:<nom>` pour le détail d'une commande.
@@ -191,7 +218,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/kick` | Expulsion d'un membre. |
 | `/warn` | Avertissement avec strikes et sanction automatique au palier atteint. |
 | `/mute` · `/unmute` · `/timeout` · `/untimeout` | Rendre muet par rôle ou par exclusion Discord, permanent ou temporaire. |
-| `/sanctions` | Historique d'un membre : `list`, `remove`, `clear`. |
+| `/sanctions` | Fiches et historique des sanctions : `voir`, `historique`, `raison`, `note`, `notes`, `remove`, `clear`. |
 | `/clear` | Suppression de messages en masse, filtrable par membre. |
 | `/lock` · `/unlock` · `/lockall` · `/unlockall` | Verrouillage d'un salon ou de tout le serveur, avec restauration exacte. |
 | `/hide` · `/unhide` | Masquer ou réafficher un salon. |
@@ -206,19 +233,21 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | Commande | Description |
 | --- | --- |
 | `/automod` | Tableau de bord interactif : tout l'AutoMod se configure avec des boutons, menus et formulaires. |
-| `/antiraid` | Vagues d'arrivées, âge minimum des comptes, anti-bot, suppressions en masse. |
+| `/antiraid` | Tableau de bord : vagues d'arrivées, comptes récents et bots, suppressions en masse, alertes, whitelist, préréglages, simulation. |
 | `/whitelist` | Membres et rôles de confiance, ignorés par l'AntiRaid. |
 | `/lockdown` | Verrouillage d'urgence de tout le serveur, puis restauration. |
 
 </details>
 
 <details>
-<summary><b>🎫 Communauté</b> (9)</summary>
+<summary><b>🎫 Communauté</b> (11)</summary>
 
 | Commande | Description |
 | --- | --- |
-| `/ticket` | Tickets de support : panel à bouton, prise en charge, transcript, ajout de membres. |
-| `/modmail` | Les membres écrivent au bot en MP, le staff répond depuis un salon privé. |
+| `/tickets` 🔒 | Tableau de bord des tickets : catégorie, staff, transcripts, motifs, panneau, statistiques. |
+| `/ticket` | Actions dans un ticket : fermer (avec confirmation), prendre en charge, transcript, ajouter, retirer, renommer. |
+| `/bienvenue` 🔒 | Messages de bienvenue et de départ, rôles automatiques, vérification par bouton. |
+| `/modmail` | Les membres écrivent au bot en MP, le staff répond depuis un salon privé ; transcript à la fermeture. |
 | `/giveaway` 🔒 | Concours avec participation par bouton, fin automatique et nouveau tirage. |
 | `/suggestion` | Idées de la communauté avec votes 👍/👎, acceptées ou refusées par le staff. |
 | `/rolemenu` 🔒 | Menu de rôles que les membres s'attribuent eux-mêmes. |
@@ -233,7 +262,18 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | Commande | Description |
 | --- | --- |
 | `/voice` | Déplacer, expulser, rendre muet ou vider un salon vocal. |
-| `/tempvoice` | Salons vocaux temporaires : rejoindre un salon en crée un, supprimé quand il est vide. |
+| `/tempvoice` | Salons vocaux temporaires avec panneau de contrôle ; `config` ouvre le tableau de bord. |
+
+</details>
+
+<details>
+<summary><b>📈 Niveaux</b> (3)</summary>
+
+| Commande | Description |
+| --- | --- |
+| `/rang` | Carte de niveau : XP, progression, rang, messages, minutes vocales. |
+| `/classement` | Classement paginé du serveur. |
+| `/niveaux` 🔒 | Tableau de bord : XP, annonces, récompenses, multiplicateurs, exclusions, gestion de l'XP. |
 
 </details>
 
@@ -341,13 +381,28 @@ Placez ensuite le rôle du bot **au-dessus** des rôles qu'il doit gérer : Disc
 
 ---
 
+## 🐳 Exploitation : Docker, supervision, sauvegardes
+
+- **Docker** : `Dockerfile` (image `node:22-bookworm-slim`, utilisateur non-root, base dans le volume `/app/data`) et `docker-compose.yml` d'exemple : copiez `.env.example` en `.env`, puis `docker compose up -d --build`.
+- **Supervision** : définissez `HEALTH_PORT` pour activer `GET /healthz` (200 quand le bot est connecté et que la base répond, 503 sinon) et `GET /metrics` (métriques Prometheus : serveurs, latence, mémoire, commandes). Laissez-le sur `127.0.0.1` ou un réseau privé.
+- **Logs JSON** : `LOG_FORMAT=json` produit une ligne JSON par entrée (Loki, ELK, Datadog…), secrets masqués.
+- **Sauvegardes** : `npm run backup:db` crée une copie cohérente de la base dans `data/backups/` (14 conservées, `DB_BACKUP_KEEP`) ; avec `DB_BACKUP_INTERVAL_HOURS=24`, le bot sauvegarde lui-même chaque jour.
+- **Déploiement des commandes** : `npm run deploy -- --dry-run` affiche ce qui serait envoyé sans rien changer ; `--clear-guild` vide les commandes du serveur de test.
+- **CI** : GitHub Actions lance les tests et le healthcheck sur Node 20 et 22, puis construit l'image Docker, à chaque push.
+
+---
+
 ## 🧭 Premiers pas sur un serveur
 
 1. **`/diagnostics`** vérifie les permissions et la position du rôle du bot.
 2. **`/logs`** puis **⚡ Création automatique** crée et branche tous les salons de logs en un clic.
-3. **`/automod`** : choisissez le préréglage **Équilibré**, puis synchronisez l'**AutoMod de Discord** ; ensuite **`/antiraid enable`**.
-4. **`/ticket setup`** puis **`/ticket panel`** installent le support par tickets.
-5. **`/projet config`** règle le module projets, puis **`/projet creer`** crée votre premier projet.
+3. **`/automod`** : choisissez le préréglage **Équilibré**, puis synchronisez l'**AutoMod de Discord** ; ensuite **`/antiraid`** → préréglage **Équilibré** et activation.
+4. **`/bienvenue`** : salon d'accueil, rôles automatiques et, si besoin, vérification par bouton.
+5. **`/tickets`** : catégorie, staff, motifs, puis **Publier le panneau**.
+6. **`/niveaux`** et **`/tempvoice config`** si vous voulez l'XP et les vocaux temporaires.
+7. **`/projet config`** règle le module projets, puis **`/projet creer`** crée votre premier projet.
+
+> Donnez au bot **Gérer les rôles** (rôle placé au-dessus des rôles à attribuer), **Gérer les salons**, **Déplacer des membres** et **Voir les logs du serveur** : `/invite` génère un lien avec toutes ces permissions.
 
 ---
 

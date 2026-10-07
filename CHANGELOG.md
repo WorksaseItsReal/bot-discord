@@ -3,6 +3,39 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.5.0] — Non publié — Accueil, niveaux, tableaux de bord et exploitation
+
+### Added
+- **`/bienvenue`** : messages de bienvenue et de départ personnalisables (variables, couleur, bannière, MP,
+  aperçu), rôles automatiques humains/bots avec contrôle de hiérarchie, vérification par bouton
+  (question anti-robot, âge minimal du compte, log « Vérifications réussies »), intégrée après l'AntiRaid.
+- **Niveaux / XP** : `/rang`, `/classement` paginé et tableau de bord `/niveaux` (XP par message et en vocal,
+  annonces, récompenses de rôle, multiplicateurs, exclusions, gestion et import de l'XP), désactivé par défaut.
+- **Tableaux de bord `/antiraid`** (remplace enable/disable/status/set ; simulation, préréglages, test
+  d'alerte, whitelist) et **`/tickets`** (catégorie, staff, transcripts, motifs, panneau, statistiques) ;
+  `/ticket setup|panel` redirigent, la fermeture d'un ticket par bouton demande confirmation.
+- **Vocaux temporaires** : panneau de contrôle dans le chat du vocal (verrou, visibilité, nom filtré,
+  limite, expulsion, bannissement, autorisation, transfert, réclamation, débit, région), préférences
+  mémorisées par propriétaire, tableau de bord `/tempvoice config`.
+- **Sanctions** : fiches (`/sanctions voir`), historique paginé et filtrable avec résumé, raisons
+  modifiables avec historique et mise à jour du log, notes de modération internes, bouton Lever,
+  « Historique de modération » dans `/user`, levées tracées (qui, quand, pourquoi).
+  `/sanctions list` devient `/sanctions historique`.
+- **AutoMod** : liens masqués trompeurs, bouton « Faux positif » sur les logs (correctifs en un clic,
+  renvoi en MP), filtre « Compte piraté » avec quarantaine, exemptions par filtre, sanction « Expulsion ».
+- **Exploitation** : CI GitHub Actions (Node 20/22 + image Docker), `Dockerfile` multi-étapes et
+  `docker-compose.yml`, `/healthz` et `/metrics` (`HEALTH_PORT`), logs JSON (`LOG_FORMAT=json`),
+  sauvegarde SQLite `npm run backup:db` avec rotation et sauvegarde automatique (`DB_BACKUP_INTERVAL_HOURS`).
+- `/settings` : raccourcis vers les tableaux de bord AutoMod, AntiRaid, Tickets, Bienvenue et Niveaux.
+- Migrations #6 (niveaux), #7 (fiches de sanction, notes), #9 (panneau et préférences des vocaux).
+
+### Changed
+- Le propriétaire d'un vocal temporaire n'a plus « Gérer les salons » (renommage uniquement par le panneau, filtré).
+- `/unban` marque aussi les bans définitifs comme levés dans l'historique.
+
+### Security
+- Le routeur de boutons refuse les noms hérités d'`Object.prototype` (`constructor`, `__proto__`…).
+
 ## [0.4.0] — Non publié — Design, boutons et AutoMod v2
 
 ### Added
