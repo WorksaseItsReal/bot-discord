@@ -157,10 +157,28 @@ function errorRef() {
   return Date.now().toString(36).slice(-4).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
 }
 
+/**
+ * Envoie la carte d'erreur. Après une confirmation (« exécution en cours… »),
+ * remplace ce message plutôt que d'en ajouter un second.
+ */
+async function respondError(interaction, payload) {
+  const pending = interaction.pendingConfirmation;
+  if (pending?.message) {
+    interaction.pendingConfirmation = null;
+    try {
+      await interaction.editReply({ embeds: payload.embeds, components: [], message: pending.message.id });
+      return;
+    } catch {
+      /* message supprimé ou interaction expirée : on retombe sur une réponse classique */
+    }
+  }
+  await safeRespond(interaction, payload);
+}
+
 async function reportError(client, interaction, err, source) {
   const isUserError = err instanceof UserError || err?.isUserError;
   if (isUserError) {
-    await safeRespond(interaction, errorReply(err.message));
+    await respondError(interaction, errorReply(err.message));
     return;
   }
 
@@ -174,12 +192,12 @@ async function reportError(client, interaction, err, source) {
   const ref = errorRef();
   if (api.friendly) {
     logger.warn(`${source} [${ref}] : ${err?.message ?? err}`);
-    await safeRespond(interaction, errorReply(api.friendly, { footer: `Réf. ${ref}` }));
+    await respondError(interaction, errorReply(api.friendly, { footer: `Réf. ${ref}` }));
     return;
   }
 
   logger.error(`${source} [${ref}] erreur inattendue :`, err);
-  await safeRespond(
+  await respondError(
     interaction,
     errorReply(`Une erreur inattendue est survenue. Réessayez dans un instant.\nSi le problème persiste, communiquez la référence \`${ref}\` à un administrateur.`, {
       footer: `Réf. ${ref}`,

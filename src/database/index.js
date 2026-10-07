@@ -29,6 +29,12 @@ class DatabaseManager {
     }
     this.db = new Database(this.filePath);
     this.db.pragma('journal_mode = WAL');
+    // WAL + NORMAL : écritures bien plus rapides, sans risque de corruption (seule la
+    // dernière transaction peut être perdue en cas de coupure de courant).
+    this.db.pragma('synchronous = NORMAL');
+    // Attend jusqu'à 5 s au lieu d'échouer immédiatement si la base est verrouillée
+    // (ex : sauvegarde externe ou script de migration lancé en parallèle).
+    this.db.pragma('busy_timeout = 5000');
     this.db.pragma('foreign_keys = ON');
     this.migrate();
     logger.info(`Base de données prête (${this.filePath})`);

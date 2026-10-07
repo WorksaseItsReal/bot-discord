@@ -1,20 +1,21 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
+const { wsLatency } = require('../../utils/latency');
 const { card, field, ICONS, actionButton, deleteButton, buttonRows, ButtonStyle, subtext } = require('../../utils/ui');
 const { progressBar } = require('../../utils/embeds');
 const { assertInvoker } = require('../../utils/buttonGuard');
 
 /** Qualité de la latence → [emoji, libellé, ton]. Pur. */
 function quality(ms) {
-  if (ms < 0) return ['⚪', 'Inconnue', 'neutral'];
+  if (!Number.isFinite(ms) || ms < 0) return ['⚪', 'Inconnue', 'neutral'];
   if (ms < 150) return ['🟢', 'Excellente', 'success'];
   if (ms < 300) return ['🟡', 'Correcte', 'warning'];
   return ['🔴', 'Élevée', 'danger'];
 }
 
 function render(client, ownerId, roundtrip) {
-  const ws = Math.round(client.ws.ping);
+  const ws = wsLatency(client);
   const worst = Math.max(roundtrip ?? 0, ws);
   const [dot, label, tone] = quality(worst);
   return {

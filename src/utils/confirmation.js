@@ -53,6 +53,9 @@ async function confirm(interaction, opts) {
       components: [],
     })
     .catch(() => {});
+  // Si l'action échoue ensuite, le gestionnaire d'erreurs remplacera ce message
+  // « exécution en cours » par la carte d'erreur (au lieu d'un second message).
+  if (confirmed) interaction.pendingConfirmation = { message };
   return confirmed;
 }
 

@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, version: djsVersion } = require('discord.js');
+const { wsLatency } = require('../../utils/latency');
 const { card, field, wide, ICONS, subtext, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { formatDuration, discordTimestamp } = require('../../utils/time');
 const { assertInvoker } = require('../../utils/buttonGuard');
@@ -11,7 +12,7 @@ const fr = (n) => Number(n || 0).toLocaleString('fr-FR');
 function render(client, ownerId) {
   const mem = process.memoryUsage().rss / 1024 / 1024;
   const members = client.guilds.cache.reduce((n, g) => n + (g.memberCount || 0), 0);
-  const ws = Math.round(client.ws.ping);
+  const ws = wsLatency(client);
   return {
     embeds: [
       card({

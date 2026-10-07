@@ -226,6 +226,16 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks (project_id);
     `,
   },
+  {
+    id: 4,
+    name: 'suggestion_decisions',
+    up: `
+      -- Décision du staff sur une suggestion (raison + auteur), conservée en base.
+      ALTER TABLE suggestions ADD COLUMN decision_reason TEXT;
+      ALTER TABLE suggestions ADD COLUMN decided_by TEXT;
+      ALTER TABLE suggestions ADD COLUMN decided_at INTEGER;
+    `,
+  },
 ];
 
 module.exports = { migrations };

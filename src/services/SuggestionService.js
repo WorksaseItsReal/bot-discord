@@ -54,6 +54,8 @@ class SuggestionService {
   render(s, tally, { avatar, decision } = {}) {
     const meta = STATUS[s.status] ?? { pill: s.status, tone: 'info', label: s.status };
     const closed = s.status !== 'pending';
+    // Décision conservée en base : réaffichée même si le message est re-rendu plus tard.
+    if (closed && !decision && (s.decision_reason || s.decided_by)) decision = { reason: s.decision_reason, by: s.decided_by };
     const thumbnail = avatar ?? this.client?.users?.cache?.get(s.author_id)?.displayAvatarURL?.({ size: 128 }) ?? null;
     const fields = [
       field(ICONS.user, 'Auteur', `<@${s.author_id}>`),
@@ -135,7 +137,7 @@ class SuggestionService {
   async setStatus(guild, suggestionId, status, decision = {}) {
     const s = this.suggestions.get(suggestionId);
     if (!s || s.guild_id !== guild.id) throw new UserError('Suggestion introuvable sur ce serveur.');
-    this.suggestions.setStatus(suggestionId, status);
+    this.suggestions.setStatus(suggestionId, status, decision);
     const updated = this.suggestions.get(suggestionId);
     const tally = this.suggestions.tally(suggestionId);
     const channel = await guild.channels.fetch(s.channel_id).catch(() => null);

@@ -11,7 +11,9 @@ class SuggestionRepository {
     this.byIdStmt = db.prepare('SELECT * FROM suggestions WHERE id = ?');
     this.byMessageStmt = db.prepare('SELECT * FROM suggestions WHERE message_id = ?');
     this.listStmt = db.prepare('SELECT * FROM suggestions WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?');
-    this.setStatusStmt = db.prepare('UPDATE suggestions SET status = ? WHERE id = ?');
+    this.setStatusStmt = db.prepare(
+      'UPDATE suggestions SET status = @status, decision_reason = @reason, decided_by = @by, decided_at = @at WHERE id = @id',
+    );
     this.deleteStmt = db.prepare('DELETE FROM suggestions WHERE id = ?');
     this.deleteVotesStmt = db.prepare('DELETE FROM suggestion_votes WHERE suggestion_id = ?');
     this.voteStmt = db.prepare(
@@ -52,8 +54,20 @@ class SuggestionRepository {
     return this.deleteStmt.run(id).changes > 0;
   }
 
-  setStatus(id, status) {
-    this.setStatusStmt.run(status, id);
+  /**
+   * @param {number} id
+   * @param {string} status pending | approved | denied
+   * @param {{ reason?: string|null, by?: string|null }} [decision] raison et auteur (mention) de la décision
+   */
+  setStatus(id, status, decision = {}) {
+    const decided = status !== 'pending';
+    this.setStatusStmt.run({
+      id,
+      status,
+      reason: decided ? decision.reason ?? null : null,
+      by: decided ? decision.by ?? null : null,
+      at: decided ? Date.now() : null,
+    });
   }
 
   vote(id, userId, value) {

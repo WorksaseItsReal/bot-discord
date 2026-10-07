@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, version: djsVersion } = require('discord.js');
+const { wsLatency } = require('../../utils/latency');
 const { formatDuration } = require('../../utils/time');
 const { card, field, subtext, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { assertInvoker } = require('../../utils/buttonGuard');
@@ -26,7 +27,7 @@ function latencyState(ms) {
 
 function render(client, ownerId) {
   const db = probeDatabase(client);
-  const ws = Math.round(client.ws.ping);
+  const ws = wsLatency(client);
   const [wsDot, wsLabel] = latencyState(ws);
   const schedulerOn = Boolean(client.services.scheduler?.timer);
   const mem = process.memoryUsage();
