@@ -36,18 +36,44 @@ const defaultGuildConfig = Object.freeze({
     enabled: false,
     ignoredChannels: [],
     ignoredRoles: [],
-    // Chaque filtre : { enabled, action, ...seuils }. action: delete|warn|timeout
+    // Prévenir le membre : 'channel' (message éphémère dans le salon, supprimé après quelques
+    // secondes), 'dm' (message privé) ou 'none'.
+    notify: 'channel',
+    // Sanctions progressives : au-delà de N infractions dans la fenêtre, la sanction monte.
+    escalation: {
+      enabled: true,
+      windowMinutes: 30,
+      steps: [
+        { count: 3, action: 'timeout', duration: '10m' },
+        { count: 5, action: 'timeout', duration: '1h' },
+        { count: 8, action: 'kick', duration: null },
+      ],
+    },
+    // Restrictions des nouveaux venus (comptes récents ou arrivés depuis peu).
+    newMembers: {
+      enabled: false,
+      accountAgeDays: 7,
+      joinedMinutes: 30,
+      blockLinks: true,
+      blockInvites: true,
+      blockMedia: false,
+    },
+    // Chaque filtre : { enabled, action, ...seuils }. action : delete | warn | timeout
     filters: {
       antiSpam: { enabled: false, limit: 5, windowSeconds: 5, action: 'timeout', duration: '5m' },
       antiFlood: { enabled: false, limit: 7, windowSeconds: 10, action: 'delete' },
-      antiLink: { enabled: false, action: 'delete' },
-      antiInvite: { enabled: false, action: 'delete' },
+      antiLink: { enabled: false, action: 'delete', allowedDomains: [] },
+      antiInvite: { enabled: false, action: 'delete', allowedCodes: [], allowOwnServer: true },
+      antiPhishing: { enabled: false, threshold: 3, action: 'timeout', duration: '1d' },
+      antiCrossChannel: { enabled: false, channels: 3, windowSeconds: 60, minLength: 12, action: 'timeout', duration: '1h' },
       antiMassMention: { enabled: false, limit: 5, action: 'timeout', duration: '10m' },
       antiCaps: { enabled: false, percent: 70, minLength: 10, action: 'delete' },
       badWords: { enabled: false, words: [], action: 'delete' },
       antiRepeat: { enabled: false, action: 'delete' },
       antiEmojiSpam: { enabled: false, limit: 8, action: 'delete' },
       antiDuplicate: { enabled: false, action: 'delete' },
+      antiWall: { enabled: false, maxLines: 15, maxLength: 1500, action: 'delete' },
+      antiZalgo: { enabled: false, action: 'delete' },
     },
   },
   antiraid: {

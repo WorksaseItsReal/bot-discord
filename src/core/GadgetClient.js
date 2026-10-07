@@ -24,6 +24,7 @@ const { ModmailRepository } = require('../database/repositories/ModmailRepositor
 const { TempVoiceRepository } = require('../database/repositories/TempVoiceRepository');
 const { LockRepository } = require('../database/repositories/LockRepository');
 const { ProjectRepository } = require('../database/repositories/ProjectRepository');
+const { AutomodEventRepository } = require('../database/repositories/AutomodEventRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -88,18 +89,20 @@ class GadgetClient extends Client {
       tempVoice: new TempVoiceRepository(db),
       locks: new LockRepository(db),
       projects: new ProjectRepository(db),
+      automodEvents: new AutomodEventRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
     const logging = new LoggingService(this, configService);
     const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging });
+    const strikes = new StrikeService(this.repositories.strikes, configService);
     this.services = {
       config: configService,
       logging,
       moderation,
-      strikes: new StrikeService(this.repositories.strikes, configService),
+      strikes,
       scheduler: new SchedulerService({ client: this, sanctions: this.repositories.sanctions, reminders: this.repositories.reminders }),
-      automod: new AutoModService({ config: configService, logging, moderation }),
+      automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents }),
       antiraid: new AntiRaidService({ client: this, config: configService, logging }),
       lockdown: new LockdownService({ locks: this.repositories.locks, logging }),
       tickets: new TicketService({ tickets: this.repositories.tickets, config: configService, logging }),

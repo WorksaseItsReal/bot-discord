@@ -1,6 +1,9 @@
 'use strict';
 
 const { ChannelType } = require('discord.js');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('automod');
 
 module.exports = {
   name: 'messageCreate',
@@ -15,6 +18,6 @@ module.exports = {
     }
 
     // Serveur -> AutoMod
-    await client.services.automod.handleMessage(message).catch(() => {});
+    await client.services.automod.handleMessage(message).catch((err) => logger.warn(`Analyse impossible (${message.guild.id}) :`, err?.message));
   },
 };

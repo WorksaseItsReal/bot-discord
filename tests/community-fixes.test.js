@@ -72,8 +72,10 @@ test('GiveawayService.end : garde inter-serveurs, double fin, reroll, bots exclu
   const winners = await service.end(id, { guildId: 'g1' });
   assert.deepEqual(winners, ['u1']);
   await assert.rejects(service.end(id, { guildId: 'g1' }), /déjà terminé/);
-  const rerolled = await service.end(id, { reroll: true, guildId: 'g1' });
-  assert.deepEqual(rerolled, ['u1']);
+  // Le gagnant mémorisé est exclu de la relance : sans autre participant, pas de tirage.
+  await assert.rejects(service.end(id, { reroll: true, guildId: 'g1' }), /gagnants précédents/);
+  repo.toggleEntry(id, 'u2');
+  assert.deepEqual(await service.end(id, { reroll: true, guildId: 'g1' }), ['u2']);
 });
 
 test('GiveawayService.end : reroll sans participant éligible', async () => {

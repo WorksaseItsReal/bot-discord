@@ -18,8 +18,8 @@ Une fonctionnalité n'est marquée terminée que si elle fonctionne réellement.
 | 9 | Raffinements & compléments | 🚧 En cours (fiabilité, projets, cooldowns faits) |
 | 10+ | Plateforme (dashboard, API, IA…) | 🔒 Volontairement reporté |
 
-**Chiffres actuels** : 67 slash commands · 6 composants persistants · 25 événements ·
-3 migrations · 90 tests unitaires (verts). Dernière mise à jour : v0.3.0.
+**Chiffres actuels** : 67 slash commands · 7 composants persistants · 25+ événements ·
+5 migrations · 242 tests (verts). Dernière mise à jour : v0.4.0.
 
 ## Phase 1 — Foundation
 - [x] Architecture modulaire (core / config / database / services / utils / commands / events / components)

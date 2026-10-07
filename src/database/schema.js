@@ -236,6 +236,32 @@ const migrations = [
       ALTER TABLE suggestions ADD COLUMN decided_at INTEGER;
     `,
   },
+  {
+    id: 5,
+    name: 'automod_events_and_giveaway_winners',
+    up: `
+      -- Infractions AutoMod : sanctions progressives (persistantes) et statistiques.
+      CREATE TABLE IF NOT EXISTS automod_events (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        filter     TEXT NOT NULL,
+        action     TEXT NOT NULL,
+        channel_id TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_automod_events_user ON automod_events (guild_id, user_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_automod_events_guild ON automod_events (guild_id, created_at);
+
+      -- Gagnants tirés (premier tirage et relances) : une relance exclut tous les anciens gagnants.
+      CREATE TABLE IF NOT EXISTS giveaway_winners (
+        giveaway_id INTEGER NOT NULL,
+        user_id     TEXT NOT NULL,
+        drawn_at    INTEGER NOT NULL,
+        PRIMARY KEY (giveaway_id, user_id)
+      );
+    `,
+  },
 ];
 
 module.exports = { migrations };

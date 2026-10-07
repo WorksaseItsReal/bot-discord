@@ -9,7 +9,7 @@
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-embarqu%C3%A9-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-90%20verts-57F287)
+![Tests](https://img.shields.io/badge/tests-242%20verts-57F287)
 ![Licence](https://img.shields.io/badge/licence-MIT-lightgrey)
 
 </div>
@@ -20,6 +20,7 @@
 
 - [Points forts](#-points-forts)
 - [Projets : la vitrine de votre serveur](#-projets--la-vitrine-de-votre-serveur)
+- [AutoMod](#-automod)
 - [Toutes les commandes](#-toutes-les-commandes)
 - [Installation](#-installation)
 - [Premiers pas sur un serveur](#-premiers-pas-sur-un-serveur)
@@ -35,12 +36,13 @@
 | --- | --- |
 | 📁 **Projets** | Fiches de projet en embed avec progression, équipe, tâches et liens, mises à jour en direct. |
 | 🔨 **Modération complète** | Ban, tempban, mute, timeout, warn avec strikes et escalade automatique, historique persistant. |
-| 🤖 **AutoMod** | 10 filtres : spam, flood, liens, invitations, mentions, majuscules, mots interdits, répétitions, emojis, doublons. |
+| 🤖 **AutoMod** | 14 filtres résistants aux contournements, anti-arnaques, détection des comptes piratés, sanctions progressives, AutoMod natif Discord. |
 | 🛡️ **Sécurité** | AntiRaid (vagues d'arrivées, comptes récents, suppressions en masse), whitelist, verrouillage d'urgence. |
 | 🎫 **Communauté** | Tickets avec transcript, ModMail, giveaways, suggestions avec votes, menus de rôles, sondages. |
 | 📋 **Logs** | Modération, membres, messages, rôles, salons, vocaux, bans, automod, sécurité. |
 | 💾 **Backups** | Sauvegarde et restauration de la structure du serveur, permissions comprises. |
-| 🧠 **Fiable** | Aucune double réponse, erreurs expliquées en français, 90 tests automatiques. |
+| 🎨 **Design soigné** | Chaque réponse est un embed cohérent, avec des boutons utiles et un bouton 🗑️ sur les réponses publiques. |
+| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, 242 tests automatiques. |
 
 ---
 
@@ -85,6 +87,38 @@ La commande `/projet` transforme chaque projet en une fiche claire et vivante :
 | `publier` | Publie la fiche dans un salon, avec mise à jour automatique. |
 | `transferer` · `supprimer` | Change de responsable, ou supprime le projet après confirmation. |
 | `config` | Rôle gestionnaire, salon par défaut, création ouverte ou non, limite par membre. |
+
+## 🤖 AutoMod
+
+Un AutoMod pensé pour les vraies attaques, pas seulement les gros mots.
+
+**Ce qu'il détecte**
+
+| Filtre | Ce qu'il bloque |
+| --- | --- |
+| 🎣 Anti-arnaques | Faux « Nitro gratuit », faux domaines Discord/Steam (`dlscord-gift.com`, `steamcornmunity.ru`), punycode, liens raccourcis piégés. |
+| 🏴‍☠️ Spam multi-salons | Le même message posté dans plusieurs salons en quelques secondes : signe typique d'un **compte piraté**. Toutes les copies sont supprimées. |
+| 🚫 Mots interdits | Résiste aux contournements : `c0n`, `cooon`, `c.o.n`, `c o n`, accents, lettres cyrilliques identiques, caractères invisibles. `mot*` bloque aussi les dérivés. Sans faux positif sur « conseil » ou « classe ». |
+| 🔗 Liens et ✉️ invitations | Liens avec ou sans `https://`, invitations masquées (`discord . gg / code`), listes blanches de domaines et d'invitations. |
+| 💬 Spam, flood, doublons, répétitions | Chaque filtre a sa propre fenêtre et son propre seuil. |
+| 📣 Mentions, 🔠 majuscules, 😀 emojis, 📜 pavés, 👾 zalgo | Messages pénibles ou illisibles. |
+| ↪️ Messages transférés | Le texte des messages transférés est analysé aussi (contournement courant). |
+
+**Ce qu'il fait ensuite**
+
+- **Sanctions progressives** : 3 infractions en 30 minutes donnent un timeout de 10 minutes, 5 un timeout d'une heure, 8 une expulsion. Le compteur survit aux redémarrages.
+- **Nouveaux venus** : liens, invitations et fichiers bloqués pour les comptes récents ou les membres tout juste arrivés.
+- **Prévenir le membre** : message dans le salon supprimé après 8 secondes, ou message privé.
+- **Logs détaillés** : règle déclenchée, indices, sanction, boutons « Retirer le timeout » et « Sanctions ».
+
+**Outils pour les administrateurs**
+
+| Commande | Utilité |
+| --- | --- |
+| `/automod preset` | Faible, Équilibré ou Strict en un clic, sans toucher à vos listes. |
+| `/automod test` | Montre quels filtres bloqueraient un message, sans sanction. |
+| `/automod stats` | Infractions par filtre, par action et membres les plus filtrés. |
+| `/automod discord` | Crée les règles de l'**AutoMod natif de Discord** : elles bloquent avant l'envoi, même quand le bot est hors ligne. |
 
 ---
 
@@ -133,7 +167,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 
 | Commande | Description |
 | --- | --- |
-| `/automod` | Active et règle les 10 filtres, salons et rôles ignorés, mots interdits. |
+| `/automod` | Panneau, préréglages, 14 filtres, testeur, statistiques, sanctions progressives, nouveaux venus, listes blanches, AutoMod natif. |
 | `/antiraid` | Vagues d'arrivées, âge minimum des comptes, anti-bot, suppressions en masse. |
 | `/whitelist` | Membres et rôles de confiance, ignorés par l'AntiRaid. |
 | `/lockdown` | Verrouillage d'urgence de tout le serveur, puis restauration. |
@@ -271,7 +305,7 @@ Placez ensuite le rôle du bot **au-dessus** des rôles qu'il doit gérer : Disc
 
 1. **`/diagnostics`** vérifie les permissions et la position du rôle du bot.
 2. **`/settings logs`** choisit un salon pour chaque catégorie de logs.
-3. **`/automod enable`** puis **`/antiraid enable`** activent la protection automatique.
+3. **`/automod preset niveau:Équilibré`** puis **`/automod discord action:Activer`** et **`/antiraid enable`** activent la protection automatique.
 4. **`/ticket setup`** puis **`/ticket panel`** installent le support par tickets.
 5. **`/projet config`** règle le module projets, puis **`/projet creer`** crée votre premier projet.
 
@@ -288,7 +322,7 @@ Chaque interaction passe par une couche de sûreté commune, avant même d'attei
 - **Résistance aux pannes** : bans temporaires et giveaways repris après un redémarrage, reconnexion automatique, arrêt propre.
 
 ```bash
-npm test        # 90 tests, dont la validation des 67 commandes contre les limites de Discord
+npm test        # 242 tests, dont la validation des 67 commandes contre les limites de Discord
 npm run check   # healthcheck : base, commandes, événements, sans connexion
 ```
 

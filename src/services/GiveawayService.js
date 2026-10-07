@@ -283,12 +283,14 @@ class GiveawayService {
 
     let entries = this.giveaways.entries(giveawayId);
     if (reroll) {
-      // Les gagnants précédents (lus sur la carte de fin) ne peuvent pas être retirés.
-      const previous = new Set(previousWinners(message));
+      // Tous les gagnants déjà tirés sont exclus : ceux mémorisés en base (premier tirage
+      // et relances) + ceux lus sur la carte de fin (giveaways antérieurs à la mémorisation).
+      const previous = new Set([...(this.giveaways.winners?.(giveawayId) ?? []), ...previousWinners(message)]);
       entries = entries.filter((id) => !previous.has(id));
     }
     const winners = await this.#drawWinners(entries, g.winners);
     if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll (les gagnants précédents sont exclus).');
+    this.giveaways.addWinners?.(giveawayId, winners);
 
     if (channel?.isTextBased()) {
       await channel.send(this.#announcement(g, winners, reroll)).catch(() => {});

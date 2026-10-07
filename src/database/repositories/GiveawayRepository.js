@@ -25,6 +25,12 @@ class GiveawayRepository {
     this.hasEntryStmt = db.prepare('SELECT 1 FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?');
     this.entriesStmt = db.prepare('SELECT user_id FROM giveaway_entries WHERE giveaway_id = ?');
     this.countEntriesStmt = db.prepare('SELECT COUNT(*) AS n FROM giveaway_entries WHERE giveaway_id = ?');
+    this.addWinnerStmt = db.prepare('INSERT OR IGNORE INTO giveaway_winners (giveaway_id, user_id, drawn_at) VALUES (?, ?, ?)');
+    this.winnersStmt = db.prepare('SELECT user_id FROM giveaway_winners WHERE giveaway_id = ?');
+    this.addWinnersTx = db.transaction((id, userIds) => {
+      const now = Date.now();
+      for (const u of userIds) this.addWinnerStmt.run(id, u, now);
+    });
   }
 
   create(data) {
@@ -73,6 +79,16 @@ class GiveawayRepository {
 
   entries(id) {
     return this.entriesStmt.all(id).map((r) => r.user_id);
+  }
+
+  /** Mémorise des gagnants tirés (premier tirage ou relance). */
+  addWinners(id, userIds) {
+    if (userIds?.length) this.addWinnersTx(id, userIds);
+  }
+
+  /** Tous les gagnants déjà tirés pour ce giveaway. */
+  winners(id) {
+    return this.winnersStmt.all(id).map((r) => r.user_id);
   }
 
   countEntries(id) {

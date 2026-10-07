@@ -3,6 +3,34 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.4.0] — Non publié — Design, boutons et AutoMod v2
+
+### Added
+- **Système de design** (`src/utils/ui.js`, `docs/DESIGN.md`) : palette sémantique, icônes uniques,
+  cartes homogènes ; toutes les commandes, logs, MP et panneaux migrés. Garde-fous en tests.
+- **Boutons d'action persistants** sur les commandes (actualiser, relancer, débannir, annuler,
+  sanctions, détails…) et bouton 🗑️ automatique sur les réponses publiques.
+- **AutoMod v2** :
+  - détection résistante aux contournements (leet, accents, homoglyphes, lettres espacées, invisibles) ;
+  - nouveaux filtres : anti-arnaques, spam multi-salons (comptes piratés), pavés, zalgo ;
+  - liens sans protocole et invitations masquées détectés, listes blanches ;
+  - messages transférés analysés ;
+  - sanctions progressives persistantes, protection des nouveaux venus, notification du membre ;
+  - `/automod preset`, `test`, `stats`, `escalade`, `nouveaux`, `notification`, `autoriser`, `discord`
+    (synchronisation avec l'AutoMod natif de Discord).
+- Migrations #4 (décisions de suggestions) et #5 (journal AutoMod, gagnants de giveaways).
+
+### Fixed
+- Boutons forgés : un clic n'est accepté que si le bouton existe sur le message ; arguments de
+  chemin refusés (détournement de « Débannir » en expulsion) ; identifiants validés.
+- Une erreur après la mise à jour d'un bouton n'écrase plus le message public.
+- Escalade des strikes soumise aux permissions du modérateur ; lockdown étendu aux fils et forums.
+- Logs de bans sans doublon, AntiRaid sans sous-comptage, `/hide` réversible.
+- AutoMod : messages modifiés de membres hors cache, fils de salons ignorés, suppression échouée
+  signalée, erreurs journalisées.
+- Giveaways : édition groupée (rate-limit), relance excluant tous les anciens gagnants.
+- Nombreuses requêtes SQL regroupées, latence inconnue gérée, migrations concurrentes sûres.
+
 ## [0.3.0] — Non publié — Fiabilité, projets et nouvelles commandes
 
 ### Added

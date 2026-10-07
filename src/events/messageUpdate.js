@@ -13,7 +13,7 @@ module.exports = {
     if (!oldMessage.partial && oldMessage.content === newMessage.content) return;
 
     // AutoMod sur le contenu édité (filtres de contenu uniquement)
-    await client.services.automod?.handleMessage(newMessage, { edited: true }).catch(() => {});
+    await client.services.automod?.handleMessage(newMessage, { edited: true }).catch((err) => client.logger?.warn?.('AutoMod (édition) :', err?.message));
 
     // Ancien message hors cache : contenu « avant » inconnu, rien d'utile à journaliser.
     if (oldMessage.partial) return;
