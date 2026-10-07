@@ -6,6 +6,11 @@ const { card, field, wide, ICONS, subtext, actionButton, linkButton, buttonRows 
 const { discordTimestamp } = require('../utils/time');
 const { pickWinners } = require('../utils/random');
 const { UserError } = require('../core/errors');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('giveaways');
+/** Plafond du nombre de gagnants d'un reroll (option `gagnants`). */
+const MAX_REROLL_WINNERS = 20;
 
 /** Délai de regroupement des mises à jour du compteur de participants. */
 const EDIT_DEBOUNCE_MS = 5_000;
@@ -46,6 +51,8 @@ class GiveawayService {
     this.pendingEdits = new Map();
     /** @type {Map<number, Promise<void>>} réactualisations en cours (end() les attend) */
     this.inflightEdits = new Map();
+    /** @type {Map<number, Promise<unknown>>} fin / reroll en cours, par giveaway (exécutés en série) */
+    this.locks = new Map();
   }
 
   /** Carte du giveaway en cours. */
@@ -117,7 +124,7 @@ class GiveawayService {
             section: 'giveaways',
             icon: ICONS.gift,
             title: 'Giveaway terminé sans gagnant',
-            description: `Personne n'a participé à **${truncate(g.prize, 200)}**.`,
+            description: `Aucun participant éligible pour **${truncate(g.prize, 200)}**.`,
             footer: `Giveaway #${g.id}`,
           }),
         ],
@@ -185,17 +192,30 @@ class GiveawayService {
     return g;
   }
 
-  /** Tire les gagnants en excluant les bots (et les comptes introuvables). */
-  async #drawWinners(entries, count) {
+  /**
+   * Tire les gagnants en excluant les bots, les comptes introuvables et, au
+   * moment du tirage, les membres partis du serveur ou qui ne remplissent plus
+   * les conditions de rôles (requis / interdit).
+   */
+  async #drawWinners(g, entries, count) {
     const shuffled = pickWinners(entries, entries.length);
+    const guild = this.client.guilds?.cache?.get?.(g.guild_id) ?? null;
     const winners = [];
     for (const userId of shuffled) {
       if (winners.length >= count) break;
       const user = await this.client.users.fetch(userId).catch(() => null);
       if (!user || user.bot) continue;
+      if (guild && !(await this.#isEligibleMember(guild, g, userId))) continue;
       winners.push(userId);
     }
     return winners;
+  }
+
+  /** Le participant est-il encore membre et conforme aux rôles requis / interdits ? */
+  async #isEligibleMember(guild, g, userId) {
+    const member = guild.members?.cache?.get(userId) ?? (await guild.members?.fetch?.(userId).catch(() => null));
+    if (!member) return false; // parti du serveur
+    return isEligible(g, member);
   }
 
   /**
@@ -263,17 +283,36 @@ class GiveawayService {
   }
 
   /**
-   * Termine (ou reroll) un giveaway.
+   * Termine (ou reroll) un giveaway. Les appels sur un même giveaway sont
+   * exécutés en série (verrou par giveaway) : deux rerolls simultanés ne
+   * peuvent pas tirer les mêmes gagnants.
    * @param {number} giveawayId
-   * @param {{ reroll?: boolean, guildId?: string }} [opts] guildId : serveur appelant (obligatoire côté commandes)
+   * @param {{ reroll?: boolean, guildId?: string, count?: number|null }} [opts]
+   *   guildId : serveur appelant (obligatoire côté commandes) ; count : nombre de gagnants d'un reroll
    */
-  async end(giveawayId, { reroll = false, guildId } = {}) {
+  async end(giveawayId, opts = {}) {
+    const previous = this.locks.get(giveawayId) ?? Promise.resolve();
+    const run = previous.catch(() => {}).then(() => this.#end(giveawayId, opts));
+    this.locks.set(giveawayId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.locks.get(giveawayId) === run) this.locks.delete(giveawayId);
+    }
+  }
+
+  async #end(giveawayId, { reroll = false, guildId, count = null } = {}) {
     const g = this.#getForGuild(giveawayId, guildId);
+    let entries = this.giveaways.entries(giveawayId);
+    let retry = false;
     if (reroll) {
       if (!g.ended) throw new UserError('Ce giveaway est encore en cours : terminez-le avant de faire un reroll.');
     } else if (!this.giveaways.markEnded(giveawayId)) {
       // Garde atomique : un seul appel (commande, scheduler…) peut terminer le giveaway.
-      throw new UserError('Ce giveaway est déjà terminé.');
+      // Exception (reprise) : terminé, avec des participants, mais aucun gagnant
+      // enregistré → l'annonce avait échoué ; on retente le tirage et l'annonce.
+      retry = entries.length > 0 && !(this.giveaways.winners?.(giveawayId) ?? []).length;
+      if (!retry) throw new UserError('Ce giveaway est déjà terminé.');
     }
     // Une édition « en direct » tardive ne doit jamais écraser la carte de fin.
     await this.#cancelEdit(giveawayId);
@@ -281,27 +320,49 @@ class GiveawayService {
     const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
     const message = g.message_id && channel?.messages ? await channel.messages.fetch(g.message_id).catch(() => null) : null;
 
-    let entries = this.giveaways.entries(giveawayId);
     if (reroll) {
       // Tous les gagnants déjà tirés sont exclus : ceux mémorisés en base (premier tirage
       // et relances) + ceux lus sur la carte de fin (giveaways antérieurs à la mémorisation).
       const previous = new Set([...(this.giveaways.winners?.(giveawayId) ?? []), ...previousWinners(message)]);
       entries = entries.filter((id) => !previous.has(id));
     }
-    const winners = await this.#drawWinners(entries, g.winners);
-    if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll (les gagnants précédents sont exclus).');
-    this.giveaways.addWinners?.(giveawayId, winners);
+    const wanted = reroll && count ? Math.min(Math.max(1, count), MAX_REROLL_WINNERS) : g.winners;
+    const winners = await this.#drawWinners(g, entries, wanted);
+    if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll (les gagnants précédents, les membres partis et ceux qui ne remplissent plus les conditions sont exclus).');
 
-    if (channel?.isTextBased()) {
-      await channel.send(this.#announcement(g, winners, reroll)).catch(() => {});
-      if (message && !reroll) await message.edit(this.renderEnded(g, winners)).catch(() => {});
+    // Les gagnants ne sont mémorisés qu'une fois l'annonce publiée : sinon
+    // /giveaway end peut la retenter (voir `retry` ci-dessus).
+    let announced = false;
+    if (channel?.isTextBased?.()) {
+      announced = await channel.send(this.#announcement(g, winners, reroll)).then(() => true, (err) => {
+        logger.warn(`Annonce du giveaway #${giveawayId} impossible :`, err?.message ?? err);
+        return false;
+      });
+    } else {
+      logger.warn(`Annonce du giveaway #${giveawayId} impossible : salon ${g.channel_id} introuvable ou non textuel.`);
     }
+    if (!announced) {
+      throw new UserError(reroll
+        ? 'Le nouveau tirage n\'a pas pu être annoncé (salon introuvable ou permissions manquantes). Corrigez puis relancez.'
+        : `Le giveaway est terminé mais l'annonce des gagnants a échoué (salon introuvable ou permissions manquantes). Corrigez puis relancez \`/giveaway end id:${giveawayId}\` pour retenter.`);
+    }
+    this.giveaways.addWinners?.(giveawayId, winners);
+    if (message && !reroll) await message.edit(this.renderEnded(g, winners)).catch(() => {});
+    if (retry) logger.info(`Giveaway #${giveawayId} : annonce retentée avec succès.`);
     return winners;
   }
 
   listActive(guildId) {
     return this.giveaways.listActive(guildId);
   }
+}
+
+/** Le membre remplit-il les conditions de rôles du giveaway ? Pur. */
+function isEligible(g, member) {
+  const has = (roleId) => Boolean(member?.roles?.cache?.has?.(roleId));
+  if (g.required_role && !has(g.required_role)) return false;
+  if (g.forbidden_role && has(g.forbidden_role)) return false;
+  return true;
 }
 
 /**
@@ -314,4 +375,4 @@ function previousWinners(message) {
   return [...fieldValue.matchAll(/<@!?(\d{17,20})>/g)].map((m) => m[1]);
 }
 
-module.exports = { GiveawayService, giveawayUrl, conditions, previousWinners, EDIT_DEBOUNCE_MS };
+module.exports = { GiveawayService, giveawayUrl, conditions, previousWinners, isEligible, EDIT_DEBOUNCE_MS, MAX_REROLL_WINNERS };

@@ -3,8 +3,12 @@
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const { truncate } = require('../utils/embeds');
 const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
-const { discordTimestamp } = require('../utils/time');
+const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
+const { fetchChannelHistory, channelGone, TRANSCRIPT_MAX } = require('./TicketService');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('modmail');
 
 /** Durée du cache négatif « aucun serveur ModMail commun ». */
 const NO_GUILD_TTL_MS = 10 * 60_000;
@@ -19,6 +23,37 @@ function attachmentsList(message) {
   const list = message.attachments ? [...message.attachments.values()] : [];
   if (!list.length) return null;
   return list.slice(0, 10).map((a) => `[${truncate(a.name ?? 'fichier', 60)}](${a.url})`).join('\n');
+}
+
+/**
+ * Une ligne de transcript : les messages ModMail sont surtout des cartes
+ * (messages relayés, réponses du staff), on reprend donc leur en-tête et leur texte. Pur.
+ */
+function transcriptLine(m) {
+  const parts = [];
+  if (m.content) parts.push(m.content);
+  for (const e of m.embeds ?? []) {
+    const head = [e.author?.name ?? e.data?.author?.name, e.title ?? e.data?.title].filter(Boolean).join(' — ');
+    const body = e.description ?? e.data?.description;
+    parts.push(`[${head || 'embed'}]${body ? ` ${body.replace(/\s+/g, ' ')}` : ''}`);
+  }
+  const files = m.attachments?.size ? [...m.attachments.values()].map((a) => a.url) : [];
+  if (files.length) parts.push(`[pièces jointes : ${files.join(', ')}]`);
+  const at = new Date(m.createdTimestamp ?? Date.now()).toISOString();
+  return `[${at}] ${m.author?.tag ?? m.author?.username ?? 'inconnu'}: ${parts.join(' ')}`;
+}
+
+/** Transcript texte d'une conversation ModMail. Pur. */
+function buildTranscript(thread, channel, history) {
+  if (!history) return 'Transcript indisponible.';
+  const { messages, truncated } = history;
+  return [
+    `Transcript ModMail — #${channel?.name ?? thread.channel_id} (conversation #${thread.id}, utilisateur ${thread.user_id})`,
+    `Généré le ${new Date().toISOString()} · ${messages.length} message(s)`,
+    truncated ? `⚠ Transcript tronqué : seuls les ${messages.length} derniers messages sont inclus.` : null,
+    '─'.repeat(60),
+    ...messages.map(transcriptLine),
+  ].filter((l) => l !== null).join('\n');
 }
 
 /**
@@ -263,14 +298,20 @@ class ModmailService {
     });
   }
 
-  /** @returns {Promise<boolean>} false si la conversation était déjà fermée (double clic) */
-  async close(channel) {
+  /**
+   * @param {import('discord.js').TextChannel} channel
+   * @param {import('discord.js').User} [closedBy] auteur de la fermeture (pour l'archive)
+   * @returns {Promise<boolean>} false si la conversation était déjà fermée (double clic)
+   */
+  async close(channel, closedBy) {
     const thread = this.modmail.getByChannel(channel.id);
     if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
     // Garde atomique : seul le premier appel prévient le membre et supprime le salon.
     if (!this.modmail.close(channel.id)) return false;
     const user = await this.client.users.fetch(thread.user_id).catch(() => null);
     const guild = channel.guild ?? this.client.guilds.cache.get(thread.guild_id);
+    // Archive AVANT la suppression du salon (sinon l'historique est perdu).
+    await this.#archive(channel, thread, guild, user, closedBy).catch((e) => logger.warn('Archive ModMail impossible :', e?.message));
     if (user) {
       await user
         .send({
@@ -293,6 +334,58 @@ class ModmailService {
     return true;
   }
 
+  /** Publie le transcript (.txt) dans le salon de logs ModMail configuré (`modmail.logChannel`). */
+  async #archive(channel, thread, guild, user, closedBy) {
+    const logChannelId = guild ? this.config.get(guild.id).modmail?.logChannel : null;
+    if (!logChannelId || typeof channel.messages?.fetch !== 'function') return false;
+    const logCh = await guild.channels.fetch(logChannelId).catch(() => null);
+    if (!logCh?.isTextBased?.()) return false;
+    const history = await fetchChannelHistory(channel, TRANSCRIPT_MAX);
+    const transcript = buildTranscript(thread, channel, history);
+    await logCh.send({
+      embeds: [this.archiveCard(thread, { user, closedBy, count: history?.messages.length ?? 0, channel })],
+      files: [{ attachment: Buffer.from(transcript, 'utf8'), name: `modmail-${thread.id}.txt` }],
+    });
+    return true;
+  }
+
+  /** Carte d'archive d'une conversation fermée (salon de logs ModMail). Pure. */
+  archiveCard(thread, { user, closedBy, count = 0, channel, closedAt = Date.now() } = {}) {
+    return card({
+      tone: 'neutral',
+      section: 'tickets',
+      icon: ICONS.mail,
+      title: `Conversation ModMail #${thread.id} fermée`,
+      description: [
+        `Conversation avec ${user ? userLine(user) : `<@${thread.user_id}>`}${channel?.name ? ` (\`#${channel.name}\`)` : ''}.`,
+        subtext('Le transcript complet est joint à ce message.'),
+      ],
+      fields: [
+        field(ICONS.user, 'Utilisateur', `<@${thread.user_id}>`),
+        field(ICONS.lock, 'Fermée par', closedBy ? `${closedBy}` : '—'),
+        field(ICONS.count, 'Messages', `**${count}**`),
+        field(ICONS.date, 'Ouverte', thread.created_at ? discordTimestamp(thread.created_at, 'f') : '—'),
+        field(ICONS.duration, 'Durée', thread.created_at ? formatDuration(closedAt - thread.created_at) : '—'),
+        field(ICONS.id, 'Identifiant', code(`#${thread.id}`)),
+      ],
+      footer: `Utilisateur ${thread.user_id}`,
+    });
+  }
+
+  /**
+   * Réconciliation (démarrage) : ferme les conversations ouvertes dont le salon
+   * a été supprimé pendant que le bot était hors ligne.
+   * @returns {Promise<number>} conversations fermées
+   */
+  async reconcile(guild) {
+    let closed = 0;
+    for (const thread of this.modmail.listOpenByGuild?.(guild.id) ?? []) {
+      if (!(await channelGone(guild, thread.channel_id))) continue;
+      if (this.modmail.close(thread.channel_id)) closed += 1;
+    }
+    return closed;
+  }
+
   /**
    * Trouve le serveur (avec ModMail activé) dont l'utilisateur est réellement
    * membre. Aucun repli sur « le premier serveur » : cela ferait fuiter ses
@@ -308,4 +401,4 @@ class ModmailService {
   }
 }
 
-module.exports = { ModmailService, NO_GUILD_TTL_MS };
+module.exports = { ModmailService, NO_GUILD_TTL_MS, buildTranscript, transcriptLine };

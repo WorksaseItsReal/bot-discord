@@ -18,7 +18,8 @@ module.exports = {
       s.setName('setup').setDescription('Configure et active le ModMail.')
         .addChannelOption((o) => o.setName('categorie').setDescription('Catégorie des conversations').addChannelTypes(ChannelType.GuildCategory))
         .addRoleOption((o) => o.setName('role_staff').setDescription('Rôle staff'))
-        .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?')))
+        .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?'))
+        .addChannelOption((o) => o.setName('salon_logs').setDescription('Salon d\'archive des transcripts').addChannelTypes(ChannelType.GuildText)))
     .addSubcommand((s) =>
       s.setName('reply').setDescription('Répond à la conversation ModMail actuelle.')
         .addStringOption((o) => o.setName('message').setDescription('Message').setRequired(true).setMaxLength(2000)))
@@ -29,8 +30,14 @@ module.exports = {
     const { modmail, config } = client.services;
 
     if (sub === 'setup') {
+      // La commande reste visible du staff (reply/close) : la configuration exige Gérer le serveur.
+      if (!(interaction.memberPermissions ?? interaction.member?.permissions)?.has?.(PermissionFlagsBits.ManageGuild)) {
+        throw new UserError('Il faut la permission **Gérer le serveur** pour configurer le ModMail.');
+      }
       const patch = {};
       const category = interaction.options.getChannel('categorie');
+      const logChannel = interaction.options.getChannel('salon_logs');
+      if (logChannel) patch.logChannel = logChannel.id;
       const role = interaction.options.getRole('role_staff');
       const active = interaction.options.getBoolean('actif');
       if (role) assertStaffRole(role, interaction.guild);
@@ -56,6 +63,7 @@ module.exports = {
               field(ICONS.status, 'État', cfg.enabled ? '🟢 Actif' : '⚫ Inactif'),
               field(ICONS.category, 'Catégorie', cfg.categoryId ? `<#${cfg.categoryId}>` : '*Aucune*'),
               field(ICONS.role, 'Staff', cfg.staffRoleId ? `<@&${cfg.staffRoleId}>` : '*Gérer les messages*'),
+              field('📄', 'Transcripts', cfg.logChannel ? `<#${cfg.logChannel}>` : '*Non archivés*'),
             ],
           }),
         ],
@@ -70,7 +78,7 @@ module.exports = {
     if (sub === 'close') {
       assertOpenThread(client, interaction.channel.id);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
-      return modmail.close(interaction.channel);
+      return modmail.close(interaction.channel, interaction.user);
     }
   },
 
@@ -114,7 +122,7 @@ module.exports = {
       modmail.assertStaff(interaction.member);
       assertOpenThread(client, interaction.channelId);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
-      return modmail.close(interaction.channel);
+      return modmail.close(interaction.channel, interaction.user);
     },
   },
 };
@@ -143,6 +151,6 @@ function closingCard() {
     section: 'tickets',
     icon: ICONS.lock,
     title: 'Fermeture de la conversation',
-    description: 'Le membre est prévenu en message privé, puis ce salon est supprimé.',
+    description: 'Le membre est prévenu en message privé, le transcript est archivé (si un salon est configuré), puis ce salon est supprimé.',
   });
 }

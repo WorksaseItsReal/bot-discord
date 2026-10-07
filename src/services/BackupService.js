@@ -3,9 +3,19 @@
 const { ChannelType, OverwriteType } = require('discord.js');
 const { shortId } = require('../utils/random');
 const { UserError } = require('../core/errors');
+const { AUTO_BACKUP_NAME } = require('../database/repositories/BackupRepository');
 
-/** Nombre maximal de sauvegardes conservées par serveur. */
-const MAX_BACKUPS_PER_GUILD = 15;
+/**
+ * Quotas par serveur, comptés séparément : les sauvegardes automatiques ne
+ * doivent jamais évincer les sauvegardes manuelles (et inversement).
+ */
+const MAX_AUTO_BACKUPS = 10;
+const MAX_MANUAL_BACKUPS = 15;
+/** Ancien quota global (compatibilité). */
+const MAX_BACKUPS_PER_GUILD = MAX_MANUAL_BACKUPS;
+
+/** Types de fils : exclus des sauvegardes (et ignorés dans les anciennes). */
+const THREAD_TYPES = new Set([ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread]);
 
 /**
  * Sérialise les permissions d'un salon. Les rôles sont référencés par NOM
@@ -61,13 +71,17 @@ class BackupService {
 
   /** Sérialise la structure d'un serveur (rôles, salons, permissions). */
   serialize(guild) {
-    const roles = guild.roles.cache
+    // Copies triées (toSorted) : ne jamais réordonner les caches de discord.js en place.
+    // Rôles du plus haut au plus bas.
+    const roles = [...guild.roles.cache.values()]
       .filter((r) => r.id !== guild.id && !r.managed)
-      .sort((a, b) => b.position - a.position)
-      .map((r) => ({ name: r.name, color: r.color, hoist: r.hoist, mentionable: r.mentionable, permissions: r.permissions.bitfield.toString() }));
+      .toSorted((a, b) => b.position - a.position)
+      .map((r) => ({ name: r.name, color: r.colors?.primaryColor ?? r.color ?? 0, hoist: r.hoist, mentionable: r.mentionable, permissions: r.permissions.bitfield.toString() }));
 
-    const channels = guild.channels.cache
-      .sort((a, b) => a.rawPosition - b.rawPosition)
+    // Les fils (threads) ne font pas partie de la structure : jamais sauvegardés.
+    const channels = [...guild.channels.cache.values()]
+      .filter((c) => !c.isThread?.())
+      .toSorted((a, b) => a.rawPosition - b.rawPosition)
       .map((c) => ({
         name: c.name,
         type: c.type,
@@ -88,15 +102,24 @@ class BackupService {
     };
   }
 
-  create(guild, user, name) {
+  /**
+   * Crée une sauvegarde. Automatique si `opts.auto`, ou si aucun auteur humain
+   * n'est fourni (planificateur : `client.user`, un bot) : elle est alors
+   * enregistrée sans auteur et comptée dans le quota automatique.
+   * @param {{ auto?: boolean }} [opts]
+   */
+  create(guild, user, name, opts = {}) {
     const id = shortId();
     const data = this.serialize(guild);
-    this.backups.create({ id, guildId: guild.id, name: String(name || `Backup ${new Date().toLocaleString('fr-FR')}`).slice(0, 100), data, createdBy: user?.id ?? null });
-    this.backups.prune(guild.id, MAX_BACKUPS_PER_GUILD);
-    return { id, data };
+    const auto = opts.auto ?? (!user || user.bot === true);
+    const fallback = auto ? AUTO_BACKUP_NAME : `Backup ${new Date().toLocaleString('fr-FR')}`;
+    this.backups.create({ id, guildId: guild.id, name: String(name || fallback).slice(0, 100), data, createdBy: auto ? null : user.id });
+    if (auto) this.backups.prune(guild.id, MAX_AUTO_BACKUPS, 'auto');
+    else this.backups.prune(guild.id, MAX_MANUAL_BACKUPS, 'manual');
+    return { id, data, auto };
   }
 
-  list(guildId, limit) {
+  list(guildId, limit = MAX_AUTO_BACKUPS + MAX_MANUAL_BACKUPS) {
     return this.backups.list(guildId, limit);
   }
 
@@ -120,17 +143,21 @@ class BackupService {
     let createdRoles = 0;
     let createdChannels = 0;
 
-    for (const role of [...data.roles].reverse()) {
+    // Du plus haut au plus bas : Discord place chaque nouveau rôle juste
+    // au-dessus de @everyone, donc le premier créé finit au sommet du lot.
+    // (L'ordre inverse renversait la hiérarchie restaurée.) `serialize` les range déjà ainsi.
+    for (const role of data.roles ?? []) {
       const exists = guild.roles.cache.find((r) => r.name === role.name);
       if (exists) continue;
       await guild.roles
-        .create({ name: role.name, color: role.color, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions), reason: `Restauration backup ${id}` })
+        .create({ name: role.name, colors: { primaryColor: role.color ?? 0 }, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions), reason: `Restauration backup ${id}` })
         .then(() => (createdRoles += 1))
         .catch(() => {});
     }
 
     // Catégories d'abord
-    const categories = data.channels.filter((c) => c.type === ChannelType.GuildCategory);
+    const channels = (data.channels ?? []).filter((c) => !THREAD_TYPES.has(c.type));
+    const categories = channels.filter((c) => c.type === ChannelType.GuildCategory);
     for (const cat of categories) {
       if (guild.channels.cache.find((c) => c.name === cat.name && c.type === ChannelType.GuildCategory)) continue;
       await guild.channels
@@ -138,7 +165,7 @@ class BackupService {
         .then(() => (createdChannels += 1))
         .catch(() => {});
     }
-    for (const ch of data.channels.filter((c) => c.type !== ChannelType.GuildCategory)) {
+    for (const ch of channels.filter((c) => c.type !== ChannelType.GuildCategory)) {
       if (guild.channels.cache.find((c) => c.name === ch.name && c.type === ch.type)) continue;
       const parent = ch.parentName ? guild.channels.cache.find((c) => c.name === ch.parentName && c.type === ChannelType.GuildCategory) : null;
       await guild.channels
@@ -159,4 +186,4 @@ class BackupService {
   }
 }
 
-module.exports = { BackupService };
+module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD };

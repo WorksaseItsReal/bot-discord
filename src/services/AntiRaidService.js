@@ -11,6 +11,20 @@ const JOIN_ALERT_COOLDOWN_MS = 60_000;
 /** Fréquence de purge des fenêtres d'actions destructrices vides (mémoire bornée). */
 const WINDOW_PRUNE_INTERVAL_MS = 60_000;
 
+/** Plafond de membres sanctionnés par déclenchement de vague (garde-fou contre un faux positif massif). */
+const MAX_WAVE_PUNISH = 50;
+/** Sanctions possibles pour les nouveaux comptes / bots non autorisés (indépendantes de l'action de vague). */
+const NEW_ACCOUNT_ACTIONS = new Set(['kick', 'ban']);
+
+/**
+ * Sanction appliquée aux comptes trop récents / bots : `antiraid.newAccountAction`.
+ * Non réglée : reprend l'ancienne règle (« ban » si l'action anti-raid est le ban, sinon kick). Pur.
+ */
+function newAccountAction(cfg) {
+  if (NEW_ACCOUNT_ACTIONS.has(cfg?.newAccountAction)) return cfg.newAccountAction;
+  return cfg?.action === 'ban' ? 'ban' : 'kick';
+}
+
 const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements' };
 const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
 
@@ -35,7 +49,11 @@ class AntiRaidService {
     this.client = client;
     this.config = config;
     this.logging = logging;
-    /** @type {Map<string, SlidingWindow>} */
+    /**
+     * Fenêtre d'arrivées par serveur, avec les identifiants des arrivants : une
+     * vague en mode kick/ban sanctionne les membres arrivés dans la fenêtre.
+     * @type {Map<string, { windowMs: number, entries: { id: string, at: number }[] }>}
+     */
     this.joinWindows = new Map();
     /** @type {Map<string, SlidingWindow>} */
     this.destructiveWindows = new Map();
@@ -63,6 +81,18 @@ class AntiRaidService {
     return roleIds.some((r) => wl.roles?.includes(r));
   }
 
+  /** Enregistre une arrivée et renvoie les arrivants encore dans la fenêtre (le plus ancien d'abord). */
+  #recordJoin(guildId, memberId, ms, now = Date.now()) {
+    let w = this.joinWindows.get(guildId);
+    if (!w || w.windowMs !== ms) {
+      w = { windowMs: ms, entries: [] };
+      this.joinWindows.set(guildId, w);
+    }
+    w.entries = w.entries.filter((e) => e.at > now - ms && e.id !== memberId);
+    w.entries.push({ id: memberId, at: now });
+    return w.entries;
+  }
+
   #window(map, key, ms) {
     let w = map.get(key);
     if (!w || w.windowMs !== ms) {
@@ -72,7 +102,10 @@ class AntiRaidService {
     return w;
   }
 
-  /** @param {import('discord.js').GuildMember} member */
+  /**
+   * @param {import('discord.js').GuildMember} member
+   * @returns {Promise<{ punished: boolean }|undefined>} punished : le membre arrivant a été expulsé/banni
+   */
   async handleJoin(member) {
     const cfg = this.config.get(member.guild.id).antiraid;
     if (!cfg?.enabled) return;
@@ -80,31 +113,36 @@ class AntiRaidService {
 
     // Anti-bot : bot ajouté hors whitelist
     if (cfg.antiBot && member.user.bot) {
-      await this.#punishNewMember(member, 'AntiRaid: bot non autorisé', cfg);
-      return;
+      return { punished: await this.#punishNewMember(member, 'AntiRaid: bot non autorisé', cfg) };
     }
 
     // Âge de compte minimal
     if (cfg.minAccountAgeDays > 0) {
       const ageDays = (Date.now() - member.user.createdTimestamp) / DAY_MS;
       if (ageDays < cfg.minAccountAgeDays) {
-        await this.#punishNewMember(member, `AntiRaid: compte trop récent (${ageDays.toFixed(1)}j)`, cfg);
-        return;
+        return { punished: await this.#punishNewMember(member, `AntiRaid: compte trop récent (${ageDays.toFixed(1)}j)`, cfg) };
       }
     }
 
     // Vague d'arrivées
-    const w = this.#window(this.joinWindows, member.guild.id, cfg.joinWindowSeconds * 1000);
-    const count = w.hit();
-    if (count >= cfg.joinThreshold) {
-      // Réinitialise la fenêtre et applique un cooldown : une seule alerte (et un seul
-      // lockdown) par vague, au lieu d'une à chaque arrivée au-delà du seuil.
-      w.reset();
-      const now = Date.now();
-      if (now - (this.joinAlertAt.get(member.guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS) return;
-      this.joinAlertAt.set(member.guild.id, now);
-      const locked = cfg.action === 'lockdown' ? await this.#tryLockdown(member.guild) : null;
-      await this.alert(member.guild, {
+    const guild = member.guild;
+    const entries = this.#recordJoin(guild.id, member.id, cfg.joinWindowSeconds * 1000);
+    const count = entries.length;
+    if (count < cfg.joinThreshold) return { punished: false };
+
+    // Réinitialise la fenêtre : une vague = un déclenchement.
+    const joinerIds = entries.map((e) => e.id);
+    this.joinWindows.delete(guild.id);
+    // En mode kick/ban, les arrivants de la vague sont sanctionnés à chaque
+    // déclenchement (le raid continue pendant le cooldown) ; seules l'alerte et
+    // le lockdown sont limités à un par cooldown.
+    const wave = cfg.action === 'kick' || cfg.action === 'ban' ? await this.#punishWave(guild, joinerIds, cfg.action) : null;
+    const now = Date.now();
+    const cooling = now - (this.joinAlertAt.get(guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS;
+    if (!cooling) {
+      this.joinAlertAt.set(guild.id, now);
+      const locked = cfg.action === 'lockdown' ? await this.#tryLockdown(guild) : null;
+      await this.alert(guild, {
         tone: 'danger',
         icon: '🚨',
         title: 'Vague d\'arrivées détectée',
@@ -112,11 +150,54 @@ class AntiRaidService {
         fields: [
           field(ICONS.members, 'Arrivées', `**${count}**`),
           field(ICONS.warning, 'Seuil', `${cfg.joinThreshold} en ${cfg.joinWindowSeconds} s`),
-          field(ICONS.lock, 'Lockdown', locked == null ? 'Non configuré' : `🔒 ${locked} salon${locked > 1 ? 's' : ''} verrouillé${locked > 1 ? 's' : ''}`),
+          wave
+            ? field(cfg.action === 'ban' ? ICONS.ban : ICONS.kick, cfg.action === 'ban' ? 'Bannis' : 'Expulsés', waveSummary(wave))
+            : field(ICONS.lock, 'Lockdown', locked == null ? 'Non configuré' : `🔒 ${locked} salon${locked > 1 ? 's' : ''} verrouillé${locked > 1 ? 's' : ''}`),
         ],
         buttons: locked ? [liftLockdownButton()] : [],
       });
+    } else if (wave?.punished.length) {
+      logger.info(`Vague continue sur ${guild.id} : ${wave.punished.length} arrivant(s) sanctionné(s) (${cfg.action}).`);
     }
+    return { punished: Boolean(wave?.punished.includes(member.id)) };
+  }
+
+  /**
+   * Sanctionne (kick/ban) les membres arrivés pendant la vague. Whitelist
+   * revérifiée (rôles attribués depuis l'arrivée), propriétaire et bot exclus,
+   * au plus MAX_WAVE_PUNISH membres par déclenchement.
+   * @returns {Promise<{ punished: string[], skipped: number, capped: number }>}
+   */
+  async #punishWave(guild, ids, action) {
+    const reason = 'AntiRaid: vague d\'arrivées';
+    const punished = [];
+    let skipped = 0;
+    const eligible = ids.filter((id) => id !== guild.ownerId && id !== this.client.user?.id);
+    const capped = Math.max(0, eligible.length - MAX_WAVE_PUNISH);
+    for (const id of eligible.slice(-MAX_WAVE_PUNISH)) {
+      const member = guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null));
+      if (this.isWhitelisted(guild.id, id, member ? [...(member.roles?.cache?.keys() ?? [])] : [])) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        if (action === 'ban') {
+          if (member && member.bannable === false) throw new Error('non bannissable');
+          this.#markBan(guild.id, id);
+          await guild.bans.create(id, { reason });
+        } else {
+          if (!member) throw new Error('déjà parti');
+          if (member.kickable === false) throw new Error('non expulsable');
+          await member.kick(reason);
+        }
+        punished.push(id);
+      } catch (e) {
+        if (action === 'ban') this.client.services?.moderation?.unmarkBotAction?.('ban', guild.id, id);
+        skipped += 1;
+        logger.debug(`punishWave ${id}`, e?.message);
+      }
+    }
+    return { punished, skipped, capped };
   }
 
   /**
@@ -167,9 +248,10 @@ class AntiRaidService {
     });
   }
 
+  /** @returns {Promise<boolean>} true si le membre a été expulsé/banni */
   async #punishNewMember(member, reason, cfg) {
     try {
-      const ban = cfg.action === 'ban';
+      const ban = newAccountAction(cfg) === 'ban';
       if (ban) {
         this.#markBan(member.guild.id, member.id);
         await member.ban({ reason });
@@ -188,8 +270,10 @@ class AntiRaidService {
         ],
         footer: `ID : ${member.id}`,
       });
+      return true;
     } catch (e) {
       logger.debug('punishNewMember', e?.message);
+      return false;
     }
   }
 
@@ -254,4 +338,12 @@ class AntiRaidService {
   }
 }
 
-module.exports = { AntiRaidService };
+/** Résumé d'une sanction de vague pour l'alerte. Pur. */
+function waveSummary({ punished, skipped, capped }) {
+  const parts = [`**${punished.length}**`];
+  if (skipped) parts.push(`${skipped} ignoré${skipped > 1 ? 's' : ''}`);
+  if (capped) parts.push(`${capped} hors plafond (${MAX_WAVE_PUNISH})`);
+  return parts.join(' · ');
+}
+
+module.exports = { AntiRaidService, newAccountAction, waveSummary, MAX_WAVE_PUNISH };

@@ -8,6 +8,28 @@ const { paginate } = require('../../utils/pagination');
 const { TYPE_LABELS, sanctionIcon, userFromId, requirePermission } = require('../../services/ModerationService');
 const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
+const { isEnforced } = require('../../database/repositories/SanctionRepository');
+
+/** Commande qui lève chaque type de sanction encore en vigueur. */
+const LIFT_COMMANDS = { tempban: '/unban', mute: '/unmute', timeout: '/untimeout' };
+
+/**
+ * Refuse de supprimer des sanctions encore en vigueur (choix le plus sûr) :
+ * supprimer la ligne d'un ban temporaire le rendrait définitif (le scheduler ne
+ * pourrait plus le lever), et un mute effacé ne serait plus réappliqué au retour.
+ * Le modérateur doit d'abord lever la sanction avec la commande dédiée, qui passe
+ * par ModerationService (vérifications de hiérarchie + log de révocation). Pur.
+ * @returns {string|null} message d'erreur, ou null si la suppression est sûre
+ */
+function enforcedRefusal(sanctions) {
+  if (!sanctions.length) return null;
+  const lines = sanctions.map((s) => {
+    const label = TYPE_LABELS[s.type] ?? s.type;
+    const until = s.expires_at ? ` jusqu'au ${discordTimestamp(s.expires_at, 'f')}` : '';
+    return `• ${code(`#${s.id}`)} **${label}**${until} → ${LIFT_COMMANDS[s.type] ?? 'levez-la'} d'abord`;
+  });
+  return `Impossible de supprimer une sanction **encore en vigueur** : elle ne pourrait plus être levée automatiquement.\n${lines.join('\n')}`;
+}
 
 const PER_PAGE = 5;
 const MAX_ENTRIES = 100;
@@ -68,6 +90,7 @@ module.exports = {
   category: 'moderation',
   historyPages,
   sanctionLine,
+  enforcedRefusal,
   data: new SlashCommandBuilder()
     .setName('sanctions')
     .setDescription('Gère l\'historique des sanctions d\'un membre.')
@@ -95,7 +118,10 @@ module.exports = {
     if (sub === 'remove') {
       const id = interaction.options.getInteger('id');
       const sanction = repo.get(guildId, id);
-      if (!sanction || !repo.delete(guildId, id)) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
+      if (!sanction) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
+      const refusal = isEnforced(sanction) ? enforcedRefusal([sanction]) : null;
+      if (refusal) throw new UserError(refusal);
+      if (!repo.delete(guildId, id)) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
       return interaction.reply({
         embeds: [
           card({
@@ -118,6 +144,8 @@ module.exports = {
 
     if (sub === 'clear') {
       const user = interaction.options.getUser('membre');
+      const refusal = enforcedRefusal(repo.listEnforced(guildId, user.id));
+      if (refusal) throw new UserError(refusal);
       const n = repo.clearUser(guildId, user.id);
       client.services.strikes.reset(guildId, user.id);
       return interaction.reply({

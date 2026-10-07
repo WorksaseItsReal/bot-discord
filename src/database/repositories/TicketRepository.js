@@ -11,6 +11,12 @@ class TicketRepository {
     this.openByUserStmt = db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE guild_id = ? AND user_id = ? AND status != 'closed'");
     this.updateStatusStmt = db.prepare('UPDATE tickets SET status = @status, claimed_by = @claimedBy, closed_at = @closedAt WHERE channel_id = @channelId');
     this.deleteStmt = db.prepare('DELETE FROM tickets WHERE channel_id = ?');
+    this.byGuildStmt = db.prepare('SELECT * FROM tickets WHERE guild_id = ?');
+  }
+
+  /** Tous les tickets enregistrés d'un serveur (réconciliation au démarrage). */
+  listByGuild(guildId) {
+    return this.byGuildStmt.all(guildId);
   }
 
   create(data) {

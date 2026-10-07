@@ -1,11 +1,39 @@
 'use strict';
 
-const { ChannelType, PermissionFlagsBits } = require('discord.js');
+const { ChannelType, PermissionFlagsBits, OverwriteType } = require('discord.js');
 const { card, field, ICONS, bullets } = require('../utils/ui');
 const { CooldownManager } = require('../core/cooldowns');
 
 /** Délai minimal entre deux créations de vocal pour un même membre (anti va-et-vient). */
 const HUB_COOLDOWN_MS = 10_000;
+
+/** Droits accordés au propriétaire d'un vocal temporaire. */
+const OWNER_PERMISSIONS = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.MoveMembers | PermissionFlagsBits.Connect;
+
+/**
+ * Overwrites d'un nouveau vocal temporaire : ceux de la catégorie parente
+ * (sinon un `permissionOverwrites` explicite les remplacerait, et un vocal créé
+ * dans une catégorie privée deviendrait public) + celui du propriétaire, fusionné
+ * avec un éventuel overwrite existant pour lui. Pur.
+ * @param {{ permissionOverwrites?: { cache?: Map<string, any> } }|null|undefined} parent
+ * @param {string} ownerId
+ */
+function inheritedOverwrites(parent, ownerId) {
+  const out = [];
+  let owner = null;
+  for (const ow of parent?.permissionOverwrites?.cache?.values?.() ?? []) {
+    const entry = { id: ow.id, type: ow.type, allow: BigInt(ow.allow?.bitfield ?? 0n), deny: BigInt(ow.deny?.bitfield ?? 0n) };
+    if (ow.id === ownerId) owner = entry;
+    else out.push(entry);
+  }
+  out.push({
+    id: ownerId,
+    type: OverwriteType.Member,
+    allow: (owner?.allow ?? 0n) | OWNER_PERMISSIONS,
+    deny: (owner?.deny ?? 0n) & ~OWNER_PERMISSIONS,
+  });
+  return out;
+}
 
 /**
  * Vocaux temporaires : rejoindre un salon "hub" crée un vocal personnel,
@@ -57,13 +85,13 @@ class TempVoiceService {
     const name = (cfg.nameTemplate || 'Vocal de {user}').replace('{user}', member.displayName);
     // Catégorie configurée supprimée : on retombe sur celle du hub.
     const category = cfg.categoryId && state.guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? cfg.categoryId : null;
+    const parentId = category || state.channel?.parentId || null;
+    const parent = parentId ? state.guild.channels.cache.get(parentId) : null;
     const channel = await state.guild.channels.create({
       name: name.slice(0, 90) || 'Vocal',
       type: ChannelType.GuildVoice,
-      parent: category || state.channel?.parentId || null,
-      permissionOverwrites: [
-        { id: member.id, allow: [PermissionFlagsBits.ManageChannels, PermissionFlagsBits.MoveMembers, PermissionFlagsBits.Connect] },
-      ],
+      parent: parentId,
+      permissionOverwrites: inheritedOverwrites(parent, member.id),
     });
     this.tempVoice.create(channel.id, state.guild.id, member.id);
     try {
@@ -136,4 +164,4 @@ class TempVoiceService {
   }
 }
 
-module.exports = { TempVoiceService, HUB_COOLDOWN_MS };
+module.exports = { TempVoiceService, HUB_COOLDOWN_MS, inheritedOverwrites, OWNER_PERMISSIONS };

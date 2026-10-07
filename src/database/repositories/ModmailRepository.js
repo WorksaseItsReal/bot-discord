@@ -10,6 +10,12 @@ class ModmailRepository {
     this.openByUserStmt = db.prepare("SELECT * FROM modmail_threads WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1");
     this.byChannelStmt = db.prepare('SELECT * FROM modmail_threads WHERE channel_id = ? ORDER BY id DESC LIMIT 1');
     this.closeStmt = db.prepare("UPDATE modmail_threads SET status = 'closed' WHERE channel_id = ? AND status = 'open'");
+    this.openByGuildStmt = db.prepare("SELECT * FROM modmail_threads WHERE guild_id = ? AND status = 'open'");
+  }
+
+  /** Conversations ouvertes d'un serveur (réconciliation au démarrage). */
+  listOpenByGuild(guildId) {
+    return this.openByGuildStmt.all(guildId);
   }
 
   create(data) {

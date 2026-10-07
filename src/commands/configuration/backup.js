@@ -7,6 +7,10 @@ const { confirm } = require('../../utils/confirmation');
 const { paginate } = require('../../utils/pagination');
 const { card, field, wide, subtext, bullets, code, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+const { MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS } = require('../../services/BackupService');
+
+/** Rappel des quotas (comptés séparément). */
+const QUOTA_TEXT = `${MAX_MANUAL_BACKUPS} manuelles + ${MAX_AUTO_BACKUPS} automatiques`;
 
 /** Nombre de sauvegardes par page de /backup list. */
 const PER_PAGE = 5;
@@ -172,7 +176,7 @@ module.exports = {
             section: 'configuration',
             icon: ICONS.success,
             title: 'Sauvegarde créée',
-            description: [`**${truncate(b.name, 100)}** est prête à être restaurée.`, subtext('Les 15 sauvegardes les plus récentes sont conservées.')],
+            description: [`**${truncate(b.name, 100)}** est prête à être restaurée.`, subtext(`Les ${MAX_MANUAL_BACKUPS} sauvegardes manuelles les plus récentes sont conservées (les automatiques ont leur propre quota).`)],
             fields: [
               field(ICONS.id, 'Identifiant', code(id)),
               field(ICONS.role, 'Rôles', `**${c.roles}**`),
@@ -208,7 +212,7 @@ module.exports = {
             section: 'configuration',
             icon: ICONS.memory,
             title: 'Sauvegardes du serveur',
-            description: [`**${list.length}** sauvegarde${list.length > 1 ? 's' : ''} · 15 au maximum`, autoLine],
+            description: [`**${list.length}** sauvegarde${list.length > 1 ? 's' : ''} · au plus ${QUOTA_TEXT}`, autoLine],
             fields: chunk.map((row) =>
               wide(
                 ICONS.memory,
@@ -257,7 +261,7 @@ module.exports = {
               field(ICONS.date, 'Dernière', auto.lastRun ? discordTimestamp(auto.lastRun, 'R') : '*Jamais*'),
               enabled ? wide(ICONS.time, 'Prochaine', next && next > Date.now() ? discordTimestamp(next, 'R') : 'Au prochain passage du planificateur') : null,
             ],
-            footer: 'Les 15 sauvegardes les plus récentes sont conservées',
+            footer: `Les ${MAX_AUTO_BACKUPS} sauvegardes automatiques les plus récentes sont conservées`,
           }),
         ],
         ephemeral: true,

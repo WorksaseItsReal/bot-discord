@@ -35,8 +35,14 @@ function assertManageRoles(interaction) {
   }
 }
 
+/** Couleur principale d'un rôle (`colors.primaryColor`, repli sur l'ancien `color`). */
+function primaryColor(role) {
+  return role.colors?.primaryColor ?? role.color ?? 0;
+}
+
 function hex(role) {
-  return role.color ? code(`#${role.color.toString(16).padStart(6, '0').toUpperCase()}`) : '*Par défaut*';
+  const color = primaryColor(role);
+  return color ? code(`#${color.toString(16).padStart(6, '0').toUpperCase()}`) : '*Par défaut*';
 }
 
 /**
@@ -110,7 +116,7 @@ module.exports = {
     const ownerId = interaction.user.id;
 
     if (sub === 'list') {
-      const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).sort((a, b) => b.position - a.position).values()];
+      const roles = [...guild.roles.cache.values()].filter((r) => r.id !== guild.id).toSorted((a, b) => b.position - a.position);
       const managed = roles.filter((r) => r.managed).length;
       const hoisted = roles.filter((r) => r.hoist).length;
       const pages = [];
@@ -144,11 +150,12 @@ module.exports = {
         throw new UserError('Couleur invalide : utilisez un code hexadécimal comme `#5865F2`.');
       }
       const color = rawColor ? `#${rawColor.replace(/^#/, '')}` : undefined;
-      const role = await guild.roles.create({ name, color, reason: `Créé par ${interaction.user.tag}` });
+      // `color` est déprécié depuis discord.js 14.21 : `colors.primaryColor`.
+      const role = await guild.roles.create({ name, colors: color ? { primaryColor: color } : undefined, reason: `Créé par ${interaction.user.tag}` });
       return interaction.reply({
         embeds: [
           card({
-            tone: role.color || 'success',
+            tone: primaryColor(role) || 'success',
             section: 'roles',
             icon: ICONS.success,
             title: 'Rôle créé',

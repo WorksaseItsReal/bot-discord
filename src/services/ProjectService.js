@@ -28,6 +28,8 @@ class ProjectService {
     this.config = config;
     /** Debounce des rafraîchissements de messages publiés (évite les rate-limits). */
     this.pendingRefresh = new Map();
+    /** Projets en cours de publication : un double clic ne crée pas deux messages. */
+    this.publishing = new Set();
   }
 
   // ---------------------------------------------------------------- droits
@@ -297,9 +299,18 @@ class ProjectService {
     if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
       throw new UserError(`Je ne peux pas publier dans ${channel} : il me faut **Voir le salon**, **Envoyer des messages** et **Intégrer des liens**.`);
     }
-    await this.#deletePublished(project);
-    const message = await channel.send(this.render(project, channel.guild));
-    return this.repo.update(project.id, { channelId: channel.id, messageId: message.id });
+    // Verrou par projet, posé de façon synchrone avant toute attente.
+    if (this.publishing.has(project.id)) throw new UserError('Ce projet est déjà en cours de publication…');
+    this.publishing.add(project.id);
+    try {
+      // Relecture : l'objet reçu peut être antérieur à une publication qui vient de se terminer.
+      const current = this.repo.get?.(project.id) ?? project;
+      await this.#deletePublished(current);
+      const message = await channel.send(this.render(current, channel.guild));
+      return this.repo.update(project.id, { channelId: channel.id, messageId: message.id });
+    } finally {
+      this.publishing.delete(project.id);
+    }
   }
 
   /** Rafraîchit le message publié dans ~2 s (regroupe les modifications rapprochées). */

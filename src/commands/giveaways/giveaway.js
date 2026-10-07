@@ -5,7 +5,7 @@ const { truncate, listOrMore } = require('../../utils/embeds');
 const { parseDuration, discordTimestamp, formatDuration } = require('../../utils/time');
 const { card, field, wide, ICONS, status, subtext, linkButton, buttonRows } = require('../../utils/ui');
 const { paginate } = require('../../utils/pagination');
-const { giveawayUrl, conditions } = require('../../services/GiveawayService');
+const { giveawayUrl, conditions, MAX_REROLL_WINNERS } = require('../../services/GiveawayService');
 const { UserError } = require('../../core/errors');
 
 const PER_PAGE = 6;
@@ -37,8 +37,11 @@ module.exports = {
         .addIntegerOption((o) => o.setName('gagnants').setDescription('Nombre de gagnants').setMinValue(1).setMaxValue(20))
         .addRoleOption((o) => o.setName('role_requis').setDescription('Rôle requis pour participer'))
         .addRoleOption((o) => o.setName('role_interdit').setDescription('Rôle interdit')))
-    .addSubcommand((s) => s.setName('end').setDescription('Termine un giveaway immédiatement.').addIntegerOption((o) => o.setName('id').setDescription('ID du giveaway').setRequired(true)))
-    .addSubcommand((s) => s.setName('reroll').setDescription('Retire de nouveaux gagnants.').addIntegerOption((o) => o.setName('id').setDescription('ID du giveaway').setRequired(true)))
+    .addSubcommand((s) => s.setName('end').setDescription('Termine un giveaway immédiatement (ou retente une annonce échouée).').addIntegerOption((o) => o.setName('id').setDescription('ID du giveaway').setRequired(true)))
+    .addSubcommand((s) =>
+      s.setName('reroll').setDescription('Retire de nouveaux gagnants.')
+        .addIntegerOption((o) => o.setName('id').setDescription('ID du giveaway').setRequired(true))
+        .addIntegerOption((o) => o.setName('gagnants').setDescription('Nombre de gagnants à tirer (défaut : celui du giveaway)').setMinValue(1).setMaxValue(MAX_REROLL_WINNERS)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les giveaways en cours.')),
 
   async execute(interaction, client) {
@@ -91,7 +94,8 @@ module.exports = {
     if (sub === 'reroll') {
       const id = interaction.options.getInteger('id');
       await interaction.deferReply({ ephemeral: true });
-      const winners = await giveaways.end(id, { reroll: true, guildId: interaction.guild.id });
+      const count = interaction.options.getInteger('gagnants');
+      const winners = await giveaways.end(id, { reroll: true, guildId: interaction.guild.id, count });
       return interaction.editReply({ embeds: [winnersReply(winners, id)] });
     }
     if (sub === 'list') {

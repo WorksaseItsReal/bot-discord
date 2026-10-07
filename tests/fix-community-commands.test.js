@@ -136,11 +136,13 @@ test('menus de rôles : liste partagée des permissions interdites (commande + c
 test('/voice move : Connect et Déplacer des membres exigés sur le salon cible', async () => {
   const moved = [];
   const target = { id: 'v2', toString: () => '<#v2>', permissionsFor: () => perms([PermissionFlagsBits.MoveMembers]) };
-  const member = { id: A, voice: { channel: { id: 'v1' }, setChannel: async (c) => moved.push(c) } };
+  // Hiérarchie (même contrôle que kick/mute) : modérateur au-dessus de la cible, bot au-dessus des deux.
+  const g = { ownerId: 'owner' };
+  const member = { id: A, guild: g, roles: { highest: { position: 1 } }, voice: { channel: { id: 'v1' }, setChannel: async (c) => moved.push(c) } };
   const interaction = {
     user: { id: 'mod', tag: 'mod' },
-    member: { id: 'mod' },
-    guild: { members: { fetch: async () => member, me: {} } },
+    member: { id: 'mod', guild: g, roles: { highest: { position: 5 } } },
+    guild: { members: { fetch: async () => member, me: { id: 'bot', guild: g, roles: { highest: { position: 10 } } } } },
     options: { getSubcommand: () => 'move', getUser: () => ({ id: A }), getChannel: () => target },
     reply: async () => {},
   };

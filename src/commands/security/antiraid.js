@@ -3,9 +3,24 @@
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { card, field, wide, kv, ICONS, status, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { assertAdmin } = require('../../services/ModerationService');
+const { newAccountAction } = require('../../services/AntiRaidService');
 
 const ACTION_LABELS = { kick: `${ICONS.kick} Expulsion`, ban: `${ICONS.ban} Bannissement`, lockdown: '🚨 Lockdown' };
 const EXECUTOR_LABELS = { strip: 'Retrait des rôles', ban: 'Bannissement', none: 'Aucune' };
+const threshold = (n) => (n ? `**${n}**` : 'Désactivé');
+
+/** Option de commande → clé de configuration `antiraid.*` (entiers). */
+const INTEGER_OPTIONS = {
+  join_seuil: 'joinThreshold',
+  join_fenetre: 'joinWindowSeconds',
+  age_min_jours: 'minAccountAgeDays',
+  seuil_salons: 'channelDeleteThreshold',
+  seuil_roles: 'roleDeleteThreshold',
+  seuil_bans: 'banThreshold',
+  fenetre_destructive: 'destructiveWindowSeconds',
+};
+/** Option de commande → clé de configuration `antiraid.*` (choix). */
+const STRING_OPTIONS = { action: 'action', nouveaux_comptes: 'newAccountAction', sanction_auteur: 'punishExecutor' };
 
 const onOff = (v) => (v ? '🟢 Oui' : '🔴 Non');
 
@@ -27,20 +42,21 @@ function renderPanel(client, guildId, notice) {
           c.enabled ? '🟢 La protection est **active**.' : '🔴 La protection est **désactivée**.',
         ],
         fields: [
-          field('⚡', 'Action', ACTION_LABELS[c.action] ?? c.action),
+          field('⚡', 'Action (vague)', ACTION_LABELS[c.action] ?? c.action),
+          field(ICONS.user, 'Comptes récents / bots', ACTION_LABELS[newAccountAction(c)]),
           field(ICONS.bot, 'Anti-bot', onOff(c.antiBot)),
           field(ICONS.members, 'Vague d\'arrivées', `**${c.joinThreshold}** en **${c.joinWindowSeconds} s**`),
           field(ICONS.date, 'Âge min. du compte', c.minAccountAgeDays ? `**${c.minAccountAgeDays}** j` : 'Aucun'),
           field(ICONS.channel, 'Alertes', c.alertChannel ? `<#${c.alertChannel}>` : 'Logs sécurité'),
           field(ICONS.check, 'Whitelist', `**${wlCount}** entrée${wlCount > 1 ? 's' : ''}`),
           wide('💣', `Actions destructrices (en ${c.destructiveWindowSeconds} s)`, kv([
-            ['Salons supprimés', `**${c.channelDeleteThreshold}**`],
-            ['Rôles supprimés', `**${c.roleDeleteThreshold}**`],
-            ['Bannissements', `**${c.banThreshold}**`],
+            ['Salons supprimés', threshold(c.channelDeleteThreshold)],
+            ['Rôles supprimés', threshold(c.roleDeleteThreshold)],
+            ['Bannissements', threshold(c.banThreshold)],
             ['Sanction de l\'auteur', EXECUTOR_LABELS[c.punishExecutor] ?? c.punishExecutor],
           ])),
         ],
-        footer: 'Réglages : /antiraid set',
+        footer: 'Réglages : /antiraid set · Whitelist : /whitelist',
       }),
     ],
     components: buttonRows(
@@ -54,6 +70,9 @@ function renderPanel(client, guildId, notice) {
 
 module.exports = {
   category: 'security',
+  renderPanel,
+  INTEGER_OPTIONS,
+  STRING_OPTIONS,
   data: new SlashCommandBuilder()
     .setName('antiraid')
     .setDescription('Configuration de l\'AntiRaid.')
@@ -67,8 +86,14 @@ module.exports = {
         .addIntegerOption((o) => o.setName('join_fenetre').setDescription('Fenêtre en secondes').setMinValue(1))
         .addIntegerOption((o) => o.setName('age_min_jours').setDescription('Âge de compte minimal (jours)').setMinValue(0))
         .addBooleanOption((o) => o.setName('anti_bot').setDescription('Sanctionner les bots ajoutés'))
-        .addStringOption((o) => o.setName('action').setDescription('Action sur détection').addChoices({ name: 'Expulsion', value: 'kick' }, { name: 'Bannissement', value: 'ban' }, { name: 'Lockdown', value: 'lockdown' }))
-        .addChannelOption((o) => o.setName('alertes').setDescription('Salon d\'alertes').addChannelTypes(ChannelType.GuildText))),
+        .addStringOption((o) => o.setName('action').setDescription('Action sur vague d\'arrivées').addChoices({ name: 'Expulsion des arrivants', value: 'kick' }, { name: 'Bannissement des arrivants', value: 'ban' }, { name: 'Lockdown', value: 'lockdown' }))
+        .addStringOption((o) => o.setName('nouveaux_comptes').setDescription('Sanction des comptes trop récents et bots').addChoices({ name: 'Expulsion', value: 'kick' }, { name: 'Bannissement', value: 'ban' }))
+        .addChannelOption((o) => o.setName('alertes').setDescription('Salon d\'alertes').addChannelTypes(ChannelType.GuildText))
+        .addIntegerOption((o) => o.setName('seuil_salons').setDescription('Suppressions de salons déclenchant une alerte (0 = désactivé)').setMinValue(0).setMaxValue(100))
+        .addIntegerOption((o) => o.setName('seuil_roles').setDescription('Suppressions de rôles déclenchant une alerte (0 = désactivé)').setMinValue(0).setMaxValue(100))
+        .addIntegerOption((o) => o.setName('seuil_bans').setDescription('Bannissements déclenchant une alerte (0 = désactivé)').setMinValue(0).setMaxValue(100))
+        .addIntegerOption((o) => o.setName('fenetre_destructive').setDescription('Fenêtre des actions destructrices (secondes)').setMinValue(1).setMaxValue(3600))
+        .addStringOption((o) => o.setName('sanction_auteur').setDescription('Sanction de l\'auteur d\'actions destructrices').addChoices({ name: 'Retrait des rôles', value: 'strip' }, { name: 'Bannissement', value: 'ban' }, { name: 'Aucune', value: 'none' }))),
 
   async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
@@ -84,17 +109,16 @@ module.exports = {
     }
     if (sub === 'set') {
       const patch = {};
-      const map = {
-        join_seuil: 'joinThreshold', join_fenetre: 'joinWindowSeconds', age_min_jours: 'minAccountAgeDays',
-      };
-      for (const [opt, key] of Object.entries(map)) {
+      for (const [opt, key] of Object.entries(INTEGER_OPTIONS)) {
         const v = interaction.options.getInteger(opt);
         if (v !== null) patch[key] = v;
       }
+      for (const [opt, key] of Object.entries(STRING_OPTIONS)) {
+        const v = interaction.options.getString(opt);
+        if (v) patch[key] = v;
+      }
       const antiBot = interaction.options.getBoolean('anti_bot');
       if (antiBot !== null) patch.antiBot = antiBot;
-      const action = interaction.options.getString('action');
-      if (action) patch.action = action;
       const alerts = interaction.options.getChannel('alertes');
       if (alerts) patch.alertChannel = alerts.id;
       if (!Object.keys(patch).length) {

@@ -28,6 +28,14 @@ class SanctionRepository {
     this.deactivateForUserStmt = db.prepare(
       'UPDATE sanctions SET active = 0 WHERE guild_id = ? AND user_id = ? AND type = ? AND active = 1',
     );
+    // Sanctions encore « en vigueur » : expiration future (tempban/mute/timeout) ou
+    // mute sans échéance. Les supprimer de l'historique les rendrait orphelines
+    // (le scheduler ne pourrait plus les lever, le mute ne serait plus réappliqué).
+    this.enforcedByUserStmt = db.prepare(
+      `SELECT * FROM sanctions WHERE guild_id = ? AND user_id = ? AND active = 1
+       AND ((expires_at IS NOT NULL AND expires_at > ?) OR (type = 'mute' AND expires_at IS NULL))
+       ORDER BY created_at DESC`,
+    );
     this.reasonsLikeStmt = db.prepare(
       "SELECT reason FROM sanctions WHERE guild_id = ? AND user_id = ? AND reason LIKE ? ESCAPE '\\'",
     );
@@ -89,6 +97,16 @@ class SanctionRepository {
     return this.deactivateForUserStmt.run(guildId, userId, type).changes;
   }
 
+  /** Sanctions encore en vigueur d'un membre (voir `isEnforced`). */
+  listEnforced(guildId, userId, now = Date.now()) {
+    return this.enforcedByUserStmt.all(guildId, userId, now);
+  }
+
+  /** Mute actif (sans échéance ou échéance future) d'un membre, le plus récent. */
+  activeMute(guildId, userId, now = Date.now()) {
+    return this.listEnforced(guildId, userId, now).find((s) => s.type === 'mute') ?? null;
+  }
+
   /** Raisons des sanctions d'un membre commençant par `prefix` (littéral, sans joker). */
   reasonsStartingWith(guildId, userId, prefix) {
     const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -96,4 +114,14 @@ class SanctionRepository {
   }
 }
 
-module.exports = { SanctionRepository };
+/**
+ * true si la sanction est encore en vigueur : active avec une expiration future
+ * (tempban, mute, timeout) ou mute actif sans échéance. Pur.
+ */
+function isEnforced(s, now = Date.now()) {
+  if (!s?.active) return false;
+  if (s.expires_at) return s.expires_at > now;
+  return s.type === 'mute';
+}
+
+module.exports = { SanctionRepository, isEnforced };

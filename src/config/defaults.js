@@ -96,6 +96,7 @@ const defaultGuildConfig = Object.freeze({
     minAccountAgeDays: 0,
     antiBot: false,
     action: 'kick', // kick | ban | lockdown
+    newAccountAction: null, // kick | ban — comptes récents / bots (null : ban si action = ban, sinon kick)
     alertChannel: null,
     // Seuils de destruction (via audit log)
     channelDeleteThreshold: 3,

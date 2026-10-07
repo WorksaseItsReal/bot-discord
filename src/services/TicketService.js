@@ -2,12 +2,63 @@
 
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const { button, row, ButtonStyle } = require('../utils/components');
+const { logSection } = require('./LoggingService');
 const { card, field, wide, ICONS, userLine, code, subtext, bullets, status } = require('../utils/ui');
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 
 /** Nombre maximal de messages repris dans un transcript. */
 const TRANSCRIPT_MAX = 1000;
+
+/**
+ * Historique d'un salon, du plus ancien au plus récent, en remontant par pages
+ * de 100 (`before` : plus ancien identifiant reçu) jusqu'à `max` messages.
+ * Partagé par les tickets et le ModMail.
+ * @returns {Promise<{ messages: import('discord.js').Message[], truncated: boolean } | null>}
+ */
+async function fetchChannelHistory(channel, max = TRANSCRIPT_MAX) {
+  const collected = [];
+  let before;
+  let full = false;
+  while (collected.length < max) {
+    const limit = Math.min(100, max - collected.length);
+    const page = await channel.messages.fetch(before ? { limit, before } : { limit }).catch(() => null);
+    if (!page) {
+      if (!collected.length) return null;
+      break;
+    }
+    const batch = [...page.values()];
+    collected.push(...batch);
+    full = batch.length === limit;
+    if (!full || !batch.length) break;
+    // Les pages arrivent du plus récent au plus ancien : on remonte depuis le plus ancien.
+    before = batch.reduce((oldest, m) => ((m.createdTimestamp ?? 0) < (oldest.createdTimestamp ?? 0) ? m : oldest)).id;
+  }
+  // Limite atteinte : reste-t-il des messages plus anciens ?
+  let truncated = false;
+  if (collected.length >= max && full) {
+    const more = await channel.messages.fetch({ limit: 1, before }).catch(() => null);
+    truncated = Boolean(more?.size);
+  }
+  collected.sort((a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0));
+  return { messages: collected, truncated };
+}
+
+/**
+ * true seulement si Discord confirme que le salon n'existe plus (10003 Unknown
+ * Channel). Une erreur transitoire (réseau, permissions) ne doit jamais faire
+ * fermer un ticket ou une conversation encore actifs.
+ */
+async function channelGone(guild, channelId) {
+  if (!channelId) return true;
+  if (guild.channels?.cache?.has?.(channelId)) return false;
+  try {
+    const channel = await guild.channels.fetch(channelId);
+    return !channel;
+  } catch (err) {
+    return err?.code === 10003;
+  }
+}
 
 /** Libellés de statut d'un ticket (pastille). */
 const STATUS_LABELS = {
@@ -195,7 +246,7 @@ class TicketService {
       'moderation',
       card({
         tone: 'brand',
-        section: 'tickets',
+        section: logSection('moderation'),
         icon: ICONS.ticket,
         title: 'Ticket ouvert',
         description: `${userLine(user)} a ouvert un ticket : ${channel}.`,
@@ -258,31 +309,7 @@ class TicketService {
    * @returns {Promise<{ messages: import('discord.js').Message[], truncated: boolean } | null>}
    */
   async fetchHistory(channel, max = TRANSCRIPT_MAX) {
-    const collected = [];
-    let before;
-    let full = false;
-    while (collected.length < max) {
-      const limit = Math.min(100, max - collected.length);
-      const page = await channel.messages.fetch(before ? { limit, before } : { limit }).catch(() => null);
-      if (!page) {
-        if (!collected.length) return null;
-        break;
-      }
-      const batch = [...page.values()];
-      collected.push(...batch);
-      full = batch.length === limit;
-      if (!full || !batch.length) break;
-      // Les pages arrivent du plus récent au plus ancien : on remonte depuis le plus ancien.
-      before = batch.reduce((oldest, m) => ((m.createdTimestamp ?? 0) < (oldest.createdTimestamp ?? 0) ? m : oldest)).id;
-    }
-    // Limite atteinte : reste-t-il des messages plus anciens ?
-    let truncated = false;
-    if (collected.length >= max && full) {
-      const more = await channel.messages.fetch({ limit: 1, before }).catch(() => null);
-      truncated = Boolean(more?.size);
-    }
-    collected.sort((a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0));
-    return { messages: collected, truncated };
+    return fetchChannelHistory(channel, max);
   }
 
   async generateTranscript(channel) {
@@ -407,10 +434,26 @@ class TicketService {
     });
   }
 
+  /**
+   * Réconciliation (démarrage) : oublie les tickets dont le salon a été
+   * supprimé pendant que le bot était hors ligne (sinon ils comptent à vie dans
+   * la limite de tickets ouverts du membre).
+   * @returns {Promise<number>} tickets fermés
+   */
+  async reconcile(guild) {
+    let closed = 0;
+    for (const ticket of this.tickets.listByGuild?.(guild.id) ?? []) {
+      if (!(await channelGone(guild, ticket.channel_id))) continue;
+      this.tickets.delete(ticket.channel_id);
+      closed += 1;
+    }
+    return closed;
+  }
+
   /** Retour éphémère standard après création. */
   createdReply(channel) {
     return status.ok(`Votre ticket est prêt : ${channel}. L'équipe a été prévenue.`, 'Ticket ouvert');
   }
 }
 
-module.exports = { TicketService, STATUS_LABELS, TRANSCRIPT_MAX };
+module.exports = { TicketService, STATUS_LABELS, TRANSCRIPT_MAX, fetchChannelHistory, channelGone };

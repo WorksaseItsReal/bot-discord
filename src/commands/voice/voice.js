@@ -16,6 +16,21 @@ function assertCanMoveTo(interaction, channel) {
   }
 }
 
+/** Même contrôle de hiérarchie que kick/mute (sauf sur soi-même). */
+function assertCanActOn(interaction, member, action) {
+  if (member.id !== interaction.user.id) assertCanModerate(interaction.member, member, interaction.guild.members.me, { action });
+}
+
+/** true si l'auteur peut agir sur ce membre (hiérarchie), sans lever d'erreur. */
+function canActOn(interaction, member) {
+  try {
+    assertCanActOn(interaction, member, 'déconnecter');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Membre connecté en vocal, ou erreur claire. */
 async function voiceMember(guild, userId) {
   const member = await guild.members.fetch(userId).catch(() => null);
@@ -110,8 +125,14 @@ module.exports = {
       await interaction.deferReply({ ephemeral: true });
       let n = 0;
       let failed = 0;
+      let protectedCount = 0;
       for (const m of channel.members.values()) {
-        await m.voice.disconnect('Cleanup vocal').then(() => (n += 1)).catch(() => (failed += 1));
+        // Membres au rôle supérieur ou égal (ou propriétaire, ou le bot) : ignorés.
+        if (!canActOn(interaction, m)) {
+          protectedCount += 1;
+          continue;
+        }
+        await m.voice.disconnect(`Cleanup vocal par ${interaction.user.tag}`).then(() => (n += 1)).catch(() => (failed += 1));
       }
       return interaction.editReply({
         embeds: [
@@ -120,8 +141,15 @@ module.exports = {
             section: 'voice',
             icon: '🧹',
             title: n ? 'Salon vocal vidé' : 'Salon déjà vide',
-            description: n ? `**${n}** membre${n > 1 ? 's' : ''} déconnecté${n > 1 ? 's' : ''} de ${channel}.` : `Personne n'était connecté à ${channel}.`,
-            fields: [field(ICONS.voice, 'Salon', `${channel}`), field(ICONS.success, 'Déconnectés', `**${n}**`), field(ICONS.error, 'Échecs', `**${failed}**`)],
+            description: n
+              ? `**${n}** membre${n > 1 ? 's' : ''} déconnecté${n > 1 ? 's' : ''} de ${channel}.`
+              : protectedCount ? `Aucun membre de ${channel} ne pouvait être déconnecté par vous.` : `Personne n'était connecté à ${channel}.`,
+            fields: [
+              field(ICONS.voice, 'Salon', `${channel}`),
+              field(ICONS.success, 'Déconnectés', `**${n}**`),
+              field(ICONS.error, 'Échecs', `**${failed}**`),
+              protectedCount ? field(ICONS.shield, 'Ignorés (hiérarchie)', `**${protectedCount}**`) : null,
+            ],
           }),
         ],
       });
@@ -135,12 +163,13 @@ module.exports = {
       const channel = interaction.options.getChannel('salon');
       const from = member.voice.channel;
       if (from?.id === channel.id) throw new UserError(`${user} est déjà dans ${channel}.`);
+      assertCanActOn(interaction, member, 'déplacer');
       assertCanMoveTo(interaction, channel);
       await member.voice.setChannel(channel, `Par ${interaction.user.tag}`);
       return interaction.reply(moveView({ member, from, to: channel, moderator: interaction.user, ownerId }));
     }
     if (sub === 'kick' || sub === 'disconnect') {
-      if (member.id !== interaction.user.id) assertCanModerate(interaction.member, member, me, { action: 'déconnecter' });
+      assertCanActOn(interaction, member, 'déconnecter');
       const from = member.voice.channel;
       await member.voice.disconnect(`Par ${interaction.user.tag}`);
       return interaction.reply({
@@ -179,6 +208,7 @@ module.exports = {
     async moveback(interaction, client, [memberId, channelId, ownerId]) {
       requirePermission(interaction, PermissionFlagsBits.MoveMembers, 'Déplacer des membres');
       const member = await voiceMember(interaction.guild, memberId);
+      assertCanActOn(interaction, member, 'déplacer');
       const target = interaction.guild.channels.cache.get(channelId);
       if (!target?.isVoiceBased?.()) throw new UserError('Le salon d\'origine n\'existe plus.');
       assertCanMoveTo(interaction, target);
