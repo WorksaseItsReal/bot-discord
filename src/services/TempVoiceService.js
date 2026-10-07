@@ -42,17 +42,56 @@ class TempVoiceService {
 
   async #createFor(state, cfg) {
     const member = state.member;
+    if (!member) return;
     const name = (cfg.nameTemplate || 'Vocal de {user}').replace('{user}', member.displayName);
+    // Catégorie configurée supprimée : on retombe sur celle du hub.
+    const category = cfg.categoryId && state.guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? cfg.categoryId : null;
     const channel = await state.guild.channels.create({
-      name: name.slice(0, 90),
+      name: name.slice(0, 90) || 'Vocal',
       type: ChannelType.GuildVoice,
-      parent: cfg.categoryId || state.channel?.parentId || null,
+      parent: category || state.channel?.parentId || null,
       permissionOverwrites: [
         { id: member.id, allow: [PermissionFlagsBits.ManageChannels, PermissionFlagsBits.MoveMembers, PermissionFlagsBits.Connect] },
       ],
     });
     this.tempVoice.create(channel.id, state.guild.id, member.id);
-    await member.voice.setChannel(channel).catch(() => {});
+    try {
+      await member.voice.setChannel(channel);
+    } catch {
+      // Le membre a quitté entre-temps (ou déplacement impossible) : pas de salon orphelin.
+      this.tempVoice.delete(channel.id);
+      await channel.delete().catch(() => {});
+    }
+  }
+
+  /**
+   * Nettoyage au démarrage : supprime les salons temporaires vides et oublie
+   * ceux qui n'existent plus (suppressions survenues pendant que le bot était hors ligne).
+   * @param {import('discord.js').Client} client
+   * @returns {Promise<{ deleted: number, dropped: number }>}
+   */
+  async cleanup(client) {
+    let deleted = 0;
+    let dropped = 0;
+    for (const record of this.tempVoice.all()) {
+      const guild = client.guilds.cache.get(record.guild_id);
+      if (!guild) {
+        // Serveur indisponible (panne) ou quitté : on ne touche à rien, il peut revenir.
+        continue;
+      }
+      const channel = await guild.channels.fetch(record.channel_id).catch(() => null);
+      if (!channel) {
+        this.tempVoice.delete(record.channel_id);
+        dropped += 1;
+        continue;
+      }
+      if (channel.members?.size === 0) {
+        this.tempVoice.delete(record.channel_id);
+        await channel.delete('Vocal temporaire vide').catch(() => {});
+        deleted += 1;
+      }
+    }
+    return { deleted, dropped };
   }
 }
 

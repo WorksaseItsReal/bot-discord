@@ -2,7 +2,8 @@
 
 const { EmbedBuilder } = require('discord.js');
 const { successReply } = require('../utils/embeds');
-const { parseColor } = require('../commands/utility/embed');
+const { parseColor, isHttpUrl } = require('../commands/utility/embed');
+const { UserError } = require('../core/errors');
 
 /**
  * Réception du modal du constructeur d'embed.
@@ -17,7 +18,8 @@ module.exports = {
     const title = interaction.fields.getTextInputValue('title');
     const description = interaction.fields.getTextInputValue('description');
     const color = interaction.fields.getTextInputValue('color');
-    const image = interaction.fields.getTextInputValue('image');
+    const image = interaction.fields.getTextInputValue('image')?.trim();
+    if (image && !isHttpUrl(image)) throw new UserError('L\'URL de l\'image doit commencer par `http://` ou `https://`.');
     if (title) embed.setTitle(title);
     embed.setDescription(description);
     embed.setColor(parseColor(color) ?? 0x5865f2);

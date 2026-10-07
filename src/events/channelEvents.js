@@ -20,6 +20,16 @@ module.exports = [
     name: 'channelDelete',
     async execute(client, channel) {
       if (!channel.guild) return;
+      // Nettoyage des lignes liées au salon supprimé : sinon le membre resterait
+      // « bloqué » (limite de tickets atteinte, conversation ModMail fantôme…).
+      try {
+        const repos = client.repositories;
+        repos?.tickets?.delete(channel.id);
+        repos?.modmail?.close(channel.id);
+        repos?.tempVoice?.delete(channel.id);
+      } catch {
+        /* nettoyage best-effort */
+      }
       const executor = await fetchExecutor(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
       await client.services.logging.send(channel.guild.id, 'channels', embeds.error(`Salon supprimé : **${channel.name}**${executor ? ` par <@${executor}>` : ''}`, '📁 Salon supprimé'));
       if (executor) await client.services.antiraid.handleDestructive(channel.guild, executor, 'channelDelete').catch(() => {});

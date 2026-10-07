@@ -9,7 +9,6 @@ module.exports = {
     .setName('antiraid')
     .setDescription('Configuration de l\'AntiRaid.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
     .addSubcommand((s) => s.setName('enable').setDescription('Active l\'AntiRaid.'))
     .addSubcommand((s) => s.setName('disable').setDescription('Désactive l\'AntiRaid.'))
     .addSubcommand((s) => s.setName('status').setDescription('Affiche la configuration AntiRaid.'))

@@ -178,6 +178,54 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 3,
+    name: 'projects',
+    up: `
+      -- Projets du serveur (vitrine + suivi). number = numéro lisible propre au serveur.
+      CREATE TABLE IF NOT EXISTS projects (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id    TEXT NOT NULL,
+        number      INTEGER NOT NULL,
+        name        TEXT NOT NULL,
+        description TEXT,
+        status      TEXT NOT NULL DEFAULT 'planifie',
+        progress    INTEGER,                       -- null = calculée depuis les tâches
+        owner_id    TEXT NOT NULL,
+        color       INTEGER,
+        image_url   TEXT,
+        thumbnail_url TEXT,
+        deadline    INTEGER,
+        tags        TEXT NOT NULL DEFAULT '[]',    -- JSON string[]
+        links       TEXT NOT NULL DEFAULT '[]',    -- JSON {label,url}[]
+        channel_id  TEXT,                          -- message publié (mise à jour en direct)
+        message_id  TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        UNIQUE (guild_id, number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_projects_guild ON projects (guild_id, status);
+
+      CREATE TABLE IF NOT EXISTS project_members (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id    TEXT NOT NULL,
+        role       TEXT,
+        added_at   INTEGER NOT NULL,
+        PRIMARY KEY (project_id, user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS project_tasks (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        title      TEXT NOT NULL,
+        done       INTEGER NOT NULL DEFAULT 0,
+        done_by    TEXT,
+        done_at    INTEGER,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks (project_id);
+    `,
+  },
 ];
 
 module.exports = { migrations };

@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { embeds, successReply, listOrMore } = require('../../utils/embeds');
 
 /**
  * Whitelist de sécurité : les utilisateurs/rôles whitelistés échappent aux
@@ -13,7 +13,6 @@ module.exports = {
     .setName('whitelist')
     .setDescription('Gère la whitelist de sécurité (AntiRaid).')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('add').setDescription('Ajoute un utilisateur ou un rôle.')
         .addUserOption((o) => o.setName('utilisateur').setDescription('Utilisateur'))
@@ -33,8 +32,8 @@ module.exports = {
     if (sub === 'list') {
       return interaction.reply({
         embeds: [embeds.security('🔐 Whitelist').addFields(
-          { name: 'Utilisateurs', value: wl.users.map((u) => `<@${u}>`).join(' ') || '—' },
-          { name: 'Rôles', value: wl.roles.map((r) => `<@&${r}>`).join(' ') || '—' },
+          { name: `Utilisateurs (${wl.users.length})`, value: listOrMore(wl.users.map((u) => `<@${u}>`), 35, ' ') },
+          { name: `Rôles (${wl.roles.length})`, value: listOrMore(wl.roles.map((r) => `<@&${r}>`), 35, ' ') },
         )],
         ephemeral: true,
       });

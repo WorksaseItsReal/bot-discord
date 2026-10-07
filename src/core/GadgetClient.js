@@ -8,6 +8,7 @@ const { createLogger } = require('./logger');
 const { CommandHandler } = require('./CommandHandler');
 const { EventHandler } = require('./EventHandler');
 const { ComponentHandler } = require('./ComponentHandler');
+const { CooldownManager } = require('./cooldowns');
 const { DatabaseManager } = require('../database');
 const { GuildConfigRepository } = require('../database/repositories/GuildConfigRepository');
 const { SanctionRepository } = require('../database/repositories/SanctionRepository');
@@ -22,6 +23,7 @@ const { BackupRepository } = require('../database/repositories/BackupRepository'
 const { ModmailRepository } = require('../database/repositories/ModmailRepository');
 const { TempVoiceRepository } = require('../database/repositories/TempVoiceRepository');
 const { LockRepository } = require('../database/repositories/LockRepository');
+const { ProjectRepository } = require('../database/repositories/ProjectRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -36,6 +38,7 @@ const { SuggestionService } = require('../services/SuggestionService');
 const { BackupService } = require('../services/BackupService');
 const { ModmailService } = require('../services/ModmailService');
 const { TempVoiceService } = require('../services/TempVoiceService');
+const { ProjectService } = require('../services/ProjectService');
 
 const logger = createLogger('client');
 
@@ -52,6 +55,9 @@ class GadgetClient extends Client {
     /** @type {Collection<string, object>} */
     this.commands = new Collection();
     this.startedAt = Date.now();
+    this.cooldowns = new CooldownManager();
+    /** Compteurs d'exécution (affichés par /botinfo et /health). */
+    this.stats = { commandsRun: 0, errors: 0 };
 
     this.database = new DatabaseManager(config.databasePath);
     this.commandHandler = new CommandHandler();
@@ -81,6 +87,7 @@ class GadgetClient extends Client {
       modmail: new ModmailRepository(db),
       tempVoice: new TempVoiceRepository(db),
       locks: new LockRepository(db),
+      projects: new ProjectRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -101,6 +108,7 @@ class GadgetClient extends Client {
       backup: new BackupService({ backups: this.repositories.backups }),
       modmail: new ModmailService({ client: this, modmail: this.repositories.modmail, config: configService }),
       tempVoice: new TempVoiceService({ tempVoice: this.repositories.tempVoice, config: configService }),
+      projects: new ProjectService({ client: this, projects: this.repositories.projects, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -113,6 +121,22 @@ class GadgetClient extends Client {
     this.bootstrap();
     await this.login(config.token);
     this.services.scheduler.start();
+  }
+
+  /** Arrêt propre : stoppe le scheduler, ferme la connexion Discord puis la base. */
+  async shutdown() {
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    try {
+      this.services?.scheduler?.stop();
+    } catch (err) {
+      logger.warn('Arrêt du scheduler :', err?.message);
+    }
+    try {
+      await this.destroy();
+    } catch (err) {
+      logger.warn('Fermeture de la connexion Discord :', err?.message);
+    }
+    this.database?.close();
   }
 
   get uptime() {

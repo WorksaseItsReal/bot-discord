@@ -9,7 +9,6 @@ module.exports = {
     .setName('lock')
     .setDescription('Verrouille un salon (empêche @everyone d\'écrire).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .setDMPermission(false)
     .addChannelOption((o) => o.setName('salon').setDescription('Salon (par défaut: actuel)').addChannelTypes(ChannelType.GuildText)),
 
   async execute(interaction, client) {

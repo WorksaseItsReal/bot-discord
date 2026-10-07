@@ -11,9 +11,8 @@ module.exports = {
     .setName('kick')
     .setDescription('Expulse un membre du serveur.')
     .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre à expulser').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison de l\'expulsion')),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison de l\'expulsion').setMaxLength(512)),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {

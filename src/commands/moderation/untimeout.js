@@ -10,7 +10,6 @@ module.exports = {
     .setName('untimeout')
     .setDescription('Retire le timeout d\'un membre.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre concerné').setRequired(true)),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */

@@ -13,7 +13,6 @@ module.exports = {
     .setName('sanctions')
     .setDescription('Gère l\'historique des sanctions d\'un membre.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('list').setDescription('Affiche l\'historique d\'un membre.').addUserOption((o) => o.setName('membre').setDescription('Le membre').setRequired(true)),
     )

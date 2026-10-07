@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
+const { embeds, truncate } = require('../../utils/embeds');
 
 const LOG_CATEGORIES = ['moderation', 'messages', 'members', 'roles', 'channels', 'voice', 'security', 'automod'];
 
@@ -11,7 +11,6 @@ module.exports = {
     .setName('settings')
     .setDescription('Configure le bot pour ce serveur.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .setDMPermission(false)
     .addSubcommand((s) => s.setName('view').setDescription('Affiche la configuration actuelle.'))
     .addSubcommand((s) =>
       s
@@ -42,13 +41,13 @@ module.exports = {
 
     if (sub === 'view') {
       const cfg = config.get(guildId);
-      const logs = Object.entries(cfg.logChannels)
+      const logs = Object.entries(cfg.logChannels || {})
         .map(([k, v]) => `• **${k}** : ${v ? `<#${v}>` : '—'}`)
         .join('\n');
       const embed = embeds.neutral('⚙️ Configuration du serveur').addFields(
-        { name: 'Salons de logs', value: logs },
+        { name: 'Salons de logs', value: truncate(logs, 1024) || '—' },
         { name: 'Modération', value: `DM au sanctionné : **${cfg.moderation.dmOnSanction ? 'oui' : 'non'}**\nConfirmation actions dangereuses : **${cfg.moderation.confirmDangerous ? 'oui' : 'non'}**` },
-        { name: 'Strikes', value: cfg.strikes.enabled ? cfg.strikes.thresholds.map((t) => `${t.strikes} → ${t.action}${t.duration ? ` (${t.duration})` : ''}`).join('\n') : 'Désactivé' },
+        { name: 'Strikes', value: cfg.strikes?.enabled ? truncate((cfg.strikes.thresholds || []).map((t) => `${t.strikes} → ${t.action}${t.duration ? ` (${t.duration})` : ''}`).join('\n'), 1024) || 'Activé (aucun palier)' : 'Désactivé' },
       );
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }

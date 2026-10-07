@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { embeds, successReply, truncate } = require('../../utils/embeds');
 const { parseDuration, discordTimestamp } = require('../../utils/time');
 const { UserError } = require('../../core/errors');
 
@@ -17,7 +17,7 @@ module.exports = {
     .addSubcommand((s) =>
       s.setName('create').setDescription('Crée un rappel.')
         .addStringOption((o) => o.setName('duree').setDescription('Dans combien de temps ? (ex: 10m, 2h, 1d)').setRequired(true))
-        .addStringOption((o) => o.setName('message').setDescription('Message du rappel').setRequired(true)))
+        .addStringOption((o) => o.setName('message').setDescription('Message du rappel').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste vos rappels.'))
     .addSubcommand((s) => s.setName('delete').setDescription('Supprime un rappel.').addIntegerOption((o) => o.setName('id').setDescription('ID du rappel').setRequired(true))),
 
@@ -28,7 +28,9 @@ module.exports = {
     if (sub === 'create') {
       const ms = parseDuration(interaction.options.getString('duree'));
       if (!ms) throw new UserError('Durée invalide (ex: `10m`, `2h`, `1d`).');
-      const message = interaction.options.getString('message');
+      const message = interaction.options.getString('message').trim();
+      if (!message) throw new UserError('Le message du rappel ne peut pas être vide.');
+      if (message.length > 2000) throw new UserError('Le message du rappel est trop long (2000 caractères max).');
       const remindAt = Date.now() + ms;
       const id = repo.create({ guildId: interaction.guildId, channelId: interaction.channelId, userId: interaction.user.id, message, remindAt });
       return interaction.reply(successReply(`Rappel **#${id}** créé pour ${discordTimestamp(remindAt)}.`, { ephemeral: true }));
@@ -37,7 +39,7 @@ module.exports = {
       const list = repo.listByUser(interaction.user.id);
       if (!list.length) return interaction.reply({ embeds: [embeds.info('Vous n\'avez aucun rappel.')], ephemeral: true });
       const embed = embeds.neutral('⏰ Vos rappels').setDescription(
-        list.map((r) => `**#${r.id}** — ${discordTimestamp(r.remind_at, 'R')} : ${r.message.slice(0, 100)}`).join('\n'),
+        truncate(list.map((r) => `**#${r.id}** — ${discordTimestamp(r.remind_at, 'R')} : ${truncate(r.message, 100)}`).join('\n'), 4000),
       );
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }

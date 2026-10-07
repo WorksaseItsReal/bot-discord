@@ -10,7 +10,6 @@ module.exports = {
     .setName('unmute')
     .setDescription('Retire le mute d\'un membre.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre').setRequired(true)),
 
   async execute(interaction, client) {

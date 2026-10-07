@@ -20,12 +20,15 @@ module.exports = {
       return interaction.editReply({ embeds: [embeds.success(`Votre ticket a été créé : ${channel}`)] });
     }
     if (action === 'claim') {
-      await tickets.claim(interaction.channel, interaction.user);
+      await tickets.claim(interaction.channel, interaction.member);
       return interaction.reply({ embeds: [embeds.success(`Ticket réclamé par ${interaction.user}.`)], ephemeral: true });
     }
     if (action === 'close') {
-      await interaction.reply({ embeds: [embeds.warning('Fermeture du ticket dans 3 secondes…')], ephemeral: true });
-      setTimeout(() => tickets.close(interaction.channel, interaction.user).catch(() => {}), 3000);
+      // Un second clic pendant le délai est refusé par le service (UserError).
+      await tickets.close(interaction.channel, interaction.user, {
+        delayMs: 3000,
+        onAccepted: () => interaction.reply({ embeds: [embeds.warning('Fermeture du ticket dans 3 secondes…')], ephemeral: true }),
+      });
     }
   },
 };

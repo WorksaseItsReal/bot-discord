@@ -18,11 +18,14 @@ async function main() {
 
   const client = new GadgetClient();
 
-  const shutdown = (signal) => {
+  let stopping = false;
+  const shutdown = async (signal) => {
+    if (stopping) return;
+    stopping = true;
     logger.info(`Signal ${signal} reçu, arrêt propre...`);
-    client.services?.scheduler?.stop();
-    client.database?.close();
-    client.destroy();
+    // Garde-fou : si la fermeture bloque, on quitte quand même après 10 s.
+    setTimeout(() => process.exit(0), 10_000).unref();
+    await client.shutdown();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));

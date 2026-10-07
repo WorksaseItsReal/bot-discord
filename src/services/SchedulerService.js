@@ -1,7 +1,7 @@
 'use strict';
 
 const { createLogger } = require('../core/logger');
-const { embeds } = require('../utils/embeds');
+const { embeds, truncate } = require('../utils/embeds');
 
 const logger = createLogger('scheduler');
 
@@ -25,6 +25,7 @@ class SchedulerService {
     this.reminders = reminders;
     this.intervalMs = intervalMs;
     this.timer = null;
+    this.running = false;
   }
 
   start() {
@@ -37,13 +38,23 @@ class SchedulerService {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.running = false;
   }
 
   async tick() {
-    await this.#processExpiredBans();
-    await this.#processDueReminders();
-    await this.#processDueGiveaways();
-    await this.#processAutobackup();
+    // Garde anti-réentrance : un tick lent (rate limit, API lente) ne doit jamais
+    // se chevaucher avec le suivant, sinon les mêmes échéances (bans, rappels,
+    // giveaways) seraient traitées deux fois.
+    if (this.running) return;
+    this.running = true;
+    try {
+      await this.#processExpiredBans();
+      await this.#processDueReminders();
+      await this.#processDueGiveaways();
+      await this.#processAutobackup();
+    } finally {
+      this.running = false;
+    }
   }
 
   async #processDueGiveaways() {
@@ -77,13 +88,24 @@ class SchedulerService {
   async #processExpiredBans() {
     const due = this.sanctions.findDue();
     for (const s of due) {
-      this.sanctions.deactivate(s.id);
+      if (s.type !== 'tempban' && s.type !== 'mute') {
+        this.sanctions.deactivate(s.id); // timeout : expiré côté Discord
+        continue;
+      }
       const guild = this.client.guilds.cache.get(s.guild_id);
-      if (!guild) continue;
+      // Serveur indisponible (outage, cache pas encore prêt) : on réessaie au prochain tick.
+      if (!guild?.available) continue;
       if (s.type === 'tempban') {
-        await guild.bans.remove(s.user_id, 'Fin du bannissement temporaire').catch(() => {});
-        logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
-      } else if (s.type === 'mute') {
+        try {
+          await guild.bans.remove(s.user_id, 'Fin du bannissement temporaire');
+          this.sanctions.deactivate(s.id);
+          logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
+        } catch (e) {
+          // 10026 Unknown Ban : déjà débanni manuellement → rien à faire.
+          if (e?.code === 10026) this.sanctions.deactivate(s.id);
+          else logger.debug(`Débannissement automatique échoué (réessai) guild=${s.guild_id} user=${s.user_id}`, e?.message);
+        }
+      } else {
         const cfg = this.client.services.config.get(guild.id);
         const roleId = cfg.moderation?.mutedRoleId;
         const member = roleId ? await guild.members.fetch(s.user_id).catch(() => null) : null;
@@ -91,6 +113,7 @@ class SchedulerService {
           await member.roles.remove(roleId, 'Fin du mute temporaire').catch(() => {});
           logger.info(`Mute temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
         }
+        this.sanctions.deactivate(s.id);
       }
     }
   }
@@ -101,7 +124,7 @@ class SchedulerService {
       this.reminders.deleteById(r.id);
       try {
         const user = await this.client.users.fetch(r.user_id);
-        const embed = embeds.info(r.message, '⏰ Rappel');
+        const embed = embeds.info(truncate(r.message, 4000), '⏰ Rappel');
         const channel = r.channel_id ? await this.client.channels.fetch(r.channel_id).catch(() => null) : null;
         if (channel?.isTextBased()) await channel.send({ content: `${user}`, embeds: [embed] });
         else await user.send({ embeds: [embed] });

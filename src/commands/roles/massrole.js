@@ -14,7 +14,6 @@ module.exports = {
     .setName('massrole')
     .setDescription('Ajoute ou retire un rôle en masse.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
     .addStringOption((o) => o.setName('action').setDescription('Action').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }))
     .addRoleOption((o) => o.setName('role').setDescription('Rôle cible').setRequired(true))
     .addStringOption((o) => o.setName('cible').setDescription('Qui ?').addChoices({ name: 'tous', value: 'all' }, { name: 'humains', value: 'humans' }, { name: 'bots', value: 'bots' })),
@@ -23,8 +22,13 @@ module.exports = {
     const action = interaction.options.getString('action');
     const role = interaction.options.getRole('role');
     const target = interaction.options.getString('cible') || 'all';
+    if (role.id === interaction.guild.id) throw new UserError('Le rôle @everyone ne peut pas être attribué ou retiré.');
+    if (role.managed) throw new UserError('Ce rôle est géré par une intégration et ne peut pas être attribué manuellement.');
     if (role.position >= interaction.guild.members.me.roles.highest.position) {
       throw new UserError('Ce rôle est trop haut pour que je puisse le gérer.');
+    }
+    if (interaction.user.id !== interaction.guild.ownerId && role.position >= interaction.member.roles.highest.position) {
+      throw new UserError('Ce rôle est au-dessus (ou égal) à votre rôle le plus haut.');
     }
 
     await interaction.deferReply();

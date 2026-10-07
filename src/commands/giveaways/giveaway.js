@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { embeds, successReply, truncate } = require('../../utils/embeds');
 const { parseDuration, discordTimestamp } = require('../../utils/time');
 const { UserError } = require('../../core/errors');
 
@@ -11,10 +11,9 @@ module.exports = {
     .setName('giveaway')
     .setDescription('Système de giveaways.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageEvents)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('create').setDescription('Crée un giveaway.')
-        .addStringOption((o) => o.setName('recompense').setDescription('Récompense').setRequired(true))
+        .addStringOption((o) => o.setName('recompense').setDescription('Récompense').setRequired(true).setMaxLength(200))
         .addStringOption((o) => o.setName('duree').setDescription('Durée (ex: 1h, 2d)').setRequired(true))
         .addIntegerOption((o) => o.setName('gagnants').setDescription('Nombre de gagnants').setMinValue(1).setMaxValue(20))
         .addRoleOption((o) => o.setName('role_requis').setDescription('Rôle requis pour participer'))
@@ -40,19 +39,19 @@ module.exports = {
 
     if (sub === 'end') {
       const id = interaction.options.getInteger('id');
-      await giveaways.end(id);
+      await giveaways.end(id, { guildId: interaction.guild.id });
       return interaction.reply(successReply(`Giveaway #${id} terminé.`, { ephemeral: true }));
     }
     if (sub === 'reroll') {
       const id = interaction.options.getInteger('id');
-      const winners = await giveaways.end(id, { reroll: true });
+      const winners = await giveaways.end(id, { reroll: true, guildId: interaction.guild.id });
       return interaction.reply(successReply(winners.length ? `Nouveaux gagnants tirés.` : 'Aucun participant à retirer.', { ephemeral: true }));
     }
     if (sub === 'list') {
       const active = giveaways.listActive(interaction.guild.id);
       if (!active.length) return interaction.reply({ embeds: [embeds.info('Aucun giveaway en cours.')], ephemeral: true });
       const embed = embeds.neutral('🎉 Giveaways en cours').setDescription(
-        active.map((g) => `**#${g.id}** — ${g.prize} · fin ${discordTimestamp(g.ends_at, 'R')} · ${g.winners} gagnant(s)`).join('\n'),
+        truncate(active.map((g) => `**#${g.id}** — ${truncate(g.prize, 100)} · fin ${discordTimestamp(g.ends_at, 'R')} · ${g.winners} gagnant(s)`).join('\n'), 4000),
       );
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }

@@ -1,11 +1,13 @@
 'use strict';
 
 const { SlidingWindow } = require('../utils/rate');
-const { embeds } = require('../utils/embeds');
+const { embeds, truncate } = require('../utils/embeds');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('antiraid');
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Délai minimal entre deux alertes « vague d'arrivées » (et lockdowns auto) par serveur. */
+const JOIN_ALERT_COOLDOWN_MS = 60_000;
 
 /**
  * Sécurité anti-raid : détection de vagues d'arrivées, comptes trop récents,
@@ -27,6 +29,8 @@ class AntiRaidService {
     this.joinWindows = new Map();
     /** @type {Map<string, SlidingWindow>} */
     this.destructiveWindows = new Map();
+    /** @type {Map<string, number>} dernier déclenchement d'alerte de vague par serveur */
+    this.joinAlertAt = new Map();
   }
 
   isWhitelisted(guildId, userId, roleIds = []) {
@@ -48,7 +52,7 @@ class AntiRaidService {
   async handleJoin(member) {
     const cfg = this.config.get(member.guild.id).antiraid;
     if (!cfg?.enabled) return;
-    if (this.isWhitelisted(member.guild.id, member.id)) return;
+    if (this.isWhitelisted(member.guild.id, member.id, [...(member.roles?.cache?.keys() ?? [])])) return;
 
     // Anti-bot : bot ajouté hors whitelist
     if (cfg.antiBot && member.user.bot) {
@@ -69,6 +73,12 @@ class AntiRaidService {
     const w = this.#window(this.joinWindows, member.guild.id, cfg.joinWindowSeconds * 1000);
     const count = w.hit();
     if (count >= cfg.joinThreshold) {
+      // Réinitialise la fenêtre et applique un cooldown : une seule alerte (et un seul
+      // lockdown) par vague, au lieu d'une à chaque arrivée au-delà du seuil.
+      w.reset();
+      const now = Date.now();
+      if (now - (this.joinAlertAt.get(member.guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS) return;
+      this.joinAlertAt.set(member.guild.id, now);
       await this.alert(member.guild, `🚨 Vague d'arrivées détectée : **${count}** en ${cfg.joinWindowSeconds}s.`);
       if (cfg.action === 'lockdown') await this.#tryLockdown(member.guild);
     }
@@ -85,7 +95,8 @@ class AntiRaidService {
     if (!cfg?.enabled || !executorId) return;
     if (executorId === this.client.user.id) return;
     if (executorId === guild.ownerId) return;
-    if (this.isWhitelisted(guild.id, executorId)) return;
+    const executor = await guild.members.fetch(executorId).catch(() => null);
+    if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [])) return;
 
     const thresholds = {
       channelDelete: cfg.channelDeleteThreshold,
@@ -137,11 +148,13 @@ class AntiRaidService {
   }
 
   async alert(guild, text) {
-    const cfg = this.config.get(guild.id).antiraid;
-    const channelId = cfg.alertChannel || this.config.get(guild.id).logChannels?.security;
-    const embed = embeds.security('AntiRaid').setDescription(text);
-    if (channelId) {
-      const channel = await this.client.channels.fetch(channelId).catch(() => null);
+    const guildCfg = this.config.get(guild.id);
+    const alertChannelId = guildCfg.antiraid?.alertChannel;
+    const embed = embeds.security('AntiRaid').setDescription(truncate(text, 4096));
+    // Salon d'alertes dédié uniquement s'il diffère du salon de logs sécurité,
+    // sinon l'alerte serait postée deux fois au même endroit.
+    if (alertChannelId && alertChannelId !== guildCfg.logChannels?.security) {
+      const channel = await this.client.channels.fetch(alertChannelId).catch(() => null);
       if (channel?.isTextBased()) await channel.send({ embeds: [embed] }).catch(() => {});
     }
     await this.logging.send(guild.id, 'security', embed);

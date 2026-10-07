@@ -23,6 +23,8 @@ module.exports = [
   {
     name: 'guildBanRemove',
     async execute(client, ban) {
+      // Débannissement (commande, scheduler ou manuel) : plus aucun ban temporaire actif.
+      client.services.moderation?.clearTempbans(ban.guild.id, ban.user.id);
       await client.services.logging.send(ban.guild.id, 'moderation', embeds.success(`${ban.user.tag} (${ban.user.id}) a été débanni.`, '🔓 Débannissement'));
     },
   },

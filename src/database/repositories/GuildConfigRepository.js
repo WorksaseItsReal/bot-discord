@@ -1,5 +1,9 @@
 'use strict';
 
+const { createLogger } = require('../../core/logger');
+
+const logger = createLogger('config');
+
 /**
  * Accès aux configurations de serveur. La configuration est stockée en JSON
  * dans la colonne `data`. La fusion avec les valeurs par défaut est faite au
@@ -19,7 +23,13 @@ class GuildConfigRepository {
   /** @returns {object|null} config brute (sans defaults) */
   get(guildId) {
     const row = this.getStmt.get(guildId);
-    return row ? JSON.parse(row.data) : null;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.data);
+    } catch (err) {
+      logger.error(`Configuration JSON corrompue pour le serveur ${guildId} (valeurs par défaut utilisées) :`, err?.message);
+      return null;
+    }
   }
 
   set(guildId, data) {

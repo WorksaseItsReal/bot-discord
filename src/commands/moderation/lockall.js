@@ -8,8 +8,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('lockall')
     .setDescription('Verrouille tous les salons textuels du serveur.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false),
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction, client) {
     await interaction.deferReply();

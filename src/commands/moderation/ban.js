@@ -12,9 +12,8 @@ module.exports = {
     .setName('ban')
     .setDescription('Bannit un membre (définitivement ou temporairement).')
     .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre à bannir').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison du bannissement'))
+    .addStringOption((o) => o.setName('raison').setDescription('Raison du bannissement').setMaxLength(512))
     .addStringOption((o) => o.setName('duree').setDescription('Durée (ex: 7d, 12h). Vide = permanent'))
     .addIntegerOption((o) =>
       o.setName('purge_jours').setDescription('Supprimer les messages des X derniers jours (0-7)').setMinValue(0).setMaxValue(7),

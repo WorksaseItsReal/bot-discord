@@ -12,6 +12,8 @@ class SuggestionRepository {
     this.byMessageStmt = db.prepare('SELECT * FROM suggestions WHERE message_id = ?');
     this.listStmt = db.prepare('SELECT * FROM suggestions WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?');
     this.setStatusStmt = db.prepare('UPDATE suggestions SET status = ? WHERE id = ?');
+    this.deleteStmt = db.prepare('DELETE FROM suggestions WHERE id = ?');
+    this.deleteVotesStmt = db.prepare('DELETE FROM suggestion_votes WHERE suggestion_id = ?');
     this.voteStmt = db.prepare(
       `INSERT INTO suggestion_votes (suggestion_id, user_id, value) VALUES (@id, @userId, @value)
        ON CONFLICT(suggestion_id, user_id) DO UPDATE SET value = @value`,
@@ -42,6 +44,12 @@ class SuggestionRepository {
 
   list(guildId, limit = 15) {
     return this.listStmt.all(guildId, limit);
+  }
+
+  /** Supprime une suggestion et ses votes (ex : message jamais publié). */
+  delete(id) {
+    this.deleteVotesStmt.run(id);
+    return this.deleteStmt.run(id).changes > 0;
   }
 
   setStatus(id, status) {

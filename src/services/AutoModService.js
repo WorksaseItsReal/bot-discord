@@ -2,8 +2,12 @@
 
 const checks = require('../utils/automodChecks');
 const { parseDuration } = require('../utils/time');
-const { embeds } = require('../utils/embeds');
+const { embeds, truncate } = require('../utils/embeds');
 const { PermissionFlagsBits } = require('discord.js');
+
+/** Inactivité au-delà de laquelle l'état d'un membre est oublié (mémoire bornée). */
+const TRACKER_TTL_MS = 10 * 60 * 1000;
+const PRUNE_INTERVAL_MS = 60 * 1000;
 
 /**
  * Moteur AutoMod. Combine des détecteurs purs et un suivi temporel en mémoire
@@ -20,8 +24,17 @@ class AutoModService {
     this.config = config;
     this.logging = logging;
     this.moderation = moderation;
-    /** @type {Map<string, {times:number[], last:string, lastCount:number}>} */
+    /** @type {Map<string, {spam:number[], flood:number[], last:string|null, lastCount:number, seen:number}>} */
     this.tracker = new Map();
+    this.lastPrune = Date.now();
+  }
+
+  /** Oublie les membres inactifs pour borner la mémoire du tracker. */
+  prune(now = Date.now()) {
+    this.lastPrune = now;
+    for (const [key, state] of this.tracker) {
+      if (now - state.seen > TRACKER_TTL_MS) this.tracker.delete(key);
+    }
   }
 
   #key(guildId, userId) {
@@ -32,8 +45,10 @@ class AutoModService {
    * Analyse un message. Effectue les actions nécessaires. Sans effet si l'AutoMod
    * est désactivé, si l'auteur est ignoré/immunisé, ou s'il n'y a pas de violation.
    * @param {import('discord.js').Message} message
+   * @param {{ edited?: boolean }} [opts] message édité : seuls les filtres de contenu
+   *   s'appliquent (pas de comptage spam/flood/doublons).
    */
-  async handleMessage(message) {
+  async handleMessage(message, { edited = false } = {}) {
     if (!message.guild || message.author.bot || !message.member) return;
     const cfg = this.config.get(message.guild.id).automod;
     if (!cfg?.enabled) return;
@@ -43,7 +58,7 @@ class AutoModService {
     if (cfg.ignoredChannels?.includes(message.channel.id)) return;
     if (message.member.roles.cache.some((r) => cfg.ignoredRoles?.includes(r.id))) return;
 
-    const violation = this.inspect(message, cfg.filters);
+    const violation = this.inspect(message, cfg.filters, { temporal: !edited });
     if (!violation) return;
     await this.#applyAction(message, violation);
   }
@@ -52,8 +67,9 @@ class AutoModService {
    * Détermine la première violation applicable. Renvoie { filter, action, duration, reason } ou null.
    * @param {import('discord.js').Message} message
    * @param {object} filters
+   * @param {{ temporal?: boolean }} [opts]
    */
-  inspect(message, filters = {}) {
+  inspect(message, filters = {}, { temporal = true } = {}) {
     const content = message.content || '';
     const f = filters;
 
@@ -64,20 +80,22 @@ class AutoModService {
     if (f.antiCaps?.enabled && checks.isExcessiveCaps(content, f.antiCaps)) return this.#v(f.antiCaps, 'Excès de majuscules');
     if (f.antiEmojiSpam?.enabled && checks.isEmojiSpam(content, f.antiEmojiSpam)) return this.#v(f.antiEmojiSpam, 'Spam d\'emojis');
 
+    if (!temporal) return null;
+
     // Détecteurs temporels / d'état
-    const key = this.#key(message.guild.id, message.author.id);
-    const state = this.tracker.get(key) || { times: [], last: null, lastCount: 0 };
     const now = Date.now();
+    if (now - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(now);
+    const key = this.#key(message.guild.id, message.author.id);
+    const state = this.tracker.get(key) || { spam: [], flood: [], last: null, lastCount: 0, seen: now };
+    state.seen = now;
+    this.tracker.set(key, state);
 
     if (f.antiDuplicate?.enabled || f.antiRepeat?.enabled) {
       if (state.last === content && content.length > 0) {
         state.lastCount += 1;
-        if (f.antiDuplicate?.enabled) {
-          this.tracker.set(key, state);
-          return this.#v(f.antiDuplicate, 'Message dupliqué');
-        }
+        if (f.antiDuplicate?.enabled) return this.#v(f.antiDuplicate, 'Message dupliqué');
         if (f.antiRepeat?.enabled && state.lastCount >= 3) {
-          this.tracker.set(key, state);
+          state.lastCount = 0; // réinitialise : pas une sanction par message suivant
           return this.#v(f.antiRepeat, 'Message répété');
         }
       } else {
@@ -86,20 +104,24 @@ class AutoModService {
       }
     }
 
-    if (f.antiSpam?.enabled || f.antiFlood?.enabled) {
-      const win = (f.antiSpam?.windowSeconds || f.antiFlood?.windowSeconds || 5) * 1000;
-      state.times = state.times.filter((t) => now - t < win);
-      state.times.push(now);
-      const limit = Math.min(f.antiSpam?.enabled ? f.antiSpam.limit : Infinity, f.antiFlood?.enabled ? f.antiFlood.limit : Infinity);
-      if (state.times.length >= limit) {
-        this.tracker.set(key, state);
-        const filter = f.antiSpam?.enabled && f.antiSpam.limit <= (f.antiFlood?.limit ?? Infinity) ? f.antiSpam : f.antiFlood;
-        return this.#v(filter, 'Spam / flood détecté');
+    // Chaque filtre activé est évalué avec SA fenêtre et SA limite.
+    let hit = null;
+    for (const [name, filter, reason] of [
+      ['spam', f.antiSpam, 'Spam détecté'],
+      ['flood', f.antiFlood, 'Flood détecté'],
+    ]) {
+      if (!filter?.enabled) continue;
+      const win = (filter.windowSeconds || 5) * 1000;
+      const times = state[name].filter((t) => now - t < win);
+      times.push(now);
+      if (times.length >= (filter.limit || 5)) {
+        state[name] = []; // réinitialise après violation
+        hit ??= this.#v(filter, reason);
+      } else {
+        state[name] = times;
       }
     }
-
-    this.tracker.set(key, state);
-    return null;
+    return hit;
   }
 
   #v(filter, reason) {
@@ -127,7 +149,7 @@ class AutoModService {
         { name: 'Salon', value: `${message.channel}`, inline: true },
         { name: 'Règle', value: violation.reason, inline: true },
         { name: 'Action', value: violation.action, inline: true },
-        { name: 'Message', value: (message.content || '—').slice(0, 1024) },
+        { name: 'Message', value: truncate(message.content || '—', 1024) },
       ),
     );
   }

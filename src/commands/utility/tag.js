@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
+const { embeds, truncate } = require('../../utils/embeds');
 const { UserError } = require('../../core/errors');
 
 /** Substitue les variables supportées dans le contenu d'un tag. */
@@ -17,7 +17,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('tag')
     .setDescription('Exécute une commande personnalisée (tag).')
-    .setDMPermission(false)
     .addStringOption((o) => o.setName('nom').setDescription('Nom du tag').setRequired(true).setAutocomplete(true)),
 
   async execute(interaction, client) {
@@ -25,8 +24,9 @@ module.exports = {
     const tag = client.repositories.customCommands.get(interaction.guild.id, name);
     if (!tag) throw new UserError('Tag introuvable. Voir `/custom list`.');
     const content = renderTag(tag.content, { user: interaction.user, guild: interaction.guild });
-    if (tag.is_embed) return interaction.reply({ embeds: [embeds.neutral(name).setDescription(content)] });
-    return interaction.reply({ content });
+    // Les variables ({server}…) peuvent faire dépasser les limites Discord.
+    if (tag.is_embed) return interaction.reply({ embeds: [embeds.neutral(name).setDescription(truncate(content, 4096) || '​')] });
+    return interaction.reply({ content: truncate(content, 2000) || '​', allowedMentions: { parse: ['users'] } });
   },
 
   async autocomplete(interaction, client) {

@@ -15,11 +15,11 @@ Une fonctionnalité n'est marquée terminée que si elle fonctionne réellement.
 | 6 | Sécurité | ✅ Terminée |
 | 7 | Community | ✅ Terminée |
 | 8 | Advanced tools | ✅ Terminée |
-| 9 | Raffinements & compléments | 🔜 Prévue |
+| 9 | Raffinements & compléments | 🚧 En cours (fiabilité, projets, cooldowns faits) |
 | 10+ | Plateforme (dashboard, API, IA…) | 🔒 Volontairement reporté |
 
-**Chiffres actuels** : 48 slash commands · 5 composants persistants · 18 événements ·
-2 migrations · 35 tests unitaires (verts). Dernière mise à jour : v0.2.0.
+**Chiffres actuels** : 67 slash commands · 6 composants persistants · 25 événements ·
+3 migrations · 90 tests unitaires (verts). Dernière mise à jour : v0.3.0.
 
 ## Phase 1 — Foundation
 - [x] Architecture modulaire (core / config / database / services / utils / commands / events / components)
@@ -94,7 +94,10 @@ Améliorations concrètes identifiées après la couverture complète des phases
 - [ ] Backups : inclure emojis & stickers (dans les limites de l'API Discord).
 - [ ] Internationalisation (i18n) : utiliser réellement le champ `locale` (fr/en).
 - [ ] `/logs` : commande unifiée pour configurer toutes les catégories de logs d'un coup.
-- [ ] Cooldowns par commande + anti-abus des interactions.
+- [x] Cooldowns par commande + anti-abus des interactions.
+- [x] Module Projets (`/projet`) avec fiches publiées mises à jour automatiquement.
+- [x] Couche de sûreté des interactions + traduction des erreurs Discord.
+- [x] Commandes fun & utilitaires (`/sondage`, `/calcul`, `/timestamp`, `/de`…).
 - [ ] Tests d'intégration supplémentaires (services tickets/giveaways avec mocks Discord).
 
 ## Phase 10+ — Plateforme (volontairement reporté)

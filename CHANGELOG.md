@@ -3,6 +3,48 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.3.0] — Non publié — Fiabilité, projets et nouvelles commandes
+
+### Added
+- **Projets** (`/projet`, 20 sous-commandes) : création, fiche en embed (statut coloré, barre de
+  progression, responsable, équipe avec rôles, tâches cochables, échéance avec alerte de retard,
+  tags, image, boutons de liens), modification par formulaire, publication dans un salon avec
+  mise à jour automatique, liste paginée, statistiques, transfert, configuration par serveur
+  (rôle gestionnaire, salon par défaut, création ouverte ou non, limite par membre).
+  Migration #3 (`projects`, `project_members`, `project_tasks`).
+- **19 nouvelles commandes** : `/projet`, `/sondage`, `/8ball`, `/pileface`, `/de`, `/choisir`,
+  `/pfc`, `/calcul` (évaluateur sûr, sans `eval`), `/timestamp`, `/couleur`, `/invite`, `/uptime`,
+  `/emoji`, `/banniere`, `/membres`, `/roles`, `/inrole`, `/slowmode`, `/pseudo`.
+- **Couche de sûreté des interactions** : plus de double réponse, conversion des options
+  dépréciées (`ephemeral`, `fetchReply`), troncature automatique des embeds.
+- **Routeur d'interactions** : garde « serveur uniquement », cooldowns, vérification des
+  permissions du bot (`botPermissions`), traduction des erreurs Discord, code de référence.
+- Écouteurs de santé de la connexion (`error`, `shardDisconnect`, `shardReconnecting`…),
+  statut tournant, arrêt propre asynchrone.
+- Thème d'embeds unifié avec pied de page de marque ; refonte de `/help`, `/ping`, `/botinfo`,
+  `/avatar`, `/user`.
+- Tests : 35 → 90 (validation des 67 commandes, couche de sûreté, projets, outils).
+
+### Fixed
+- `/rolemenu` et `/roleinfo` plantaient systématiquement.
+- `/unlockall` et `/lockdown disable` rendaient écrivables des salons en lecture seule.
+- Un ban permanent après un tempban était annulé à l'expiration du tempban ; les tempbans expirés
+  pouvaient ne jamais être levés après une panne.
+- Kick/ban enregistrés (sanction, MP, log) même quand l'action Discord échouait.
+- Giveaways et suggestions modifiables depuis un autre serveur ; giveaways terminés deux fois.
+- ModMail : salons en double et MP routés vers le mauvais serveur.
+- Ticket supprimé à la main bloquant définitivement l'utilisateur.
+- Élévation de privilèges via `/role`, `/rolemenu`, `/massrole`.
+- Restauration de backup rendant publics les salons privés.
+- AntiRaid : rôles whitelistés ignorés, alertes et lockdowns répétés à chaque arrivée.
+- AutoMod : mauvaise fenêtre anti-flood, compteurs jamais réinitialisés, contournement par édition.
+- Nombreux dépassements de limites d'embeds et délais de réponse dépassés (`/serverinfo`, `/warn`…).
+
+### Changed
+- `setDMPermission` (déprécié) remplacé par les contextes d'interaction, appliqués centralement.
+- `/tag` n'autorise plus les mentions de rôles ni @everyone.
+- Le menu de rôles ne retire plus les rôles non sélectionnés.
+
 ## [0.2.0] — Non publié — Roadmap complète
 
 ### Added

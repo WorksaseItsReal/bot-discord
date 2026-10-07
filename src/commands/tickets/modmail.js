@@ -9,7 +9,6 @@ module.exports = {
     .setName('modmail')
     .setDescription('Système ModMail (DM ↔ staff).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('setup').setDescription('Configure et active le ModMail.')
         .addChannelOption((o) => o.setName('categorie').setDescription('Catégorie des conversations').addChannelTypes(ChannelType.GuildCategory))
@@ -17,7 +16,7 @@ module.exports = {
         .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?')))
     .addSubcommand((s) =>
       s.setName('reply').setDescription('Répond à la conversation ModMail actuelle.')
-        .addStringOption((o) => o.setName('message').setDescription('Message').setRequired(true)))
+        .addStringOption((o) => o.setName('message').setDescription('Message').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) => s.setName('close').setDescription('Ferme la conversation ModMail actuelle.')),
 
   async execute(interaction, client) {

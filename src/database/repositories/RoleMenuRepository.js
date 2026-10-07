@@ -10,6 +10,11 @@ class RoleMenuRepository {
     this.setMessageStmt = db.prepare('UPDATE role_menus SET message_id = ? WHERE id = ?');
     this.byMessageStmt = db.prepare('SELECT * FROM role_menus WHERE message_id = ?');
     this.listStmt = db.prepare('SELECT * FROM role_menus WHERE guild_id = ? ORDER BY created_at DESC');
+    this.deleteStmt = db.prepare('DELETE FROM role_menus WHERE id = ?');
+  }
+
+  delete(id) {
+    return this.deleteStmt.run(id).changes > 0;
   }
 
   create(data) {

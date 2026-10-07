@@ -1,20 +1,19 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { embeds, successReply, truncate } = require('../../utils/embeds');
 
 module.exports = {
   category: 'suggestions',
   data: new SlashCommandBuilder()
     .setName('suggestion')
     .setDescription('Système de suggestions.')
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('setup').setDescription('Définit le salon des suggestions.')
         .addChannelOption((o) => o.setName('salon').setDescription('Salon').addChannelTypes(ChannelType.GuildText).setRequired(true)))
     .addSubcommand((s) =>
       s.setName('create').setDescription('Propose une suggestion.')
-        .addStringOption((o) => o.setName('contenu').setDescription('Votre suggestion').setRequired(true)))
+        .addStringOption((o) => o.setName('contenu').setDescription('Votre suggestion').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) =>
       s.setName('approve').setDescription('Approuve une suggestion.').addIntegerOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
     .addSubcommand((s) =>
@@ -47,7 +46,7 @@ module.exports = {
       const list = client.repositories.suggestions.list(guildId, 15);
       if (!list.length) return interaction.reply({ embeds: [embeds.info('Aucune suggestion.')], ephemeral: true });
       const embed = embeds.neutral('💡 Suggestions').setDescription(
-        list.map((s) => `**#${s.id}** [${s.status}] — ${s.content.slice(0, 80)}`).join('\n'),
+        truncate(list.map((s) => `**#${s.id}** [${s.status}] — ${truncate(s.content, 80)}`).join('\n'), 4000),
       );
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }

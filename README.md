@@ -8,10 +8,11 @@ Un **seul bot**, une **immense boîte à outils** pour administrer, modérer, s�
 
 ## ✨ Fonctionnalités
 
-**48 slash commands** réparties en catégories. La [ROADMAP](./ROADMAP.md) est **entièrement implémentée** (phases 1 à 8).
+**67 slash commands** (plus de 140 actions avec les sous-commandes) réparties en catégories, avec des embeds soignés et homogènes.
 
-- 📊 **Informations** — `/help` (menu interactif), `/serverinfo`, `/user`, `/roleinfo`, `/channel`, `/avatar`, `/botinfo`
-- 🔨 **Modération** — `/ban` `/tempban` `/unban` `/kick` `/warn` `/mute` `/unmute` `/timeout` `/untimeout` `/clear` `/sanctions` `/banlist` `/lock` `/unlock` `/lockall` `/unlockall` `/hide` `/unhide`
+- 📁 **Projets** — `/projet` : fiches de projet en embed (statut, barre de progression, équipe, tâches, échéance, tags, boutons de liens), publication dans un salon avec **mise à jour automatique**, liste paginée, statistiques, droits par projet
+- 📊 **Informations** — `/help` (menu interactif), `/serverinfo`, `/user`, `/roleinfo`, `/channel`, `/avatar`, `/banniere`, `/emoji`, `/membres`, `/roles`, `/inrole`, `/botinfo`
+- 🔨 **Modération** — `/ban` `/tempban` `/unban` `/kick` `/warn` `/mute` `/unmute` `/timeout` `/untimeout` `/clear` `/sanctions` `/banlist` `/lock` `/unlock` `/lockall` `/unlockall` `/hide` `/unhide` `/slowmode` `/pseudo`
 - 🧮 **Sanctions & Strikes** — historique persistant + escalade automatique configurable
 - 🤖 **AutoMod** — `/automod` : anti-spam, flood, liens, invites, mentions, caps, mots interdits, répétition, emojis, doublons
 - 🛡️ **Sécurité** — `/antiraid` (vagues d'arrivées, âge de compte, actions destructrices via audit log), `/whitelist`, `/lockdown`
@@ -21,9 +22,23 @@ Un **seul bot**, une **immense boîte à outils** pour administrer, modérer, s�
 - 🎭 **Rôles** — `/role`, `/derank`, `/massrole`, `/rolemenu` (auto-attribution)
 - 🔊 **Vocaux** — `/voice` (move/kick/mute/cleanup…), `/tempvoice` (join-to-create)
 - 💾 **Backups** — `/backup` (create/list/restore/auto — structure uniquement)
-- 🧰 **Outils** — `/embed` (builder), `/custom` + `/tag` (commandes personnalisées), `/reminder`
+- 🧰 **Outils** — `/embed` (builder), `/custom` + `/tag` (commandes personnalisées), `/reminder`, `/calcul`, `/timestamp`, `/couleur`, `/invite`, `/uptime`, `/ping`
+- 🎲 **Fun** — `/sondage` (sondage natif Discord), `/8ball`, `/pileface`, `/de` (notation JDR), `/choisir`, `/pfc` (pierre-feuille-ciseaux)
 - ⚙️ **Configuration** — `/settings`, `/diagnostics`, `/health`
 - 📋 **Logs** — modération, membres, messages, rôles, salons, vocaux, bans, automod, sécurité
+
+---
+
+## 🛡️ Fiabilité
+
+Chaque interaction passe par une couche de sûreté commune (`src/core/interactionSafety.js` + `src/events/interactionCreate.js`) :
+
+- **Jamais de double réponse** : `reply()` après `deferReply()` devient `editReply()`, un second `reply()` devient `followUp()`.
+- **Embeds toujours valides** : titres, descriptions et champs trop longs sont tronqués au lieu de faire échouer la réponse.
+- **Garde-fous avant exécution** : commandes serveur uniquement par défaut, permissions du bot vérifiées, anti-spam (cooldown par commande).
+- **Erreurs claires** : les erreurs de l'API Discord sont traduites en français (permissions manquantes, membre parti…) ; les erreurs inattendues affichent un **code de référence** retrouvable dans les logs.
+- **Connexion surveillée** : déconnexions/reconnexions loggées, arrêt propre sur `SIGINT`/`SIGTERM`.
+- **Tests** : 90 tests, dont un qui valide automatiquement les 67 commandes contre les limites de l'API Discord.
 
 ---
 

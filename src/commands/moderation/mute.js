@@ -11,10 +11,9 @@ module.exports = {
     .setName('mute')
     .setDescription('Rend muet un membre via le rôle Muted (permanent ou temporaire).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre à mute').setRequired(true))
     .addStringOption((o) => o.setName('duree').setDescription('Durée (ex: 1h, 30m). Vide = permanent'))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison')),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison').setMaxLength(512)),
 
   async execute(interaction, client) {
     const user = interaction.options.getUser('membre');

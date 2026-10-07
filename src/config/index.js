@@ -33,6 +33,9 @@ const config = {
     info: 0x5865f2,
     moderation: 0xeb459e,
     security: 0xe67e22,
+    fun: 0xf47fff,
+    utility: 0x1abc9c,
+    projects: 0x5865f2,
   },
   emojis: {
     success: '✅',

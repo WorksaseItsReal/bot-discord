@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { Collection } = require('discord.js');
+const { Collection, InteractionContextType, ApplicationIntegrationType } = require('discord.js');
 const { createLogger } = require('./logger');
 
 const logger = createLogger('commands');
@@ -28,6 +28,12 @@ class CommandHandler {
           continue;
         }
         command.category = command.category || path.basename(path.dirname(file));
+        if (this.commands.has(command.data.name)) {
+          logger.warn(`Commande en double ignorée : /${command.data.name} (${path.relative(dir, file)})`);
+          continue;
+        }
+        applyContexts(command);
+        command.data.toJSON(); // valide le builder dès le chargement (erreur explicite si invalide)
         this.commands.set(command.data.name, command);
       } catch (err) {
         logger.error(`Échec du chargement de ${file} :`, err);
@@ -54,4 +60,21 @@ class CommandHandler {
   }
 }
 
-module.exports = { CommandHandler };
+/**
+ * Contexte d'utilisation : par défaut, une commande n'est utilisable que sur un
+ * serveur (`guildOnly`). Une commande compatible MP déclare `guildOnly: false`.
+ * Remplace l'ancien `setDMPermission`, déprécié par Discord.
+ */
+function applyContexts(command) {
+  const guildOnly = command.guildOnly !== false;
+  command.guildOnly = guildOnly;
+  if (typeof command.data.setContexts === 'function') {
+    command.data.setContexts(guildOnly ? [InteractionContextType.Guild] : [InteractionContextType.Guild, InteractionContextType.BotDM]);
+  }
+  if (typeof command.data.setIntegrationTypes === 'function') {
+    command.data.setIntegrationTypes([ApplicationIntegrationType.GuildInstall]);
+  }
+  if ('dm_permission' in command.data) command.data.dm_permission = undefined;
+}
+
+module.exports = { CommandHandler, applyContexts };

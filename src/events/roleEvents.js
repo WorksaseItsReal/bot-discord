@@ -4,6 +4,15 @@ const { AuditLogEvent } = require('discord.js');
 const { embeds } = require('../utils/embeds');
 const { fetchExecutor } = require('../utils/audit');
 
+/** Couleur principale d'un rôle (`Role#color` est déprécié au profit de `Role#colors`). */
+function colorOf(role) {
+  return role.colors?.primaryColor ?? role.color ?? 0;
+}
+
+function hexOf(role) {
+  return `#${colorOf(role).toString(16).padStart(6, '0')}`;
+}
+
 module.exports = [
   {
     name: 'roleCreate',
@@ -22,10 +31,11 @@ module.exports = [
   {
     name: 'roleUpdate',
     async execute(client, oldR, newR) {
-      if (oldR.name === newR.name && oldR.color === newR.color && oldR.permissions.bitfield === newR.permissions.bitfield) return;
+      const colorChanged = colorOf(oldR) !== colorOf(newR);
+      if (oldR.name === newR.name && !colorChanged && oldR.permissions.bitfield === newR.permissions.bitfield) return;
       const changes = [];
       if (oldR.name !== newR.name) changes.push(`nom : **${oldR.name}** → **${newR.name}**`);
-      if (oldR.color !== newR.color) changes.push(`couleur : ${oldR.hexColor} → ${newR.hexColor}`);
+      if (colorChanged) changes.push(`couleur : ${hexOf(oldR)} → ${hexOf(newR)}`);
       if (oldR.permissions.bitfield !== newR.permissions.bitfield) changes.push('permissions modifiées');
       await client.services.logging.send(newR.guild.id, 'roles', embeds.info(`${newR} : ${changes.join(', ')}`, '🎭 Rôle modifié'));
     },

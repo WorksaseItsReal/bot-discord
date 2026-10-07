@@ -10,7 +10,6 @@ module.exports = {
     .setName('lockdown')
     .setDescription('Verrouillage d\'urgence de tout le serveur.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
     .addSubcommand((s) => s.setName('enable').setDescription('Active le lockdown (verrouille tous les salons).'))
     .addSubcommand((s) => s.setName('disable').setDescription('Désactive le lockdown (restaure les salons).'))
     .addSubcommand((s) => s.setName('status').setDescription('Affiche l\'état du lockdown.')),

@@ -11,6 +11,16 @@ class BackupRepository {
     this.listStmt = db.prepare('SELECT id, name, created_by, created_at FROM backups WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?');
     this.deleteStmt = db.prepare('DELETE FROM backups WHERE id = ? AND guild_id = ?');
     this.countStmt = db.prepare('SELECT COUNT(*) AS n FROM backups WHERE guild_id = ?');
+    this.pruneStmt = db.prepare(
+      `DELETE FROM backups WHERE guild_id = @guildId AND id NOT IN (
+         SELECT id FROM backups WHERE guild_id = @guildId ORDER BY created_at DESC, rowid DESC LIMIT @keep
+       )`,
+    );
+  }
+
+  /** Ne conserve que les `keep` sauvegardes les plus récentes du serveur. */
+  prune(guildId, keep = 15) {
+    return this.pruneStmt.run({ guildId, keep }).changes;
   }
 
   create(data) {

@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { embeds, successReply, truncate } = require('../../utils/embeds');
 const { discordTimestamp } = require('../../utils/time');
 const { confirm } = require('../../utils/confirmation');
 
@@ -15,8 +15,7 @@ module.exports = {
     .setName('backup')
     .setDescription('Sauvegarde/restauration de la structure du serveur.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
-    .addSubcommand((s) => s.setName('create').setDescription('Crée une sauvegarde.').addStringOption((o) => o.setName('nom').setDescription('Nom')))
+    .addSubcommand((s) => s.setName('create').setDescription('Crée une sauvegarde.').addStringOption((o) => o.setName('nom').setDescription('Nom').setMaxLength(100)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les sauvegardes.'))
     .addSubcommand((s) => s.setName('info').setDescription('Détails d\'une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
     .addSubcommand((s) => s.setName('delete').setDescription('Supprime une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
@@ -40,7 +39,7 @@ module.exports = {
       const list = backup.list(guildId);
       if (!list.length) return interaction.reply({ embeds: [embeds.info('Aucune sauvegarde.')], ephemeral: true });
       return interaction.reply({
-        embeds: [embeds.neutral('💾 Sauvegardes').setDescription(list.map((b) => `\`${b.id}\` — ${b.name} · ${discordTimestamp(b.created_at, 'R')}`).join('\n'))],
+        embeds: [embeds.neutral('💾 Sauvegardes').setDescription(truncate(list.map((b) => `\`${b.id}\` — ${truncate(b.name, 100)} · ${discordTimestamp(b.created_at, 'R')}`).join('\n'), 4000))],
         ephemeral: true,
       });
     }

@@ -45,14 +45,17 @@ function selectMenu({ id, placeholder, options, min = 1, max = 1 }) {
     .setMinValues(min)
     .setMaxValues(max)
     .addOptions(
-      options.map((o) =>
-        new StringSelectMenuOptionBuilder()
-          .setLabel(o.label)
-          .setValue(o.value)
-          .setDescription(o.description?.slice(0, 100) ?? null)
-          .setEmoji(o.emoji ?? null)
-          .setDefault(Boolean(o.default)),
-      ),
+      options.map((o) => {
+        // Les validateurs des builders lèvent sur null/undefined : on ne
+        // renseigne les champs optionnels que lorsqu'ils sont fournis.
+        const option = new StringSelectMenuOptionBuilder()
+          .setLabel(String(o.label).slice(0, 100) || '—')
+          .setValue(String(o.value).slice(0, 100))
+          .setDefault(Boolean(o.default));
+        if (o.description) option.setDescription(String(o.description).slice(0, 100));
+        if (o.emoji) option.setEmoji(o.emoji);
+        return option;
+      }),
     );
   return menu;
 }

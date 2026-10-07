@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { embeds, successReply, listOrMore, truncate } = require('../../utils/embeds');
 
 const FILTERS = [
   'antiSpam', 'antiFlood', 'antiLink', 'antiInvite', 'antiMassMention',
@@ -14,7 +14,6 @@ module.exports = {
     .setName('automod')
     .setDescription('Configuration de l\'AutoMod.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .setDMPermission(false)
     .addSubcommand((s) => s.setName('enable').setDescription('Active l\'AutoMod.'))
     .addSubcommand((s) => s.setName('disable').setDescription('Désactive l\'AutoMod.'))
     .addSubcommand((s) => s.setName('status').setDescription('Affiche la configuration AutoMod.'))
@@ -30,8 +29,8 @@ module.exports = {
         .addRoleOption((o) => o.setName('role').setDescription('Rôle à (dé)ignorer')))
     .addSubcommandGroup((g) =>
       g.setName('badword').setDescription('Gestion des mots interdits')
-        .addSubcommand((s) => s.setName('add').setDescription('Ajoute un mot interdit.').addStringOption((o) => o.setName('mot').setDescription('Mot').setRequired(true)))
-        .addSubcommand((s) => s.setName('remove').setDescription('Retire un mot interdit.').addStringOption((o) => o.setName('mot').setDescription('Mot').setRequired(true)))
+        .addSubcommand((s) => s.setName('add').setDescription('Ajoute un mot interdit.').addStringOption((o) => o.setName('mot').setDescription('Mot').setRequired(true).setMaxLength(100)))
+        .addSubcommand((s) => s.setName('remove').setDescription('Retire un mot interdit.').addStringOption((o) => o.setName('mot').setDescription('Mot').setRequired(true).setMaxLength(100)))
         .addSubcommand((s) => s.setName('list').setDescription('Liste les mots interdits.'))),
 
   async execute(interaction, client) {
@@ -56,8 +55,8 @@ module.exports = {
       return interaction.reply({
         embeds: [embeds.neutral('🤖 AutoMod').setDescription(`État global : **${cfg.enabled ? 'activé' : 'désactivé'}**\n\n${lines.join('\n')}`)
           .addFields(
-            { name: 'Salons ignorés', value: cfg.ignoredChannels.map((c) => `<#${c}>`).join(' ') || '—', inline: true },
-            { name: 'Rôles ignorés', value: cfg.ignoredRoles.map((r) => `<@&${r}>`).join(' ') || '—', inline: true },
+            { name: 'Salons ignorés', value: listOrMore(cfg.ignoredChannels.map((c) => `<#${c}>`), 35, ' '), inline: true },
+            { name: 'Rôles ignorés', value: listOrMore(cfg.ignoredRoles.map((r) => `<@&${r}>`), 35, ' '), inline: true },
           )],
         ephemeral: true,
       });
@@ -102,11 +101,13 @@ function handleBadword(interaction, config, guildId, sub) {
   const cfg = config.get(guildId).automod.filters.badWords;
   const words = new Set(cfg.words || []);
   if (sub === 'list') {
-    return interaction.reply({ embeds: [embeds.neutral('Mots interdits').setDescription([...words].map((w) => `\`${w}\``).join(', ') || 'Aucun')], ephemeral: true });
+    return interaction.reply({ embeds: [embeds.neutral('Mots interdits').setDescription(truncate([...words].map((w) => `\`${w}\``).join(', ') || 'Aucun', 4096))], ephemeral: true });
   }
   const word = interaction.options.getString('mot').toLowerCase();
   if (sub === 'add') words.add(word);
   else words.delete(word);
-  config.update(guildId, { automod: { filters: { badWords: { words: [...words], enabled: true } } } });
+  // Seul l'ajout active le filtre : retirer un mot ne doit pas réactiver un filtre désactivé.
+  const patch = sub === 'add' ? { words: [...words], enabled: true } : { words: [...words] };
+  config.update(guildId, { automod: { filters: { badWords: patch } } });
   return interaction.reply(successReply(`Mot \`${word}\` ${sub === 'add' ? 'ajouté' : 'retiré'}.`, { ephemeral: true }));
 }

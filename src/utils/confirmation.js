@@ -2,6 +2,7 @@
 
 const { button, row, ButtonStyle } = require('./components');
 const { embeds } = require('./embeds');
+const { editPrompt } = require('./pagination');
 
 /**
  * Demande de confirmation interactive pour les actions dangereuses.
@@ -28,21 +29,25 @@ async function confirm(interaction, opts) {
     ? await interaction.followUp({ ...payload, fetchReply: true })
     : await interaction.reply({ ...payload, fetchReply: true });
 
+  let click;
   try {
-    const click = await message.awaitMessageComponent({
+    click = await message.awaitMessageComponent({
       filter: (i) => i.user.id === interaction.user.id && [confirmId, cancelId].includes(i.customId),
       time: timeout,
     });
-    const confirmed = click.customId === confirmId;
-    await click.update({
-      embeds: [confirmed ? embeds.info('Action confirmée.') : embeds.warning('Action annulée.')],
-      components: [],
-    });
-    return confirmed;
   } catch {
-    await interaction.editReply({ embeds: [embeds.warning('Délai dépassé, action annulée.')], components: [] }).catch(() => {});
+    // Édite le message de confirmation lui-même (souvent un followUp après un deferReply).
+    await editPrompt(interaction, message, { embeds: [embeds.warning('Délai dépassé, action annulée.')], components: [] });
     return false;
   }
+  const confirmed = click.customId === confirmId;
+  await click
+    .update({
+      embeds: [confirmed ? embeds.info('Action confirmée.') : embeds.warning('Action annulée.')],
+      components: [],
+    })
+    .catch(() => {});
+  return confirmed;
 }
 
 module.exports = { confirm };

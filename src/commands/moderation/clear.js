@@ -10,7 +10,6 @@ module.exports = {
     .setName('clear')
     .setDescription('Supprime en masse des messages récents du salon.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .setDMPermission(false)
     .addIntegerOption((o) =>
       o.setName('nombre').setDescription('Nombre de messages (1-100)').setRequired(true).setMinValue(1).setMaxValue(100),
     )

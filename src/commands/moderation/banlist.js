@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
+const { embeds, truncate } = require('../../utils/embeds');
 const { paginate } = require('../../utils/pagination');
 
 module.exports = {
@@ -9,8 +9,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('banlist')
     .setDescription('Affiche la liste des membres bannis.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
-    .setDMPermission(false),
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
 
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true });
@@ -24,7 +23,12 @@ module.exports = {
       const chunk = list.slice(i, i + perPage);
       pages.push(
         embeds.moderation(`Bannissements (${bans.size})`).setDescription(
-          chunk.map((b) => `• **${b.user.tag}** (\`${b.user.id}\`)\n> ${b.reason || 'Aucune raison'}`).join('\n'),
+          truncate(
+            chunk
+              .map((b) => `• **${b.user.tag}** (\`${b.user.id}\`)\n> ${truncate((b.reason || 'Aucune raison').replace(/\s+/g, ' '), 200)}`)
+              .join('\n'),
+            4096,
+          ),
         ),
       );
     }

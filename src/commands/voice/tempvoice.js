@@ -9,7 +9,6 @@ module.exports = {
     .setName('tempvoice')
     .setDescription('Configure les salons vocaux temporaires (join-to-create).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('setup').setDescription('Active le système avec un salon hub.')
         .addChannelOption((o) => o.setName('hub').setDescription('Salon vocal "Créer un vocal"').addChannelTypes(ChannelType.GuildVoice).setRequired(true))

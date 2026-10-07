@@ -11,10 +11,9 @@ module.exports = {
     .setName('timeout')
     .setDescription('Applique un timeout (mute Discord) à un membre.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre à timeout').setRequired(true))
     .addStringOption((o) => o.setName('duree').setDescription('Durée (ex: 10m, 1h, 1d — max 28d)').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison du timeout')),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison du timeout').setMaxLength(512)),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {

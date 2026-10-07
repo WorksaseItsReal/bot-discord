@@ -12,7 +12,9 @@ class GiveawayRepository {
     this.byMessageStmt = db.prepare('SELECT * FROM giveaways WHERE message_id = ?');
     this.activeByGuildStmt = db.prepare('SELECT * FROM giveaways WHERE guild_id = ? AND ended = 0 ORDER BY ends_at ASC');
     this.dueStmt = db.prepare('SELECT * FROM giveaways WHERE ended = 0 AND ends_at <= ?');
-    this.markEndedStmt = db.prepare('UPDATE giveaways SET ended = 1 WHERE id = ?');
+    this.markEndedStmt = db.prepare('UPDATE giveaways SET ended = 1 WHERE id = ? AND ended = 0');
+    this.deleteStmt = db.prepare('DELETE FROM giveaways WHERE id = ?');
+    this.deleteEntriesStmt = db.prepare('DELETE FROM giveaway_entries WHERE giveaway_id = ?');
     this.addEntryStmt = db.prepare('INSERT OR IGNORE INTO giveaway_entries (giveaway_id, user_id) VALUES (?, ?)');
     this.removeEntryStmt = db.prepare('DELETE FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?');
     this.hasEntryStmt = db.prepare('SELECT 1 FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?');
@@ -44,8 +46,18 @@ class GiveawayRepository {
     return this.dueStmt.all(now);
   }
 
+  /**
+   * Marque le giveaway comme terminé de façon atomique.
+   * @returns {boolean} true si CET appel l'a terminé (false s'il l'était déjà).
+   */
   markEnded(id) {
-    this.markEndedStmt.run(id);
+    return this.markEndedStmt.run(id).changes > 0;
+  }
+
+  /** Supprime un giveaway (et ses participations), ex : message jamais envoyé. */
+  delete(id) {
+    this.deleteEntriesStmt.run(id);
+    return this.deleteStmt.run(id).changes > 0;
   }
 
   toggleEntry(id, userId) {

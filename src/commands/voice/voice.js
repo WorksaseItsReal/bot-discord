@@ -10,7 +10,6 @@ module.exports = {
     .setName('voice')
     .setDescription('Gestion des salons vocaux.')
     .setDefaultMemberPermissions(PermissionFlagsBits.MoveMembers)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('move').setDescription('Déplace un membre vers un salon vocal.')
         .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true))

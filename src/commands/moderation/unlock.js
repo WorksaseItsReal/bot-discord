@@ -9,7 +9,6 @@ module.exports = {
     .setName('unlock')
     .setDescription('Déverrouille un salon.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .setDMPermission(false)
     .addChannelOption((o) => o.setName('salon').setDescription('Salon (par défaut: actuel)').addChannelTypes(ChannelType.GuildText)),
 
   async execute(interaction, client) {

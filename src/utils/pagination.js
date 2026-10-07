@@ -1,6 +1,7 @@
 'use strict';
 
 const { button, row, ButtonStyle } = require('./components');
+const { brandFooter } = require('./embeds');
 
 /**
  * Pagination interactive à partir d'une liste de pages (EmbedBuilder[]).
@@ -28,7 +29,13 @@ async function paginate(interaction, pages, opts = {}) {
         ]
       : [];
 
-  const render = () => ({ embeds: [pages[index].setFooter({ text: `Page ${index + 1}/${pages.length}` })], components: controls() });
+  // Conserve le texte de pied de page propre à chaque page et y ajoute « Page x/y ».
+  const baseFooters = pages.map((p) => p.data?.footer?.text?.split(' • ').slice(1).join(' • ') || '');
+  const render = () => {
+    const extra = baseFooters[index] ? `${baseFooters[index]} • ` : '';
+    const footer = pages.length > 1 ? `${extra}Page ${index + 1}/${pages.length}` : baseFooters[index] || undefined;
+    return { embeds: [pages[index].setFooter(brandFooter(footer))], components: controls() };
+  };
 
   const message = interaction.deferred || interaction.replied
     ? await interaction.followUp({ ...render(), ephemeral, fetchReply: true })
@@ -47,8 +54,22 @@ async function paginate(interaction, pages, opts = {}) {
   });
 
   collector.on('end', async () => {
-    await interaction.editReply({ components: controls(true) }).catch(() => {});
+    // On édite le message de pagination LUI-MÊME (qui peut être un followUp),
+    // pas forcément la réponse d'origine de l'interaction.
+    await editPrompt(interaction, message, { components: controls(true) });
   });
 }
 
-module.exports = { paginate };
+/**
+ * Édite le message `message` envoyé via l'interaction (réponse d'origine ou
+ * followUp, éphémère ou non) ; repli sur message.edit().
+ */
+async function editPrompt(interaction, message, payload) {
+  try {
+    await interaction.editReply({ ...payload, message: message?.id ?? '@original' });
+  } catch {
+    await message?.edit?.(payload).catch(() => {});
+  }
+}
+
+module.exports = { paginate, editPrompt };

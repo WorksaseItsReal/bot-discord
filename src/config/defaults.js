@@ -93,6 +93,12 @@ const defaultGuildConfig = Object.freeze({
     categoryId: null,
     nameTemplate: 'Vocal de {user}',
   },
+  projects: {
+    openCreation: true,     // tout le monde peut créer un projet (sinon : gestionnaires uniquement)
+    managerRoleId: null,    // rôle pouvant gérer TOUS les projets (en plus de « Gérer le serveur »)
+    channelId: null,        // salon de publication par défaut
+    maxPerUser: 10,         // projets actifs max par membre (hors gestionnaires)
+  },
   autobackup: {
     enabled: false,
     intervalHours: 24,

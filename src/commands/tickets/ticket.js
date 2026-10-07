@@ -9,7 +9,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('ticket')
     .setDescription('Système de tickets.')
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('setup').setDescription('Configure le système de tickets.')
         .addChannelOption((o) => o.setName('categorie').setDescription('Catégorie des tickets').addChannelTypes(ChannelType.GuildCategory))
@@ -27,7 +26,7 @@ module.exports = {
     .addSubcommand((s) =>
       s.setName('remove').setDescription('Retire un membre du ticket.').addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
     .addSubcommand((s) =>
-      s.setName('rename').setDescription('Renomme le ticket.').addStringOption((o) => o.setName('nom').setDescription('Nouveau nom').setRequired(true))),
+      s.setName('rename').setDescription('Renomme le ticket.').addStringOption((o) => o.setName('nom').setDescription('Nouveau nom').setRequired(true).setMaxLength(90))),
 
   async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
@@ -60,19 +59,24 @@ module.exports = {
     if (!record) throw new UserError('Cette commande doit être utilisée dans un salon de ticket.');
 
     if (sub === 'close') {
-      await interaction.reply(successReply('Fermeture du ticket…', { ephemeral: true }));
-      return tickets.close(interaction.channel, interaction.user);
+      return tickets.close(interaction.channel, interaction.user, {
+        onAccepted: () => interaction.reply(successReply('Fermeture du ticket…', { ephemeral: true })),
+      });
     }
     if (sub === 'claim') {
-      await tickets.claim(interaction.channel, interaction.user);
+      await tickets.claim(interaction.channel, interaction.member);
       return interaction.reply(successReply('Ticket réclamé.', { ephemeral: true }));
     }
     if (sub === 'transcript') {
       const content = await tickets.generateTranscript(interaction.channel);
       return interaction.reply({ files: [{ attachment: Buffer.from(content, 'utf8'), name: `transcript-${record.id}.txt` }], ephemeral: true });
     }
+    if (sub === 'add' || sub === 'remove' || sub === 'rename') tickets.assertStaff(interaction.member);
     if (sub === 'add' || sub === 'remove') {
       const user = interaction.options.getUser('membre');
+      if (sub === 'remove' && (user.id === record.user_id || user.id === client.user.id)) {
+        throw new UserError('Impossible de retirer l\'auteur du ticket ou le bot.');
+      }
       await interaction.channel.permissionOverwrites.edit(user, {
         ViewChannel: sub === 'add' ? true : null,
         SendMessages: sub === 'add' ? true : null,

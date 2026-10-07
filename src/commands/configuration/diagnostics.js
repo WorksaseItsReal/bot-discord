@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
+const { embeds, truncate } = require('../../utils/embeds');
 
 const RECOMMENDED_PERMS = [
   ['Bannir des membres', PermissionFlagsBits.BanMembers],
@@ -18,8 +18,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('diagnostics')
     .setDescription('Analyse la configuration du serveur et détecte les problèmes.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .setDMPermission(false),
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
     const { guild } = interaction;
@@ -59,7 +58,7 @@ module.exports = {
     const embed = (problems ? embeds.warning : embeds.success)(
       problems ? `${problems} point(s) d'attention détecté(s).` : 'Aucun problème critique détecté.',
       '🔎 Diagnostics du serveur',
-    ).addFields({ name: 'Résultats', value: checks.join('\n').slice(0, 4096) });
+    ).addFields({ name: 'Résultats', value: truncate(checks.join('\n'), 1024) });
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
   },

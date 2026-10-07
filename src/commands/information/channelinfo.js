@@ -18,7 +18,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('channel')
     .setDescription('Affiche les informations d\'un salon.')
-    .setDMPermission(false)
     .addChannelOption((o) => o.setName('salon').setDescription('Le salon à inspecter (par défaut: actuel)')),
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction) {

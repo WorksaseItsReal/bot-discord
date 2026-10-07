@@ -8,12 +8,10 @@ module.exports = {
   category: 'information',
   data: new SlashCommandBuilder()
     .setName('serverinfo')
-    .setDescription('Affiche les informations détaillées du serveur.')
-    .setDMPermission(false),
+    .setDescription('Affiche les informations détaillées du serveur.'),
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction) {
     const { guild } = interaction;
-    await guild.members.fetch().catch(() => {});
     const channels = guild.channels.cache;
     const text = channels.filter((c) => c.type === ChannelType.GuildText).size;
     const voice = channels.filter((c) => c.type === ChannelType.GuildVoice).size;

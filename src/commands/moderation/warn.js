@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
+const { embeds, truncate } = require('../../utils/embeds');
 const { parseDuration } = require('../../utils/time');
 const { UserError } = require('../../core/errors');
 
@@ -15,9 +15,8 @@ module.exports = {
     .setName('warn')
     .setDescription('Avertit un membre et met à jour ses strikes.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre à avertir').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison de l\'avertissement')),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison de l\'avertissement').setMaxLength(512)),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
@@ -26,6 +25,8 @@ module.exports = {
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
 
+    // Avertissement + escalade éventuelle (timeout/kick/ban, DM, logs) : peut dépasser 3 s.
+    await interaction.deferReply();
     const { moderation, strikes } = client.services;
     await moderation.warn(interaction.guild, member, interaction.member, reason);
     const { count, action } = strikes.add(interaction.guild.id, user.id, 1);
@@ -38,9 +39,9 @@ module.exports = {
     const embed = embeds.moderation('⚠️ Avertissement').addFields(
       { name: 'Membre', value: `${user}`, inline: true },
       { name: 'Strikes', value: `${count}`, inline: true },
-      { name: 'Raison', value: reason || 'Aucune raison fournie' },
+      { name: 'Raison', value: truncate(reason || 'Aucune raison fournie', 1024) },
     );
-    if (escalation) embed.addFields({ name: 'Escalade automatique', value: escalation });
+    if (escalation) embed.addFields({ name: 'Escalade automatique', value: truncate(escalation, 1024) });
     await interaction.reply({ embeds: [embed] });
   },
 };
