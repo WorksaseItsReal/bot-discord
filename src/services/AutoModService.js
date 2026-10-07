@@ -304,12 +304,16 @@ class AutoModService {
   async #apply(message, violation, cfg) {
     const guild = message.guild;
     const reason = `AutoMod: ${violation.reason}`;
+    this.logging?.suppressMessage?.(message.id); // pas de « Message supprimé » en double dans les logs
     const deleted = await message.delete().then(() => true, () => false);
     // Copies déjà postées ailleurs (spam multi-salons) : supprimées aussi.
     let extraDeleted = 0;
     for (const r of violation.related ?? []) {
       const ch = guild.channels?.cache?.get(r.channelId);
-      if (ch?.messages) extraDeleted += await ch.messages.delete(r.messageId).then(() => 1, () => 0);
+      if (ch?.messages) {
+        this.logging?.suppressMessage?.(r.messageId);
+        extraDeleted += await ch.messages.delete(r.messageId).then(() => 1, () => 0);
+      }
     }
 
     // Sanctions progressives : la sanction monte avec le nombre d'infractions récentes.

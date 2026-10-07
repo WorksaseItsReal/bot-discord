@@ -48,6 +48,7 @@ module.exports = [
   {
     name: 'roleDelete',
     async execute(client, role) {
+      if (client.services.logging?.wouldLog?.(role.guild.id, 'roles', { event: 'roleDelete' }) === false) return;
       const executor = await fetchExecutor(role.guild, AuditLogEvent.RoleDelete, role.id);
       await client.services.logging.send(
         role.guild.id,

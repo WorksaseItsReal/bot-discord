@@ -10,8 +10,8 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '🔨',
     label: 'Modération',
     channel: 'modération',
-    description: 'Sanctions, levées de sanction, bans manuels et tickets.',
-    events: { sanction: 'Sanctions (warn, mute, timeout, kick, ban)', revocation: 'Levées de sanction', manualBan: 'Bans et débans manuels', ticket: 'Tickets ouverts' },
+    description: 'Sanctions, levées de sanction, actions manuelles et tickets.',
+    events: { sanction: 'Sanctions (warn, mute, timeout, kick, ban)', revocation: 'Levées de sanction', manualBan: 'Actions manuelles (bans, kicks, timeouts hors du bot)', ticket: 'Tickets ouverts' },
   },
   messages: {
     emoji: '💬',
@@ -24,7 +24,7 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '👥',
     label: 'Membres',
     channel: 'membres',
-    description: 'Arrivées, départs, rôles, pseudos et boosts.',
+    description: 'Arrivées, départs, rôles, pseudos (avec l\'auteur) et boosts.',
     events: { memberJoin: 'Arrivées', memberLeave: 'Départs', memberRoles: 'Rôles ajoutés / retirés', memberNickname: 'Changements de pseudo', memberBoost: 'Boosts' },
   },
   roles: {

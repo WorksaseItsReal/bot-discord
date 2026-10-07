@@ -26,9 +26,15 @@ function fakeGuild() {
       parentId: data.parent ?? null,
       topic: data.topic ?? null,
       sent: [],
-      permissionOverwrites: { set: async () => {} },
+      overwrites: new Map((data.permissionOverwrites ?? []).map((o) => [o.id, o])),
+      permissionOverwrites: { set: async () => {}, edit: async (id, opts) => ch.overwrites.set(id, { ...ch.overwrites.get(id), ...opts }) },
       edit: async (d) => Object.assign(ch, { topic: d.topic ?? ch.topic }),
-      delete: async () => cache.delete(ch.id),
+      setTopic: async (t) => Object.assign(ch, { topic: t }),
+      setParent: async (id) => Object.assign(ch, { parentId: id }),
+      delete: async () => {
+        if (ch.undeletable) throw new Error('Missing Permissions');
+        cache.delete(ch.id);
+      },
       send: async (p) => ch.sent.push(p),
       permissionsFor: () => new PermissionsBitField(PermissionsBitField.All),
       toString: () => `<#${ch.id}>`,
@@ -100,6 +106,61 @@ test('création automatique : catégorie privée, salons branchés, réutilisati
   const after = config.get(guild.id);
   assert.ok(CATEGORY_KEYS.every((k) => !after.logChannels[k]), 'logs débranchés');
   assert.equal(after.logs.categoryId, null);
+});
+
+test('création automatique : verrou anti double clic, persistance progressive, suppression partielle', async () => {
+  const { client, guild, config } = world();
+  const setup = client.services.logSetup;
+  // Double clic : la seconde opération simultanée est refusée.
+  const first = setup.create(guild, { layout: 'single', categories: CATEGORY_KEYS });
+  await assert.rejects(setup.create(guild, { layout: 'single', categories: CATEGORY_KEYS }), /déjà en cours/);
+  await first;
+
+  // Échec au milieu : les salons déjà créés restent connus (pas d'orphelin).
+  const { client: c2, guild: g2, config: cfg2 } = world();
+  let n = 0;
+  const create = g2.channels.create;
+  g2.channels.create = async (d) => {
+    if (d.type === ChannelType.GuildText && ++n === 2) throw new Error('Rate limited');
+    return create(d);
+  };
+  await assert.rejects(c2.services.logSetup.create(g2, { layout: 'grouped', categories: CATEGORY_KEYS }));
+  assert.equal(cfg2.get(g2.id).logs.createdChannels.length, 1);
+  assert.ok(cfg2.get(g2.id).logs.categoryId);
+  g2.channels.create = create;
+  const retry = await c2.services.logSetup.create(g2, { layout: 'grouped', categories: CATEGORY_KEYS });
+  assert.equal(retry.reused.length, 1);
+  assert.equal(retry.created.length, 2);
+
+  // Un salon de l'utilisateur portant le même nom n'est jamais « réutilisé ».
+  const { client: c3, guild: g3 } = world();
+  await g3.channels.create({ name: '📋・logs', type: ChannelType.GuildText });
+  await g3.channels.create({ name: 'logs', type: ChannelType.GuildText });
+  const r3 = await c3.services.logSetup.create(g3, { layout: 'single', categories: CATEGORY_KEYS });
+  assert.equal(r3.reused.length, 0);
+
+  // Suppression : un salon impossible à supprimer reste suivi, la catégorie non vide est gardée.
+  const ids = config.get(guild.id).logs.createdChannels;
+  guild.channels.cache.get(ids[0]).undeletable = true;
+  assert.equal(await setup.remove(guild), 0);
+  const after = config.get(guild.id).logs;
+  assert.deepEqual(after.createdChannels, ids);
+  assert.ok(after.categoryId, 'catégorie conservée');
+});
+
+test('réparation : un salon de logs supprimé est recréé et rebranché', async () => {
+  const { client, guild, config } = world();
+  await client.services.logSetup.create(guild, { layout: 'perCategory', categories: CATEGORY_KEYS });
+  const old = config.get(guild.id).logChannels.messages;
+  guild.channels.cache.delete(old);
+  const home = logs.render(client, guild, 'home').components.map(json);
+  assert.ok(home.some((r) => r.components.some((c) => c.custom_id === 'cmd:logs:repair')), 'bouton Réparer affiché');
+  let payload;
+  const i = { guildId: guild.id, guild, user: { tag: 'admin' }, memberPermissions: new PermissionsBitField(PermissionsBitField.All), deferUpdate: async () => {}, editReply: async (p) => (payload = p), update: async (p) => (payload = p) };
+  await logs.buttons.repair(i, client, []);
+  const now = config.get(guild.id).logChannels.messages;
+  assert.ok(now && now !== old && guild.channels.cache.has(now));
+  assert.ok(!payload.components.map(json).some((r) => r.components.some((c) => c.custom_id === 'cmd:logs:repair')), 'plus rien à réparer');
 });
 
 test('chaque vue de /logs respecte les limites Discord et route vers un gestionnaire', async () => {

@@ -41,6 +41,32 @@ function categoryState(client, guild, key) {
   return client.services.logging.channelStatus(guild, cfg.logChannels?.[key]);
 }
 
+/**
+ * Catégories réparables automatiquement : salon supprimé, ou salon créé par le bot
+ * dont les permissions ont été cassées (on ne touche jamais aux salons de l'utilisateur).
+ */
+function repairable(client, guild) {
+  const cfg = full(client, guild.id);
+  const known = new Set(cfg.logs?.createdChannels ?? []);
+  return CATEGORY_KEYS.filter((k) => {
+    const s = categoryState(client, guild, k);
+    return s === 'missing' || (s === 'noperm' && known.has(cfg.logChannels?.[k]));
+  });
+}
+
+/** Le salon est-il visible par @everyone (et non créé par le bot) ? */
+function isPublic(guild, cfg, channelId) {
+  if (!channelId || cfg.logs?.createdChannels?.includes(channelId)) return false;
+  const channel = guild.channels?.cache?.get(channelId);
+  const everyone = guild.roles?.everyone;
+  if (!channel?.permissionsFor || !everyone) return false;
+  try {
+    return channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel) === true;
+  } catch {
+    return false;
+  }
+}
+
 function enabledEvents(cfg, key) {
   const disabled = new Set(cfg.logs?.disabledEvents ?? []);
   return Object.keys(LOG_CATEGORIES[key].events).filter((e) => !disabled.has(e));
@@ -112,6 +138,9 @@ function homeView(client, guild, notice) {
           ? actionButton({ command: 'logs', action: 'toggle', label: 'Tout mettre en pause', emoji: '⏸️', style: ButtonStyle.Danger })
           : actionButton({ command: 'logs', action: 'toggle', label: 'Réactiver les logs', emoji: '▶️', style: ButtonStyle.Success }),
         actionButton({ command: 'logs', action: 'go', args: ['setup'], label: 'Création automatique', emoji: '⚡', style: ButtonStyle.Primary }),
+        repairable(client, guild).length
+          ? actionButton({ command: 'logs', action: 'repair', label: 'Réparer', emoji: '🛠️', style: ButtonStyle.Success })
+          : null,
         actionButton({ command: 'logs', action: 'test', args: ['all'], label: 'Tester', emoji: '🧪' }),
         actionButton({ command: 'logs', action: 'go', args: ['home'], label: 'Actualiser', emoji: ICONS.refresh }),
       ),
@@ -150,7 +179,12 @@ function categoryView(client, guild, key, notice) {
         section: { emoji: '📋', label: 'Logs' },
         icon: meta.emoji,
         title: `Logs · ${meta.label}`,
-        description: [notice ? `${notice}\n` : null, meta.description, hints[state] ? `\n${ICONS.info} ${hints[state]}` : null],
+        description: [
+          notice ? `${notice}\n` : null,
+          meta.description,
+          hints[state] ? `\n${ICONS.info} ${hints[state]}` : null,
+          isPublic(guild, cfg, channelId) ? `\n${ICONS.warning} **Ce salon est visible par @everyone** : les logs (messages supprimés, IP de raid, etc.) seront publics.` : null,
+        ],
         fields: [
           field(ICONS.status, 'État', `${dot} ${label}`),
           field(ICONS.channel, 'Salon', channelId ? `<#${channelId}>` : '—'),
@@ -469,6 +503,25 @@ module.exports = {
         result.created.length ? `🆕 Créés : ${result.created.map((c) => `${c}`).join(' ')}` : null,
         result.reused.length ? `♻️ Réutilisés : ${result.reused.map((c) => `${c}`).join(' ')}` : null,
       ].filter(Boolean).join('\n');
+      await interaction.editReply(render(client, interaction.guild, 'home', notice));
+    },
+    /** Réparation : recrée les salons supprimés et rétablit les permissions des salons du bot. */
+    async repair(interaction, client) {
+      guard(interaction);
+      const cfg = full(client, interaction.guildId).logs;
+      const categories = repairable(client, interaction.guild);
+      if (!categories.length) {
+        await interaction.update(render(client, interaction.guild, 'home', `${ICONS.success} Rien à réparer.`));
+        return;
+      }
+      await interaction.deferUpdate();
+      const result = await client.services.logSetup.create(interaction.guild, {
+        layout: cfg.setup?.layout,
+        categories,
+        staffRoleId: cfg.staffRoleId,
+        reason: `Salons de logs réparés par ${interaction.user.tag}`,
+      });
+      const notice = `🛠️ **${categories.length}** catégorie(s) réparée(s)${result.created.length ? ` · ${result.created.length} salon(s) recréé(s)` : ''}.`;
       await interaction.editReply(render(client, interaction.guild, 'home', notice));
     },
     /** Suppression (après confirmation) des salons créés par le bot. */

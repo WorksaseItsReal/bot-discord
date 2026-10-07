@@ -8,7 +8,7 @@ module.exports = {
   name: 'messageUpdate',
   /** @param {import('../core/GadgetClient').GadgetClient} client */
   async execute(client, oldMessage, newMessage) {
-    if (!newMessage.guild || newMessage.author?.bot || newMessage.partial || !newMessage.author) return;
+    if (!newMessage.guild || newMessage.partial || !newMessage.author || newMessage.webhookId) return;
     // Mises à jour sans changement de texte (aperçus de liens, épinglage, embeds…)
     if (!oldMessage.partial && oldMessage.content === newMessage.content) return;
 
@@ -32,6 +32,12 @@ module.exports = {
         wide('➡️', 'Après', newMessage.content ? truncate(newMessage.content, 1024) : '*Vide*'),
       ],
     });
-    await client.services.logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)), { event: 'messageEdit', channelId: newMessage.channelId, parentId: newMessage.channel?.parentId, bot: newMessage.author?.bot });
+    await client.services.logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)), {
+      event: 'messageEdit',
+      channelId: newMessage.channelId,
+      parentId: newMessage.channel?.parentId,
+      categoryId: newMessage.channel?.parent?.parentId ?? null,
+      bot: Boolean(newMessage.author?.bot),
+    });
   },
 };

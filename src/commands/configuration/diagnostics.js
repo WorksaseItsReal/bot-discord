@@ -59,9 +59,9 @@ function analyze(guild, cfg) {
   const logs = { icon: ICONS.list, label: 'Salons de logs', checks: [] };
   const logEntries = Object.entries(cfg.logChannels || {}).filter(([, id]) => id);
   if (!logEntries.length) {
-    logs.checks.push({ level: 'info', text: 'Aucun salon de logs configuré', tip: 'Configurez au moins les logs de modération : `/settings logs`.' });
+    logs.checks.push({ level: 'info', text: 'Aucun salon de logs configuré', tip: 'Configurez au moins les logs de modération : `/logs`.' });
   }
-  for (const [cat, id] of logEntries) logs.checks.push(channelCheck(guild, me, id, `Logs « ${cat} »`, '/settings logs'));
+  for (const [cat, id] of logEntries) logs.checks.push(channelCheck(guild, me, id, `Logs « ${cat} »`, '/logs'));
   groups.push(logs);
 
   // 4) Modules : salons configurés encore valides + état

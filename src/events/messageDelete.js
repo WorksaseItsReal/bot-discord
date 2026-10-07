@@ -9,7 +9,9 @@ module.exports = {
   name: 'messageDelete',
   /** @param {import('../core/GadgetClient').GadgetClient} client */
   async execute(client, message) {
-    if (!message.guild || message.author?.bot) return;
+    if (!message.guild) return;
+    // Supprimé par l'AutoMod : la carte AutoMod contient déjà le message.
+    if (client.services.logging.isSuppressed?.(message.id)) return;
     const author = message.author;
     const files = [...(message.attachments?.values?.() ?? [])].map((a) => a.name ?? 'fichier');
     const embed = logCard({
@@ -28,6 +30,12 @@ module.exports = {
       ],
       id: author?.id ?? message.id,
     });
-    await client.services.logging.send(message.guild.id, 'messages', embed, undefined, { event: 'messageDelete', channelId: message.channelId, parentId: message.channel?.parentId, bot: message.author?.bot });
+    await client.services.logging.send(message.guild.id, 'messages', embed, undefined, {
+      event: 'messageDelete',
+      channelId: message.channelId,
+      parentId: message.channel?.parentId,
+      categoryId: message.channel?.parent?.parentId ?? null,
+      bot: Boolean(message.author?.bot),
+    });
   },
 };

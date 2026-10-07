@@ -19,7 +19,7 @@ const REQUIRED_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBi
  * Faut-il journaliser cet événement ? Pur (testé).
  * @param {object} cfg configuration du serveur (logChannels + logs)
  * @param {string} category
- * @param {{ event?: string, channelId?: string|null, parentId?: string|null, bot?: boolean }} [ctx]
+ * @param {{ event?: string, channelId?: string|null, parentId?: string|null, categoryId?: string|null, bot?: boolean }} [ctx]
  */
 function shouldLog(cfg, category, ctx = {}) {
   const logs = cfg.logs ?? {};
@@ -31,7 +31,8 @@ function shouldLog(cfg, category, ctx = {}) {
   if (category === 'messages') {
     if (ctx.bot && logs.ignoreBots !== false) return false;
     const ignored = logs.ignoredChannels ?? [];
-    if (ctx.channelId && (ignored.includes(ctx.channelId) || (ctx.parentId && ignored.includes(ctx.parentId)))) return false;
+    // Salon, salon parent (fil) ou catégorie (y compris celle du parent d'un fil).
+    if ([ctx.channelId, ctx.parentId, ctx.categoryId].some((id) => id && ignored.includes(id))) return false;
   }
   // Jamais de log sur ce qui se passe DANS le salon de logs lui-même (boucle, bruit).
   if (ctx.channelId && Object.values(cfg.logChannels ?? {}).includes(ctx.channelId)) return false;
@@ -95,6 +96,45 @@ class LoggingService {
   constructor(client, configService) {
     this.client = client;
     this.config = configService;
+    /** Messages supprimés par le bot (AutoMod…) : déjà journalisés, pas de « Message supprimé » en double. */
+    this.suppressed = new Map();
+  }
+
+  /** Marque un message que le bot va supprimer lui-même (TTL 30 s). */
+  suppressMessage(messageId) {
+    if (!messageId) return;
+    const now = Date.now();
+    this.suppressed.set(messageId, now + 30_000);
+    if (this.suppressed.size > 500) for (const [id, exp] of this.suppressed) if (exp < now) this.suppressed.delete(id);
+  }
+
+  /** Ce message a-t-il été supprimé par le bot (et déjà journalisé ailleurs) ? */
+  isSuppressed(messageId) {
+    const exp = this.suppressed.get(messageId);
+    if (!exp) return false;
+    this.suppressed.delete(messageId);
+    return exp > Date.now();
+  }
+
+  /** Ce log serait-il envoyé ? (évite un appel coûteux, ex : audit log, quand il est désactivé) */
+  wouldLog(guildId, category, ctx = {}) {
+    return shouldLog(this.config.get(guildId), category, ctx);
+  }
+
+  /**
+   * Salon de logs utilisable (cache + permissions), ou null. Serveur en cache (cas normal,
+   * intent Guilds) : aucune requête REST. Sinon, repli sur une récupération classique.
+   */
+  async #target(guildId, channelId) {
+    const guild = this.client.guilds?.cache?.get(guildId);
+    const channel = guild
+      ? guild.channels?.cache?.get(channelId)
+      : this.client.channels?.cache?.get?.(channelId) ?? (await this.client.channels?.fetch?.(channelId).catch(() => null));
+    if (!channel || typeof channel.send !== 'function') return null;
+    if (!guild) return channel;
+    const me = guild.members?.me;
+    if (me && typeof channel.permissionsFor === 'function' && !channel.permissionsFor(me)?.has(REQUIRED_PERMISSIONS)) return null;
+    return channel;
   }
 
   /**
@@ -102,8 +142,9 @@ class LoggingService {
    * @param {keyof LOG_SECTIONS} category
    * @param {import('discord.js').EmbedBuilder} embed
    * @param {import('discord.js').ActionRowBuilder[]} [components] boutons optionnels (ex : « Aller au message »)
-   * @param {{ event?: string, channelId?: string|null, parentId?: string|null, bot?: boolean }} [ctx]
-   *   event : clé du catalogue (désactivable dans /logs) ; channelId : salon d'origine (exemptions).
+   * @param {{ event?: string, channelId?: string|null, parentId?: string|null, categoryId?: string|null, bot?: boolean, files?: object[] }} [ctx]
+   *   event : clé du catalogue (désactivable dans /logs) ; channelId/parentId/categoryId : origine
+   *   (exemptions) ; files : pièces jointes (ex : transcription d'une purge).
    */
   async send(guildId, category, embed, components, ctx = {}) {
     try {
@@ -112,10 +153,13 @@ class LoggingService {
         logger.debug(`Événement ${ctx.event} envoyé dans ${category} au lieu de ${EVENT_CATEGORY[ctx.event]}`);
       }
       if (!shouldLog(cfg, category, ctx)) return false;
-      const channel = await this.client.channels.fetch(cfg.logChannels[category]).catch(() => null);
-      if (!channel || !channel.isTextBased()) return false;
+      // Cache uniquement : un salon supprimé ou inaccessible ne déclenche aucune requête
+      // (des centaines de 403/404 peuvent faire bannir temporairement l'IP du bot).
+      const channel = await this.#target(guildId, cfg.logChannels[category]);
+      if (!channel) return false;
       const payload = { embeds: [embed] };
       if (components?.length) payload.components = components;
+      if (ctx.files?.length) payload.files = ctx.files;
       await channel.send(payload);
       return true;
     } catch (err) {

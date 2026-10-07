@@ -82,6 +82,12 @@ module.exports = [
       } catch {
         /* nettoyage best-effort */
       }
+      // Salon de logs supprimé : débranché tout de suite (plus aucun envoi vers un salon fantôme).
+      const cfg = client.services.config?.get?.(channel.guild.id);
+      const unplug = Object.fromEntries(Object.entries(cfg?.logChannels ?? {}).filter(([, id]) => id === channel.id).map(([k]) => [k, null]));
+      if (Object.keys(unplug).length) client.services.config.update(channel.guild.id, { logChannels: unplug });
+      // Pas d'appel au journal d'audit si ce log est désactivé.
+      if (client.services.logging?.wouldLog?.(channel.guild.id, 'channels', { event: 'channelDelete' }) === false) return;
       const executor = await fetchExecutor(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
       await client.services.logging.send(
         channel.guild.id,

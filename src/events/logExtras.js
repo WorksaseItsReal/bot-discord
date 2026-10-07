@@ -1,14 +1,23 @@
 'use strict';
 
+const { AttachmentBuilder, GuildVerificationLevel } = require('discord.js');
 const { truncate } = require('../utils/embeds');
 const { field, wide, ICONS, userLine, code } = require('../utils/ui');
-const { logCard, fitList } = require('../services/LoggingService');
+const { logCard } = require('../services/LoggingService');
 const { discordTimestamp } = require('../utils/time');
 
 /**
- * Événements complémentaires pour des logs complets : rôles et pseudos des
- * membres, boosts, suppressions en masse, fils, paramètres du serveur, emojis.
+ * Événements complémentaires pour des logs complets : boosts, suppressions en
+ * masse (avec transcription), fils, paramètres du serveur, emojis.
  */
+const VERIFICATION = {
+  [GuildVerificationLevel.None]: 'Aucun',
+  [GuildVerificationLevel.Low]: 'Faible (e-mail vérifié)',
+  [GuildVerificationLevel.Medium]: 'Moyen (inscrit depuis 5 min)',
+  [GuildVerificationLevel.High]: 'Élevé (membre depuis 10 min)',
+  [GuildVerificationLevel.VeryHigh]: 'Maximal (téléphone vérifié)',
+};
+
 const send = (client, guildId, category, embed, event) => client.services.logging.send(guildId, category, embed, undefined, { event });
 
 module.exports = [
@@ -19,40 +28,8 @@ module.exports = [
       const user = newMember.user;
       const guildId = newMember.guild.id;
 
-      const added = newMember.roles.cache.filter((r) => !oldMember.roles.cache.has(r.id));
-      const removed = oldMember.roles.cache.filter((r) => !newMember.roles.cache.has(r.id));
-      if (added.size || removed.size) {
-        await send(client, guildId, 'members', logCard({
-          category: 'members',
-          tone: 'info',
-          icon: ICONS.role,
-          title: 'Rôles modifiés',
-          description: `Les rôles de ${user} ont changé.`,
-          user,
-          fields: [
-            field(ICONS.user, 'Membre', userLine(user)),
-            added.size ? wide('➕', `Ajoutés (${added.size})`, fitList(added.map((r) => `${r}`), 1000)) : null,
-            removed.size ? wide('➖', `Retirés (${removed.size})`, fitList(removed.map((r) => `${r}`), 1000)) : null,
-          ],
-        }), 'memberRoles');
-      }
-
-      if (oldMember.nickname !== newMember.nickname) {
-        await send(client, guildId, 'members', logCard({
-          category: 'members',
-          tone: 'info',
-          icon: '✏️',
-          title: 'Pseudo modifié',
-          description: `${user} a un nouveau pseudo.`,
-          user,
-          fields: [
-            field(ICONS.user, 'Membre', userLine(user)),
-            field('⬅️', 'Avant', truncate(oldMember.nickname ?? '*aucun*', 100)),
-            field('➡️', 'Après', truncate(newMember.nickname ?? '*aucun*', 100)),
-          ],
-        }), 'memberNickname');
-      }
-
+      // Rôles et pseudos : journalisés via le journal d'audit (events/auditLogs.js), qui
+      // fonctionne aussi pour les membres hors cache et indique l'auteur du changement.
       if (!oldMember.premiumSince && newMember.premiumSince) {
         await send(client, guildId, 'members', logCard({
           category: 'members',
@@ -76,6 +53,18 @@ module.exports = [
         .filter((m) => m.content)
         .slice(-10)
         .map((m) => `**${m.author?.username ?? '?'}** : ${truncate(m.content.replace(/\n/g, ' '), 90)}`);
+      const ctx = {
+        event: 'messageBulkDelete',
+        channelId: channel.id,
+        parentId: channel.parentId,
+        categoryId: channel.parent?.parentId ?? null,
+      };
+      if (!client.services.logging.wouldLog(channel.guild.id, 'messages', ctx)) return;
+      // Transcription complète des messages en cache, jointe au log.
+      const transcript = list
+        .map((m) => `[${new Date(m.createdTimestamp).toISOString().replace('T', ' ').slice(0, 19)}] ${m.author?.tag ?? 'inconnu'} : ${m.content || '(sans texte)'}${m.attachments?.size ? ` [${m.attachments.size} pièce(s) jointe(s)]` : ''}`)
+        .join('\n');
+      ctx.files = transcript ? [new AttachmentBuilder(Buffer.from(transcript, 'utf8'), { name: `purge-${channel.id}-${Date.now()}.txt` })] : [];
       await client.services.logging.send(channel.guild.id, 'messages', logCard({
         category: 'messages',
         tone: 'danger',
@@ -88,8 +77,9 @@ module.exports = [
           field(ICONS.count, 'Messages', `${messages.size}`),
           field(ICONS.members, 'Auteurs', `${authors.size}`),
           preview.length ? wide(ICONS.list, 'Derniers messages en cache', truncate(preview.join('\n'), 1024)) : null,
+          transcript ? wide('📄', 'Transcription', 'Fichier joint (messages encore en cache).') : null,
         ],
-      }), undefined, { event: 'messageBulkDelete' });
+      }), undefined, ctx);
     },
   },
   {
@@ -134,7 +124,7 @@ module.exports = [
       if (oldGuild.icon !== newGuild.icon) changes.push(['Icône', oldGuild.icon ? 'ancienne' : '*aucune*', newGuild.icon ? 'nouvelle' : '*aucune*']);
       if (oldGuild.banner !== newGuild.banner) changes.push(['Bannière', oldGuild.banner ? 'ancienne' : '*aucune*', newGuild.banner ? 'nouvelle' : '*aucune*']);
       if (oldGuild.vanityURLCode !== newGuild.vanityURLCode) changes.push(['Invitation personnalisée', oldGuild.vanityURLCode ?? '*aucune*', newGuild.vanityURLCode ?? '*aucune*']);
-      if (oldGuild.verificationLevel !== newGuild.verificationLevel) changes.push(['Niveau de vérification', `${oldGuild.verificationLevel}`, `${newGuild.verificationLevel}`]);
+      if (oldGuild.verificationLevel !== newGuild.verificationLevel) changes.push(['Niveau de vérification', VERIFICATION[oldGuild.verificationLevel] ?? `${oldGuild.verificationLevel}`, VERIFICATION[newGuild.verificationLevel] ?? `${newGuild.verificationLevel}`]);
       if (oldGuild.ownerId !== newGuild.ownerId) changes.push(['Propriétaire', `<@${oldGuild.ownerId}>`, `<@${newGuild.ownerId}>`]);
       if (oldGuild.description !== newGuild.description) changes.push(['Description', truncate(oldGuild.description ?? '*aucune*', 300), truncate(newGuild.description ?? '*aucune*', 300)]);
       if (!changes.length) return;
