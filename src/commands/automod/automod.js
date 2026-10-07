@@ -323,7 +323,7 @@ function filterExemptions(client, guildId, key) {
 
 /** Vue détaillée d'un filtre : activation, sanction, réglages, exemptions propres (≤ 4 rangées). */
 function filterView(client, guildId, key, notice) {
-  if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+  if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
   const cfg = cfgOf(client, guildId);
   const fc = cfg.filters?.[key] ?? {};
   const t = THRESHOLDS[key];
@@ -1033,13 +1033,13 @@ module.exports = {
     async fpick(interaction, client) {
       guard(interaction);
       const key = interaction.values?.[0];
-      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
       await interaction.update(filterView(client, interaction.guildId, key));
     },
     /** cmd:automod:ftoggle:<filtre>:<on|off> — la valeur AFFICHÉE sur le bouton (jamais une inversion à l'aveugle). */
     async ftoggle(interaction, client, [key, state]) {
       guard(interaction);
-      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
       const enabled = target(state, cfgOf(client, interaction.guildId).filters?.[key]?.enabled);
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { enabled } } } });
       await interaction.update(filterView(client, interaction.guildId, key, `${FILTER_LABELS[key]} ${enabled ? 'activé' : 'désactivé'}.`));
@@ -1048,7 +1048,7 @@ module.exports = {
     async faction(interaction, client, [key]) {
       guard(interaction);
       const action = interaction.values?.[0];
-      if (!FILTER_LABELS[key] || !actionsFor(key).includes(action)) throw new UserError('Sanction invalide.');
+      if (!Object.hasOwn(FILTER_LABELS, key) || !actionsFor(key).includes(action)) throw new UserError('Sanction invalide.');
       const patch = { action };
       if (TIMED.has(action) && !cfgOf(client, interaction.guildId).filters?.[key]?.duration) patch.duration = action === 'quarantine' ? '1d' : '5m';
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: patch } } });
@@ -1057,12 +1057,12 @@ module.exports = {
     /** cmd:automod:fset:<filtre> — ouvre le formulaire de réglages. */
     async fset(interaction, client, [key]) {
       guard(interaction);
-      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
       await interaction.showModal(filterModal(cfgOf(client, interaction.guildId), key));
     },
     async fsetsubmit(interaction, client, [key]) {
       guard(interaction);
-      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
       const patch = {};
       const duration = interaction.fields.getTextInputValue('duration')?.trim();
       if (duration) {
@@ -1099,12 +1099,12 @@ module.exports = {
     /** cmd:automod:list:<words|domains|invites> — ouvre le formulaire de la liste. */
     async list(interaction, client, [kind]) {
       guard(interaction);
-      if (!LIST_META[kind]) throw new UserError('Liste inconnue.');
+      if (!Object.hasOwn(LIST_META, kind)) throw new UserError('Liste inconnue.');
       await interaction.showModal(listModal(kind));
     },
     async listsubmit(interaction, client, [kind]) {
       guard(interaction);
-      if (!LIST_META[kind]) throw new UserError('Liste inconnue.');
+      if (!Object.hasOwn(LIST_META, kind)) throw new UserError('Liste inconnue.');
       const cfg = cfgOf(client, interaction.guildId);
       const add = splitItems(interaction.fields.getTextInputValue('add'));
       const remove = splitItems(interaction.fields.getTextInputValue('remove'));
@@ -1185,7 +1185,7 @@ module.exports = {
     async notify(interaction, client) {
       guard(interaction);
       const mode = interaction.values?.[0];
-      if (!NOTIFY_LABELS[mode]) throw new UserError('Mode inconnu.');
+      if (!Object.hasOwn(NOTIFY_LABELS, mode)) throw new UserError('Mode inconnu.');
       client.services.config.update(interaction.guildId, { automod: { notify: mode } });
       await interaction.update(notifyView(client, interaction.guildId, `Notification : **${NOTIFY_LABELS[mode]}**.`));
     },
@@ -1232,7 +1232,7 @@ module.exports = {
     /** cmd:automod:preset:<faible|equilibre|strict> */
     async preset(interaction, client, [key]) {
       guard(interaction);
-      const preset = PRESETS[key];
+      const preset = Object.hasOwn(PRESETS, key) ? PRESETS[key] : null;
       if (!preset) throw new UserError('Préréglage inconnu.');
       client.services.config.update(interaction.guildId, { automod: preset.patch });
       await interaction.update(await render(client, interaction.guild, 'home', `Préréglage ${preset.emoji} **${preset.label}** appliqué. Vos listes sont conservées.`));
@@ -1251,7 +1251,7 @@ module.exports = {
     /** cmd:automod:fexch:<filtre> — salons exemptés de CE filtre (remplace la liste). */
     async fexch(interaction, client, [key]) {
       guard(interaction);
-      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
       const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id));
       // Salons enregistrés mais absents du menu (fils, au-delà de 25) : conservés s'ils existent.
       const shown = new Set(filterExemptions(client, interaction.guildId, key).channels);
@@ -1264,7 +1264,7 @@ module.exports = {
     /** cmd:automod:fexrole:<filtre> — rôles exemptés de CE filtre (remplace la liste). */
     async fexrole(interaction, client, [key]) {
       guard(interaction);
-      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
       const ids = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId).slice(0, MAX_IGNORED);
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { exemptRoles: ids } } } });
       await interaction.update(filterView(client, interaction.guildId, key, `${ids.length} rôle(s) exempté(s) de ce filtre.`));

@@ -22,7 +22,7 @@ module.exports = {
 
     // Les customId sont contrôlés par le client : on refuse tout argument pouvant
     // détourner une route de l'API Discord (« ../members/<id> », « a/b », « %2F »…).
-    if (args.some((a) => !isSafeArg(a))) {
+    if (args.some((a) => !isSafeArg(a)) || (interaction.values ?? []).some((v) => isPrototypeKey(v))) {
       throw new UserError('Ce bouton est invalide.');
     }
 
@@ -42,8 +42,13 @@ module.exports = {
 };
 
 /** Argument de bouton sûr : pas de séparateur de chemin ni de « .. », longueur bornée. */
+/** Noms hérités d'Object.prototype (« constructor », « __proto__ »…) : jamais une clé de catalogue valide. */
+function isPrototypeKey(value) {
+  return typeof value === 'string' && (value === '__proto__' || Object.prototype.hasOwnProperty.call(Object.prototype, value));
+}
+
 function isSafeArg(arg) {
-  return typeof arg === 'string' && arg.length <= 100 && !/[\/\\?#%]|\.\./.test(arg);
+  return typeof arg === 'string' && arg.length <= 100 && !/[\/\\?#%]|\.\./.test(arg) && !isPrototypeKey(arg);
 }
 
 async function commonAction(interaction, action, args) {

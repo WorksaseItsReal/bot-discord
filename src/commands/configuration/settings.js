@@ -162,8 +162,11 @@ function dashboardView(guild, cfg) {
 /** Raccourcis vers les tableaux de bord de configuration (chacun revérifie sa permission). */
 function shortcuts() {
   return buttonRows(
+    actionButton({ command: 'automod', action: 'go', args: ['home'], label: 'AutoMod', emoji: ICONS.automod }),
     actionButton({ command: 'antiraid', action: 'go', args: ['home'], label: 'AntiRaid', emoji: '🚨' }),
     actionButton({ command: 'tickets', action: 'go', args: ['home'], label: 'Tickets', emoji: ICONS.ticket }),
+    actionButton({ command: 'bienvenue', action: 'go', args: ['home'], label: 'Bienvenue', emoji: '👋' }),
+    actionButton({ command: 'niveaux', action: 'go', args: ['home'], label: 'Niveaux', emoji: '📈' }),
   );
 }
 

@@ -134,3 +134,9 @@ test('requireReason : raison exigée seulement si l\'option est active', () => {
   assert.throws(() => assertReason({ moderation: { requireReason: true } }, '  '), { name: 'UserError' });
   assert.throws(() => assertReason({ moderation: { requireReason: true } }, null), /raison/);
 });
+
+test('routeur : les noms hérités d\'Object.prototype sont refusés comme arguments', () => {
+  const { isSafeArg } = require('../src/components/cmd');
+  for (const a of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) assert.equal(isSafeArg(a), false, a);
+  for (const a of ['home', 'grp.spam', '123456789012345678', 'on']) assert.equal(isSafeArg(a), true, a);
+});
