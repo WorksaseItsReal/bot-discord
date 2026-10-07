@@ -42,6 +42,24 @@ Ce projet suit un versionnage sémantique.
 - Giveaways : édition groupée (rate-limit), relance excluant tous les anciens gagnants.
 - Nombreuses requêtes SQL regroupées, latence inconnue gérée, migrations concurrentes sûres.
 
+### Fixed — revue complète du code
+- **AutoMod** : liens déguisés `https://discord.com@evil.ru`, homoglyphes et fautes de frappe dans les
+  faux domaines (dіscord, stearncommunity, dicsord, steamcommunity.co), sites légitimes épargnés
+  (steamgifts…) ; « Bonjour.Ca va » n'est plus un lien, « ok » répété n'est plus un doublon ; séparateurs
+  exotiques, emojis à teinte, drapeaux et mots composés détectés ; une seule sanction par rafale, un
+  timeout long n'est jamais raccourci, plus de double MP ; boutons du tableau de bord idempotents.
+- **Logs** : auteur des rôles/pseudos/kicks/timeouts manuels via le journal d'audit, pas de doublon
+  pour les messages supprimés par l'AutoMod, transcript des suppressions en masse ; création des salons
+  protégée du double clic, sauvegardée au fur et à mesure, sans écraser les permissions manuelles ;
+  bouton Réparer, alerte si un salon de logs est public.
+- **Cœur** : module cassé signalé (deploy/healthcheck en échec), plus de double réponse aux
+  interactions, erreurs privées après un defer public, jetons de webhook masqués dans les logs, arrêt
+  propre, mutes et rappels jamais perdus, configuration corrompue sauvegardée, purge 30 j après départ.
+- **Modules** : suppression d'une sanction active refusée, mute réappliqué au retour, vagues AntiRaid
+  réellement sanctionnées, backups (quotas, ordre des rôles), giveaways (gagnants éligibles), ModMail
+  (transcript), tickets orphelins fermés au démarrage, hiérarchie respectée par `/voice`, `/tempban` confirmé.
+- `discord.js` ^14.22.0 requis ; `npm run deploy -- --dry-run` et `--clear-guild`.
+
 ## [0.3.0] — Non publié — Fiabilité, projets et nouvelles commandes
 
 ### Added
