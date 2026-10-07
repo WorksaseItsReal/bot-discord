@@ -7,6 +7,8 @@ const { hardenInteraction, safeRespond } = require('../core/interactionSafety');
 const { errorReply, embeds } = require('../utils/embeds');
 const { missingPermissions, permissionLabel } = require('../utils/permissionNames');
 const { discordTimestamp } = require('../utils/time');
+const { deleteButton } = require('../utils/ui');
+const { MessagePayload } = require('discord.js');
 
 const logger = createLogger('interaction');
 
@@ -78,6 +80,7 @@ async function handleCommand(client, interaction) {
       return;
     }
 
+    interaction.gadgetDecorate = autoDecorate(interaction, command);
     await command.execute(interaction, client);
     client.stats.commandsRun += 1;
   } catch (err) {
@@ -116,6 +119,39 @@ async function handleAutocomplete(client, interaction) {
   }
 }
 
+/**
+ * Ajoute le bouton 🗑️ « Supprimer » à la première réponse PUBLIQUE d'une commande
+ * (les réponses éphémères ont déjà « Ignorer le message » de Discord).
+ * Une commande peut s'en passer avec `autoDelete: false`.
+ */
+function autoDecorate(interaction, command) {
+  let done = false;
+  return (options, { ephemeral }) => {
+    if (done || ephemeral || command.autoDelete === false) return options;
+    if (!options || typeof options !== 'object' || options instanceof MessagePayload || options.poll) return options;
+    if (!options.embeds?.length) return options;
+    done = true;
+    return withDeleteButton(options, interaction.user.id);
+  };
+}
+
+/** Insère 🗑️ dans la dernière rangée de boutons (ou une nouvelle rangée). Pur. */
+function withDeleteButton(options, ownerId) {
+  const rows = (options.components || []).map((r) => (typeof r?.toJSON === 'function' ? r.toJSON() : r));
+  const hasDelete = rows.some((r) => r?.components?.some((c) => String(c.custom_id ?? c.customId ?? '').startsWith('cmd:_:delete')));
+  if (hasDelete) return options;
+  const del = deleteButton(ownerId).toJSON();
+  const last = rows[rows.length - 1];
+  if (last && last.type === 1 && last.components?.length < 5 && last.components.every((c) => c.type === 2)) {
+    rows[rows.length - 1] = { ...last, components: [...last.components, del] };
+  } else if (rows.length < 5) {
+    rows.push({ type: 1, components: [del] });
+  } else {
+    return options;
+  }
+  return { ...options, components: rows };
+}
+
 /** Identifiant court pour retrouver une erreur dans les logs. */
 function errorRef() {
   return Date.now().toString(36).slice(-4).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
@@ -152,3 +188,4 @@ async function reportError(client, interaction, err, source) {
 }
 
 module.exports.reportError = reportError;
+module.exports.withDeleteButton = withDeleteButton;

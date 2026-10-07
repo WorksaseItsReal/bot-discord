@@ -36,10 +36,16 @@ function withEphemeral(flags) {
  * @returns {{ options: any, fetch: boolean }}
  */
 function normalizeOptions(options, { allowEphemeral = true } = {}) {
+  // Règle de design : toute réponse est un embed. Un texte brut est mis en forme.
+  if (typeof options === 'string') options = { content: options };
   if (options == null || typeof options !== 'object' || Array.isArray(options) || options instanceof MessagePayload) {
     return { options, fetch: false };
   }
   const out = { ...options };
+  if (typeof out.content === 'string' && out.content.trim() && !out.embeds?.length && !out.poll && !out.files?.length) {
+    out.embeds = [require('../utils/ui').card({ tone: 'neutral', description: out.content })];
+    delete out.content;
+  }
   let fetch = false;
   if ('fetchReply' in out) {
     fetch = Boolean(out.fetchReply);
@@ -93,11 +99,19 @@ function hardenInteraction(interaction) {
   };
 
   const acknowledged = () => interaction.deferred || interaction.replied;
+  /** Hook optionnel (posé par le routeur de commandes) : ajoute le bouton 🗑️, etc. */
+  const decorate = (options, ephemeral) =>
+    typeof interaction.gadgetDecorate === 'function' ? interaction.gadgetDecorate(options, { ephemeral }) : options;
+  const isEphemeral = (options) =>
+    Boolean(options && typeof options === 'object' && new MessageFlagsBitField(options.flags ?? 0).has(MessageFlags.Ephemeral));
 
   interaction.reply = async (raw) => {
-    const { options, fetch } = normalizeOptions(raw);
-    if (interaction.replied) return original.followUp(options);
-    if (interaction.deferred) return original.editReply(stripForEdit(options));
+    const normalized = normalizeOptions(raw);
+    const { fetch } = normalized;
+    let { options } = normalized;
+    if (interaction.replied) return original.followUp(decorate(options, isEphemeral(options)));
+    if (interaction.deferred) return original.editReply(stripForEdit(decorate(options, Boolean(interaction.ephemeral))));
+    options = decorate(options, isEphemeral(options));
     if (!fetch) return original.reply(options);
     const response = await original.reply(withResponseOption(options));
     return response?.resource?.message ?? original.fetchReply();
@@ -112,7 +126,9 @@ function hardenInteraction(interaction) {
   };
 
   interaction.editReply = async (raw) => {
-    const { options } = normalizeOptions(raw, { allowEphemeral: false });
+    let { options } = normalizeOptions(raw, { allowEphemeral: false });
+    // Une édition ciblant un autre message (option `message`) n'est pas décorée.
+    if (!(options && typeof options === 'object' && options.message)) options = decorate(options, Boolean(interaction.ephemeral));
     if (!acknowledged()) {
       const response = await original.reply(withResponseOption(options));
       return response?.resource?.message ?? original.fetchReply();
@@ -121,7 +137,8 @@ function hardenInteraction(interaction) {
   };
 
   interaction.followUp = async (raw) => {
-    const { options } = normalizeOptions(raw);
+    let { options } = normalizeOptions(raw);
+    options = decorate(options, isEphemeral(options));
     if (!acknowledged()) {
       const response = await original.reply(withResponseOption(options));
       return response?.resource?.message ?? original.fetchReply();

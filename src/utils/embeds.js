@@ -1,7 +1,5 @@
 'use strict';
 
-const { EmbedBuilder } = require('discord.js');
-const { config } = require('../config');
 
 /**
  * Fabrique d'embeds thématisés. Centralise couleurs, pied de page de marque et
@@ -41,35 +39,28 @@ function brandFooter(suffix) {
   return brand.iconURL ? { text, iconURL: brand.iconURL } : { text };
 }
 
-function base(color) {
-  return new EmbedBuilder().setColor(color).setTimestamp().setFooter(brandFooter());
+/** Chargé à la demande : ui.js dépend lui-même de ce module (marque, limites). */
+function ui() {
+  return require('./ui');
 }
 
-function status(color, emoji, description, title) {
-  const embed = base(color).setDescription(truncate(`${emoji} ${description}`, LIMITS.description));
-  if (title) embed.setTitle(truncate(title, LIMITS.title));
-  return embed;
-}
-
-function titled(color, title) {
-  const embed = base(color);
-  if (title) embed.setTitle(truncate(title, LIMITS.title));
-  return embed;
-}
-
+/**
+ * Raccourcis historiques, désormais rendus par le système de design (ui.js).
+ * Préférez `card()` et `status.*` de src/utils/ui.js dans le nouveau code.
+ */
 const embeds = {
-  success: (description, title) => status(config.colors.success, config.emojis.success, description, title),
-  error: (description, title) => status(config.colors.error, config.emojis.error, description, title),
-  warning: (description, title) => status(config.colors.warning, config.emojis.warning, description, title),
-  info: (description, title) => status(config.colors.info, config.emojis.info, description, title),
-  loading: (description = 'Traitement en cours…') => status(config.colors.primary, config.emojis.loading, description),
-  moderation: (title) => titled(config.colors.moderation, title),
-  security: (title) => titled(config.colors.security, title),
-  neutral: (title) => titled(config.colors.primary, title),
-  fun: (title) => titled(config.colors.fun, title),
-  utility: (title) => titled(config.colors.utility, title),
+  success: (description, title) => ui().status.ok(description, title),
+  error: (description, title) => ui().status.fail(description, title),
+  warning: (description, title) => ui().status.warn(description, title),
+  info: (description, title) => ui().status.note(description, title),
+  loading: (description = 'Traitement en cours…') => ui().status.wait(description),
+  moderation: (title) => ui().card({ tone: 'caution', title }),
+  security: (title) => ui().card({ tone: 'caution', title }),
+  neutral: (title) => ui().card({ tone: 'brand', title }),
+  fun: (title) => ui().card({ tone: 'fun', title }),
+  utility: (title) => ui().card({ tone: 'info', title }),
   /** Embed libre avec une couleur arbitraire. */
-  custom: (color, title) => titled(color ?? config.colors.primary, title),
+  custom: (color, title) => ui().card({ tone: color ?? 'brand', title }),
 };
 
 /**
@@ -151,9 +142,7 @@ function sanitizeEmbeds(list) {
 
 /** Réponse d'erreur normalisée (éphémère). */
 function errorReply(description, { title, footer } = {}) {
-  const embed = embeds.error(description, title);
-  if (footer) embed.setFooter(brandFooter(footer));
-  return { embeds: [embed], ephemeral: true };
+  return { embeds: [ui().status.fail(description, title, footer ? { footer } : {})], ephemeral: true };
 }
 
 /** Réponse de succès normalisée. */

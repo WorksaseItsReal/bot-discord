@@ -16,10 +16,26 @@ test('normalizeOptions convertit ephemeral et fetchReply', () => {
   assert.strictEqual(options.flags & MessageFlags.Ephemeral, MessageFlags.Ephemeral);
 });
 
-test('normalizeOptions laisse passer les chaînes et ignore ephemeral:false', () => {
-  assert.deepStrictEqual(normalizeOptions('salut'), { options: 'salut', fetch: false });
+test('normalizeOptions transforme tout texte brut en embed et ignore ephemeral:false', () => {
+  const fromString = normalizeOptions('salut').options;
+  assert.strictEqual(fromString.content, undefined);
+  assert.strictEqual(fromString.embeds[0].description, 'salut');
   const { options } = normalizeOptions({ content: 'x', ephemeral: false });
   assert.strictEqual(options.flags, undefined);
+  assert.strictEqual(options.embeds.length, 1);
+  // Un texte accompagnant des embeds (mention qui notifie) est conservé.
+  const withEmbed = normalizeOptions({ content: '<@1>', embeds: [{ description: 'a' }] }).options;
+  assert.strictEqual(withEmbed.content, '<@1>');
+});
+
+test('bouton 🗑️ ajouté à la dernière rangée, une seule fois', () => {
+  const { withDeleteButton } = require('../src/events/interactionCreate');
+  const out = withDeleteButton({ embeds: [{}], components: [{ type: 1, components: [{ type: 2, custom_id: 'a' }] }] }, 'u1');
+  assert.strictEqual(out.components.length, 1);
+  assert.strictEqual(out.components[0].components[1].custom_id, 'cmd:_:delete:u1');
+  assert.strictEqual(withDeleteButton(out, 'u1'), out, 'pas de doublon');
+  const full = { embeds: [{}], components: [{ type: 1, components: [{ type: 3, custom_id: 'menu' }] }] };
+  assert.strictEqual(withDeleteButton(full, 'u1').components.length, 2, 'menu déroulant → nouvelle rangée');
 });
 
 test('normalizeOptions tronque les embeds trop longs', () => {
