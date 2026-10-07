@@ -84,14 +84,16 @@ function leet(text) {
 
 /** Séparateurs tolérés entre lettres isolées (dont emojis et « / »). */
 const SEP = "(?:[\\s.\\-_*~,'`/\\\\]|\\p{Extended_Pictographic}|\\uFE0F|\\u200D){1,3}";
-const SPACED_RE = new RegExp(`(?<![\\p{L}\\p{N}])\\p{L}(?:${SEP}\\p{L}(?![\\p{L}\\p{N}])){2,}`, 'gu');
+/** Unité isolée : une lettre, ou un caractère de leetspeak (« c.0.n »). */
+const UNIT = '[\\p{L}\\d@$€£]';
+const SPACED_RE = new RegExp(`(?<![\\p{L}\\p{N}])${UNIT}(?:${SEP}${UNIT}(?![\\p{L}\\p{N}])){2,}`, 'gu');
 
 /**
  * Recolle les lettres isolées séparées par des espaces, de la ponctuation ou des
  * emojis : « c o n », « c.o.n », « c/o/n », « c😀o😀n » → « con ». Les mots normaux ne bougent pas.
  */
 function joinSpaced(text) {
-  return text.replace(SPACED_RE, (m) => m.replace(/[^\p{L}]/gu, ''));
+  return text.replace(SPACED_RE, (m) => (/\p{L}/u.test(m) ? m.replace(/[^\p{L}\d@$€£]/gu, '') : m));
 }
 
 /**
@@ -101,7 +103,8 @@ function joinSpaced(text) {
 function variants(text) {
   const base = canonical(text);
   const leeted = leet(base);
-  return [...new Set([base, leeted, joinSpaced(leeted)])];
+  // Recoller AVANT le leetspeak : « c.0.n » → « c0n » → « con » (un nombre « 1 2 3 » reste un nombre).
+  return [...new Set([base, leeted, leet(joinSpaced(base)), joinSpaced(leeted)])];
 }
 
 /** Clé de comparaison de messages (doublons, spam inter-salons). */

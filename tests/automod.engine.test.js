@@ -68,7 +68,7 @@ test('détecteurs de forme', () => {
 
 test('revue : faux positifs corrigés (sigles, nombres, langues, fichiers, sites légitimes)', () => {
   const words = ['pd', 'tg', 'ass', 'con', 'bite'];
-  for (const t of ['Le P.D.G. arrive', 'T.G.V.', 'A.S.S.E.D.I.C', 'c.o.n.s.t.r.u.i.r.e', 'con_fig.txt', 'my_ass_ets', "j'ai 79 ans", 'ça coûte 455 €', 'code 8173']) {
+  for (const t of ['Le P.D.G. arrive', 'T.G.V.', 'A.S.S.E.D.I.C', 'c.o.n.s.t.r.u.i.r.e', 'con_fig.txt', 'my_ass_ets', "j'ai 79 ans", 'ça coûte 455 €', 'code 8173', '1 2 3', '4.5.5']) {
     assert.strictEqual(findBadWord(t, words), null, `faux positif : ${t}`);
   }
   assert.ok(!d.isZalgo('मैं ठीक हूँ, धन्यवाद। हिन्दी भारत की राजभाषा है'), 'hindi');
@@ -81,7 +81,7 @@ test('revue : faux positifs corrigés (sigles, nombres, langues, fichiers, sites
 
 test('revue : contournements supplémentaires attrapés', () => {
   const words = ['nul', 'merde', 'bite', 'con'];
-  for (const t of ['ΝUL', 'ΜERDE', 'ʙɪᴛᴇ', '🅲🅾🅽', 'c😀o😀n', 'c/o/n', 'b\u{E0020}ite', 'c\u2800o\u2800n', 'l000l']) {
+  for (const t of ['ΝUL', 'ΜERDE', 'ʙɪᴛᴇ', '🅲🅾🅽', 'c😀o😀n', 'c/o/n', 'b\u{E0020}ite', 'c\u2800o\u2800n', 'l000l', 'espèce de c.0.n', 'c 0 n', 'b.1.t.e']) {
     assert.ok(findBadWord(t, [...words, 'loool']), `devrait détecter : ${t}`);
   }
   for (const t of ['https://discord-nitro.xyz/gift', 'https://discordnitro.gift', 'https://steam-trade-offer.com/x', 'https://dlscord.com', '50 € offerts https://disc0rd-app.ru']) {
