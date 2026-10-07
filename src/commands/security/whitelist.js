@@ -1,7 +1,28 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply, listOrMore } = require('../../utils/embeds');
+const { card, wide, ICONS, status } = require('../../utils/ui');
+const { fitList } = require('../../services/LoggingService');
+
+/** Carte de la whitelist, avec une ligne de retour optionnelle en tête. */
+function whitelistCard(wl, notice) {
+  const users = wl.users ?? [];
+  const roles = wl.roles ?? [];
+  return card({
+    tone: 'info',
+    section: 'security',
+    icon: '🔐',
+    title: 'Whitelist de sécurité',
+    description: [
+      notice ? `${ICONS.success} ${notice}` : null,
+      'Ces membres et rôles échappent aux sanctions automatiques de l\'AntiRaid.',
+    ],
+    fields: [
+      wide(ICONS.user, `Utilisateurs (${users.length})`, fitList(users.map((u) => `<@${u}>`)) ?? '*Aucun*'),
+      wide(ICONS.role, `Rôles (${roles.length})`, fitList(roles.map((r) => `<@&${r}>`)) ?? '*Aucun*'),
+    ],
+  });
+}
 
 /**
  * Whitelist de sécurité : les utilisateurs/rôles whitelistés échappent aux
@@ -30,24 +51,22 @@ module.exports = {
     const wl = config.get(guildId).whitelist;
 
     if (sub === 'list') {
-      return interaction.reply({
-        embeds: [embeds.security('🔐 Whitelist').addFields(
-          { name: `Utilisateurs (${wl.users.length})`, value: listOrMore(wl.users.map((u) => `<@${u}>`), 35, ' ') },
-          { name: `Rôles (${wl.roles.length})`, value: listOrMore(wl.roles.map((r) => `<@&${r}>`), 35, ' ') },
-        )],
-        ephemeral: true,
-      });
+      return interaction.reply({ embeds: [whitelistCard(wl)], ephemeral: true });
     }
 
     const user = interaction.options.getUser('utilisateur');
     const role = interaction.options.getRole('role');
-    if (!user && !role) return interaction.reply({ embeds: [embeds.warning('Fournissez un utilisateur ou un rôle.')], ephemeral: true });
+    if (!user && !role) return interaction.reply({ embeds: [status.warn('Indiquez un utilisateur ou un rôle.')], ephemeral: true });
 
     const users = new Set(wl.users);
     const roles = new Set(wl.roles);
-    if (user) sub === 'add' ? users.add(user.id) : users.delete(user.id);
-    if (role) sub === 'add' ? roles.add(role.id) : roles.delete(role.id);
+    const add = sub === 'add';
+    if (user) add ? users.add(user.id) : users.delete(user.id);
+    if (role) add ? roles.add(role.id) : roles.delete(role.id);
     config.update(guildId, { whitelist: { users: [...users], roles: [...roles] } });
-    return interaction.reply(successReply(`Whitelist mise à jour.`, { ephemeral: true }));
+
+    const targets = [user, role].filter(Boolean).map(String).join(' et ');
+    const notice = add ? `${targets} ${user && role ? 'ajoutés' : 'ajouté'} à la whitelist.` : `${targets} ${user && role ? 'retirés' : 'retiré'} de la whitelist.`;
+    return interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], ephemeral: true });
   },
 };
