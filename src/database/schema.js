@@ -262,6 +262,27 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 9,
+    name: 'temp_voice_panel_and_prefs',
+    up: `
+      -- Vocaux temporaires : message du panneau de contrôle et état (verrouillé / masqué).
+      ALTER TABLE temp_voice ADD COLUMN panel_message_id TEXT;
+      ALTER TABLE temp_voice ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE temp_voice ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+
+      -- Préférences mémorisées du propriétaire, réappliquées à ses prochains vocaux.
+      CREATE TABLE IF NOT EXISTS temp_voice_prefs (
+        guild_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        name       TEXT,
+        user_limit INTEGER,
+        locked     INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
+    `,
+  },
 ];
 
 module.exports = { migrations };

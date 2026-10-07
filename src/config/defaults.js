@@ -130,8 +130,11 @@ const defaultGuildConfig = Object.freeze({
   tempVoice: {
     enabled: false,
     hubChannelId: null,   // salon "Créer un vocal"
-    categoryId: null,
-    nameTemplate: 'Vocal de {user}',
+    categoryId: null,     // null : catégorie du salon créateur
+    nameTemplate: 'Vocal de {pseudo}', // variables : {pseudo} (ou {user}), {username}, {n}
+    defaultLimit: 0,      // places par défaut (0 = illimité)
+    rememberPrefs: true,  // nom, limite et verrou du propriétaire réappliqués à ses prochains vocaux
+    panel: true,          // panneau de contrôle posté dans le chat du vocal
   },
   projects: {
     openCreation: true,     // tout le monde peut créer un projet (sinon : gestionnaires uniquement)
