@@ -25,6 +25,7 @@ const { TempVoiceRepository } = require('../database/repositories/TempVoiceRepos
 const { LockRepository } = require('../database/repositories/LockRepository');
 const { ProjectRepository } = require('../database/repositories/ProjectRepository');
 const { AutomodEventRepository } = require('../database/repositories/AutomodEventRepository');
+const { LevelRepository } = require('../database/repositories/LevelRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -41,6 +42,7 @@ const { ModmailService } = require('../services/ModmailService');
 const { TempVoiceService } = require('../services/TempVoiceService');
 const { ProjectService } = require('../services/ProjectService');
 const { LogSetupService } = require('../services/LogSetupService');
+const { LevelService } = require('../services/LevelService');
 
 const logger = createLogger('client');
 
@@ -91,6 +93,7 @@ class GadgetClient extends Client {
       locks: new LockRepository(db),
       projects: new ProjectRepository(db),
       automodEvents: new AutomodEventRepository(db),
+      levels: new LevelRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -114,6 +117,7 @@ class GadgetClient extends Client {
       tempVoice: new TempVoiceService({ tempVoice: this.repositories.tempVoice, config: configService }),
       projects: new ProjectService({ client: this, projects: this.repositories.projects, config: configService }),
       logSetup: new LogSetupService({ config: configService }),
+      levels: new LevelService({ client: this, levels: this.repositories.levels, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -126,6 +130,7 @@ class GadgetClient extends Client {
     this.bootstrap();
     await this.login(config.token);
     this.services.scheduler.start();
+    this.services.levels.start(); // suivi vocal des niveaux (minuteur unref, arrêté dans shutdown)
   }
 
   /**
@@ -145,6 +150,11 @@ class GadgetClient extends Client {
       await this.services?.scheduler?.stop();
     } catch (err) {
       logger.warn('Arrêt du scheduler :', err?.message);
+    }
+    try {
+      await this.services?.levels?.stop();
+    } catch (err) {
+      logger.warn('Arrêt du suivi des niveaux :', err?.message);
     }
     try {
       await this.destroy();
