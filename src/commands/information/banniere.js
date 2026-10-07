@@ -1,8 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
-const { button, row } = require('../../utils/components');
+const { card, field, ICONS, code, subtext, userLine, linkButton, buttonRows } = require('../../utils/ui');
 const { formatColor } = require('../../utils/projectFormat');
 
 module.exports = {
@@ -13,18 +12,52 @@ module.exports = {
     .addUserOption((o) => o.setName('cible').setDescription('L\'utilisateur (par défaut vous-même)')),
   async execute(interaction, client) {
     const target = interaction.options.getUser('cible') || interaction.user;
-    const user = await client.users.fetch(target.id, { force: true });
-    const url = user.bannerURL({ size: 1024 });
+    const user = await client.users.fetch(target.id, { force: true }).catch(() => target);
+    const name = user.displayName ?? user.username;
+    const avatar = user.displayAvatarURL({ size: 1024 });
+    const url = user.bannerURL?.({ size: 4096 });
+
     if (!url) {
-      const embed = embeds
-        .custom(user.accentColor ?? 0x5865f2, `🖼️ Bannière de ${user.username}`)
-        .setThumbnail(user.displayAvatarURL({ size: 256 }))
-        .setDescription(user.accentColor != null ? `Pas d'image de bannière, mais une couleur de profil : \`${formatColor(user.accentColor)}\`.` : 'Cet utilisateur n\'a pas de bannière.');
-      return interaction.reply({ embeds: [embed] });
+      const hasAccent = user.accentColor != null;
+      return interaction.reply({
+        embeds: [
+          card({
+            tone: hasAccent ? user.accentColor : 'neutral',
+            section: 'information',
+            icon: ICONS.image,
+            title: `Bannière de ${name}`,
+            description: [
+              userLine(user),
+              hasAccent ? 'Pas d\'image de bannière, mais une **couleur de profil** (visible sur la bande de cette carte).' : 'Cet utilisateur n\'a **pas de bannière**.',
+              subtext('Les bannières de profil sont réservées aux abonnés Nitro.'),
+            ],
+            thumbnail: avatar,
+            fields: hasAccent ? [field(ICONS.color, 'Couleur de profil', code(formatColor(user.accentColor)))] : [],
+          }),
+        ],
+        components: buttonRows(linkButton('Avatar', avatar, ICONS.image)),
+      });
     }
+
+    const animated = Boolean(user.banner?.startsWith('a_'));
     await interaction.reply({
-      embeds: [embeds.neutral(`🖼️ Bannière de ${user.username}`).setImage(url)],
-      components: [row(button({ label: 'Ouvrir en grand', url, emoji: '🔗' }))],
+      embeds: [
+        card({
+          tone: user.accentColor ?? 'brand',
+          section: 'information',
+          icon: ICONS.image,
+          title: `Bannière de ${name}`,
+          url,
+          description: [userLine(user), subtext(animated ? 'Bannière animée.' : 'Bannière de profil.')],
+          thumbnail: avatar,
+          image: url,
+        }),
+      ],
+      components: buttonRows(
+        linkButton('Ouvrir', url, ICONS.link),
+        animated ? linkButton('PNG', user.bannerURL({ size: 4096, extension: 'png', forceStatic: true })) : null,
+        linkButton('Avatar', avatar, ICONS.image),
+      ),
     });
   },
 };
