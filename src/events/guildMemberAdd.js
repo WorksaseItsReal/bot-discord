@@ -75,5 +75,7 @@ module.exports = {
     await client.services.logging.send(member.guild.id, 'members', embed, undefined, { event: 'memberJoin' });
     // Membre expulsé/banni par l'AntiRaid : il n'est plus là, rien à réappliquer.
     if (!raid?.punished) await reapplyMute(client, member).catch((e) => logger.debug('reapplyMute', e?.message));
+    // Accueil APRÈS l'AntiRaid : rien n'est envoyé à un membre qu'il vient d'expulser/bannir.
+    await client.services.welcome?.handleJoin(member, { raid }).catch((e) => logger.debug('welcome', e?.message));
   },
 };

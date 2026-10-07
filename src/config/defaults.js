@@ -139,6 +139,39 @@ const defaultGuildConfig = Object.freeze({
     channelId: null,        // salon de publication par défaut
     maxPerUser: 10,         // projets actifs max par membre (hors gestionnaires)
   },
+  // Accueil des nouveaux membres (/bienvenue). Variables : {membre} {pseudo} {serveur} {nombre} {compte}.
+  welcome: {
+    join: {
+      enabled: false,
+      channelId: null,
+      title: 'Bienvenue sur {serveur} !',
+      description: 'Bienvenue {membre} ! Vous êtes notre **{nombre}ᵉ** membre. Installez-vous confortablement.',
+      color: null,   // couleur personnalisée (nombre) ; null : couleur du bot
+      image: null,   // bannière (URL https)
+      mention: true, // mentionne (notifie) le membre au-dessus du message
+      dm: false,     // envoie aussi le message en MP
+    },
+    leave: {
+      enabled: false,
+      channelId: null,
+      title: 'Au revoir {pseudo}',
+      description: '**{pseudo}** a quitté le serveur. Nous sommes désormais **{nombre}** membres.',
+      color: null,
+      image: null,
+    },
+    // Rôles donnés à l'arrivée (10 max chacun). Avec la vérification, les rôles humains attendent la vérification.
+    autoRoles: { humans: [], bots: [] },
+    verification: {
+      enabled: false,
+      mode: 'add',            // add : donne le rôle « vérifié » · remove : retire le rôle « non vérifié » (donné à l'arrivée)
+      roleId: null,
+      channelId: null,        // salon du panneau de vérification
+      captcha: false,         // question anti-robot (calcul ou mot à recopier)
+      minAccountAgeDays: 0,   // âge minimal du compte pour se vérifier (0 : aucun)
+      panelChannelId: null,
+      panelMessageId: null,
+    },
+  },
   autobackup: {
     enabled: false,
     intervalHours: 24,
