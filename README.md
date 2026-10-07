@@ -136,24 +136,27 @@ Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, a
 
 | Section | Ce qu'on y fait |
 | --- | --- |
-| 🏠 Accueil | État de chaque catégorie (🟢 actif, ❌ salon supprimé, 🔒 permission manquante, ⏸️ en pause), pause globale, test. |
+| 🏠 Accueil | État de chaque catégorie (🟢 actif, ❌ salon supprimé, 🔒 permission manquante, ⏸️ en pause), pause globale, test, bouton **🛠️ Réparer** (recrée un salon supprimé, rétablit les permissions). |
 | 🔨 💬 👥 … Catégories | Choisir le salon, cocher les événements à journaliser, mettre en pause, envoyer un log de test. |
-| ⚡ Création automatique | Crée une catégorie **📋 Logs** privée et ses salons : un par catégorie, trois regroupés ou un seul. Le rôle staff choisi peut lire sans écrire. Relancer complète sans dupliquer ; suppression en deux clics. |
+| ⚡ Création automatique | Crée une catégorie **📋 Logs** privée et ses salons : un par catégorie, trois regroupés ou un seul. Le rôle staff choisi peut lire sans écrire. Relancer complète sans dupliquer (même après une erreur en cours de route), sans jamais toucher à vos propres salons ni écraser vos permissions manuelles ; suppression en deux clics. Une alerte s'affiche si un salon de logs choisi à la main est visible par @everyone. |
 | ⚙️ Options | Ignorer les messages des bots, ignorer des salons ou des catégories entières (fils compris). |
 
 **Ce qui est journalisé**
 
 | Catégorie | Événements |
 | --- | --- |
-| 🔨 Modération | Sanctions, levées de sanction, bans/débans manuels, tickets |
-| 💬 Messages | Suppressions, modifications, suppressions en masse |
-| 👥 Membres | Arrivées, départs, rôles ajoutés/retirés, pseudos, boosts |
+| 🔨 Modération | Sanctions, levées de sanction, bans, kicks et timeouts faits hors du bot (avec leur auteur), tickets |
+| 💬 Messages | Suppressions, modifications, suppressions en masse (transcript `.txt` joint) |
+| 👥 Membres | Arrivées, départs, rôles ajoutés/retirés et pseudos (avec l'auteur du changement), boosts |
 | 🎭 Rôles | Créations, suppressions, modifications (permissions comprises) |
 | 🗂️ Salons | Salons et fils créés, supprimés, modifiés |
 | 🔊 Vocal | Connexions, déconnexions, changements de salon |
 | 🛡️ Sécurité | Alertes AntiRaid, verrouillages |
 | 🤖 AutoMod | Messages filtrés et sanctions automatiques |
 | 🏠 Serveur | Paramètres du serveur, emojis ajoutés/supprimés |
+
+> L'auteur des changements de rôles, de pseudos et des actions manuelles provient du journal d'audit :
+> donnez au bot la permission **Voir les logs du serveur**.
 
 ---
 
