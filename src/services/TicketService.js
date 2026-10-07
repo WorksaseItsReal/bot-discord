@@ -277,7 +277,7 @@ class TicketService {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
     const content = await this.generateTranscript(channel);
-    const count = Math.max(0, content.split('\n').length - 3);
+    const count = content.split('\n').filter((l) => l.startsWith('[')).length;
     return {
       embeds: [
         card({

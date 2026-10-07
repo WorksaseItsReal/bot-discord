@@ -157,6 +157,21 @@ function bitToState(allow, deny) {
   return null; // neutre (hérite)
 }
 
+/**
+ * Salon visé par un bouton (id encodé dans le customId) : doit exister sur ce
+ * serveur et le cliqueur doit pouvoir le gérer (« Gérer les salons » sur CE salon).
+ * @param {import('discord.js').ButtonInteraction} interaction
+ */
+async function channelForButton(interaction, channelId) {
+  const channel = interaction.guild.channels.cache.get(channelId)
+    ?? (await interaction.client.channels.fetch(channelId).catch(() => null));
+  if (!channel || channel.guildId !== interaction.guildId) throw new UserError('Ce salon n\'existe plus.');
+  if (!channel.permissionsFor?.(interaction.member)?.has(PermissionFlagsBits.ManageChannels)) {
+    throw new UserError(`Il vous faut la permission **Gérer les salons** dans ${channel}.`);
+  }
+  return channel;
+}
+
 /** Refuse les fils et salons sans permissions propres (UserError). */
 function assertOverwritable(channel) {
   if (!channel || channel.isThread?.() || !channel.permissionOverwrites || !channel.guild) {
@@ -164,4 +179,4 @@ function assertOverwritable(channel) {
   }
 }
 
-module.exports = { LockdownService, bitToState, assertOverwritable, channelCard, serverLockCard, CHANNEL_ACTIONS };
+module.exports = { LockdownService, bitToState, assertOverwritable, channelCard, serverLockCard, channelForButton, CHANNEL_ACTIONS };
