@@ -6,7 +6,7 @@ Ce projet suit un versionnage sémantique.
 ## [0.3.0] — Non publié — Fiabilité, projets et nouvelles commandes
 
 ### Added
-- **Projets** (`/projet`, 20 sous-commandes) : création, fiche en embed (statut coloré, barre de
+- **Projets** (`/projet`, 19 sous-commandes) : création, fiche en embed (statut coloré, barre de
   progression, responsable, équipe avec rôles, tâches cochables, échéance avec alerte de retard,
   tags, image, boutons de liens), modification par formulaire, publication dans un salon avec
   mise à jour automatique, liste paginée, statistiques, transfert, configuration par serveur
