@@ -69,7 +69,7 @@ async function paginate(interaction, pages, opts = {}) {
     else if (i.customId === ids.last) index = pages.length - 1;
     else if (i.customId === ids.next) index = Math.min(index + 1, pages.length - 1);
     else index = Math.max(index - 1, 0);
-    await i.update(render());
+    await i.update(render()).catch(() => {}); // interaction expirée : on ignore
   });
 
   collector.on('end', async () => {

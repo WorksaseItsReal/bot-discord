@@ -1,7 +1,7 @@
 'use strict';
 
 const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-const { card, status, ICONS } = require('./ui');
+const { card, status, ICONS, subtext } = require('./ui');
 const { editPrompt } = require('./pagination');
 
 /**
@@ -19,8 +19,8 @@ async function confirm(interaction, opts) {
 
   const components = [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(confirmId).setLabel(confirmLabel).setEmoji('✔️').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(cancelId).setLabel('Annuler').setEmoji('✖️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(confirmId).setLabel(confirmLabel).setEmoji(ICONS.success).setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(cancelId).setLabel('Annuler').setEmoji(ICONS.error).setStyle(ButtonStyle.Secondary),
     ),
   ];
 
@@ -28,7 +28,7 @@ async function confirm(interaction, opts) {
     tone: 'warning',
     icon: ICONS.warning,
     title: 'Confirmation requise',
-    description: [description, '', `-# Sans réponse ${Math.round(timeout / 1000)} secondes, l'action est annulée.`],
+    description: [description, '', subtext(`Sans réponse sous ${Math.round(timeout / 1000)} secondes, l'action est annulée.`)],
   });
   const payload = { embeds: [prompt], components, ephemeral: true };
   const message = interaction.deferred || interaction.replied

@@ -26,18 +26,6 @@ function row(...components) {
   return new ActionRowBuilder().addComponents(...components);
 }
 
-/**
- * Découpe une liste de composants en rows de 5 (limite Discord).
- * @param {import('discord.js').AnyComponentBuilder[]} components
- */
-function rows(components) {
-  const out = [];
-  for (let i = 0; i < components.length; i += 5) {
-    out.push(row(...components.slice(i, i + 5)));
-  }
-  return out;
-}
-
 function selectMenu({ id, placeholder, options, min = 1, max = 1 }) {
   const menu = new StringSelectMenuBuilder()
     .setCustomId(id)
@@ -60,4 +48,4 @@ function selectMenu({ id, placeholder, options, min = 1, max = 1 }) {
   return menu;
 }
 
-module.exports = { button, row, rows, selectMenu, ButtonStyle };
+module.exports = { button, row, selectMenu, ButtonStyle };

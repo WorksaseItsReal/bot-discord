@@ -99,22 +99,31 @@ function hardenInteraction(interaction) {
   };
 
   const acknowledged = () => interaction.deferred || interaction.replied;
+  /**
+   * Vrai si l'interaction (bouton, menu) a été acquittée par update()/deferUpdate() :
+   * discord.js lève alors aussi `deferred`, mais « la réponse » EST le message du
+   * bouton. Une nouvelle réponse (ex : carte d'erreur) doit partir en followUp,
+   * jamais écraser ce message public.
+   */
+  let updateAcked = false;
+
   /** Hook optionnel (posé par le routeur de commandes) : ajoute le bouton 🗑️, etc. */
-  const decorate = (options, ephemeral) =>
-    typeof interaction.gadgetDecorate === 'function' ? interaction.gadgetDecorate(options, { ephemeral }) : options;
+  const decorate = (options, ephemeral, kind) =>
+    typeof interaction.gadgetDecorate === 'function' ? interaction.gadgetDecorate(options, { ephemeral, kind }) : options;
   const isEphemeral = (options) =>
     Boolean(options && typeof options === 'object' && new MessageFlagsBitField(options.flags ?? 0).has(MessageFlags.Ephemeral));
-
-  interaction.reply = async (raw) => {
-    const normalized = normalizeOptions(raw);
-    const { fetch } = normalized;
-    let { options } = normalized;
-    if (interaction.replied) return original.followUp(decorate(options, isEphemeral(options)));
-    if (interaction.deferred) return original.editReply(stripForEdit(decorate(options, Boolean(interaction.ephemeral))));
-    options = decorate(options, isEphemeral(options));
-    if (!fetch) return original.reply(options);
+  /** Première réponse renvoyant le Message créé. */
+  const replyFetched = async (options) => {
     const response = await original.reply(withResponseOption(options));
     return response?.resource?.message ?? original.fetchReply();
+  };
+
+  interaction.reply = async (raw) => {
+    const { options, fetch } = normalizeOptions(raw);
+    if (interaction.replied || updateAcked) return original.followUp(decorate(options, isEphemeral(options), 'followUp'));
+    if (interaction.deferred) return original.editReply(stripForEdit(decorate(options, Boolean(interaction.ephemeral), 'edit')));
+    const decorated = decorate(options, isEphemeral(options), 'reply');
+    return fetch ? replyFetched(decorated) : original.reply(decorated);
   };
 
   interaction.deferReply = async (raw) => {
@@ -126,33 +135,31 @@ function hardenInteraction(interaction) {
   };
 
   interaction.editReply = async (raw) => {
+    // Sans réponse préalable, l'édition devient une réponse : on garde alors `ephemeral`.
+    if (!acknowledged()) {
+      const { options } = normalizeOptions(raw);
+      return replyFetched(decorate(options, isEphemeral(options), 'reply'));
+    }
     let { options } = normalizeOptions(raw, { allowEphemeral: false });
     // Une édition ciblant un autre message (option `message`) n'est pas décorée.
-    if (!(options && typeof options === 'object' && options.message)) options = decorate(options, Boolean(interaction.ephemeral));
-    if (!acknowledged()) {
-      const response = await original.reply(withResponseOption(options));
-      return response?.resource?.message ?? original.fetchReply();
-    }
+    const targetsOther = Boolean(options && typeof options === 'object' && options.message && options.message !== '@original');
+    if (!targetsOther && !updateAcked) options = decorate(options, Boolean(interaction.ephemeral), 'edit');
     return original.editReply(stripForEdit(options));
   };
 
   interaction.followUp = async (raw) => {
-    let { options } = normalizeOptions(raw);
-    options = decorate(options, isEphemeral(options));
-    if (!acknowledged()) {
-      const response = await original.reply(withResponseOption(options));
-      return response?.resource?.message ?? original.fetchReply();
-    }
-    return original.followUp(options);
+    const { options } = normalizeOptions(raw);
+    if (!acknowledged()) return replyFetched(decorate(options, isEphemeral(options), 'reply'));
+    return original.followUp(decorate(options, isEphemeral(options), 'followUp'));
   };
 
   if (original.update) {
     interaction.update = async (raw) => {
       const { options, fetch } = normalizeOptions(raw, { allowEphemeral: false });
       if (acknowledged()) return original.editReply(stripForEdit(options));
-      if (!fetch) return original.update(options);
-      const response = await original.update(withResponseOption(options));
-      return response?.resource?.message ?? interaction.message;
+      const response = await original.update(fetch ? withResponseOption(options) : options);
+      updateAcked = true;
+      return fetch ? response?.resource?.message ?? interaction.message : response;
     };
   }
 
@@ -160,9 +167,9 @@ function hardenInteraction(interaction) {
     interaction.deferUpdate = async (raw) => {
       const { options, fetch } = normalizeOptions(raw ?? {}, { allowEphemeral: false });
       if (acknowledged()) return fetch ? interaction.message : undefined;
-      if (!fetch) return original.deferUpdate(options);
-      const response = await original.deferUpdate(withResponseOption(options));
-      return response?.resource?.message ?? interaction.message;
+      const response = await original.deferUpdate(fetch ? withResponseOption(options) : options);
+      updateAcked = true;
+      return fetch ? response?.resource?.message ?? interaction.message : response;
     };
   }
 

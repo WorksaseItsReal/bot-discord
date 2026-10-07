@@ -51,14 +51,18 @@ class DatabaseManager {
     );
     const applied = new Set(this.db.prepare('SELECT id FROM _migrations').all().map((r) => r.id));
     const insert = this.db.prepare('INSERT INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
+    const isApplied = this.db.prepare('SELECT 1 FROM _migrations WHERE id = ?');
+    // IMMEDIATE + revérification : deux processus (bot + `npm run migrate`) ne peuvent
+    // pas appliquer la même migration deux fois.
     const run = this.db.transaction((migration) => {
+      if (isApplied.get(migration.id)) return false;
       this.db.exec(migration.up);
       insert.run(migration.id, migration.name, Date.now());
+      return true;
     });
     for (const migration of migrations) {
       if (applied.has(migration.id)) continue;
-      run(migration);
-      logger.info(`Migration appliquée : #${migration.id} ${migration.name}`);
+      if (run.immediate(migration)) logger.info(`Migration appliquée : #${migration.id} ${migration.name}`);
     }
   }
 

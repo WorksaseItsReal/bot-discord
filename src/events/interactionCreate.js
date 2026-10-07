@@ -4,10 +4,10 @@ const { createLogger } = require('../core/logger');
 const { UserError } = require('../core/errors');
 const { describeApiError } = require('../core/apiErrors');
 const { hardenInteraction, safeRespond } = require('../core/interactionSafety');
-const { errorReply, embeds } = require('../utils/embeds');
+const { errorReply } = require('../utils/embeds');
 const { missingPermissions, permissionLabel } = require('../utils/permissionNames');
 const { discordTimestamp } = require('../utils/time');
-const { deleteButton } = require('../utils/ui');
+const { deleteButton, status } = require('../utils/ui');
 const { MessagePayload } = require('discord.js');
 
 const logger = createLogger('interaction');
@@ -74,7 +74,7 @@ async function handleCommand(client, interaction) {
     const remaining = client.cooldowns.hit(cooldownKey, command.cooldown ?? DEFAULT_COOLDOWN_MS);
     if (remaining > 0) {
       await interaction.reply({
-        embeds: [embeds.warning(`Doucement ! Vous pourrez réutiliser \`/${command.data.name}\` ${discordTimestamp(Date.now() + remaining, 'R')}.`)],
+        embeds: [status.warn(`Doucement ! Vous pourrez réutiliser \`/${command.data.name}\` ${discordTimestamp(Date.now() + remaining, 'R')}.`)],
         ephemeral: true,
       });
       return;
@@ -95,10 +95,31 @@ async function handleCommand(client, interaction) {
   }
 }
 
+/** Le bouton/menu cliqué figure-t-il vraiment sur le message ? (customId forgé sinon) */
+function componentExistsOnMessage(interaction) {
+  if (!interaction.isMessageComponent?.() || !interaction.message) return true;
+  const rows = interaction.message.components ?? [];
+  const walk = (list) => list.some((c) => c?.customId === interaction.customId || (c?.components && walk(c.components)));
+  return walk(rows);
+}
+
+/** Délai laissé aux collectors locaux avant de signaler un bouton expiré. */
+const ORPHAN_COMPONENT_MS = 2_500;
+
 async function handleComponent(client, interaction) {
   const handler = client.componentHandler?.resolve(interaction.customId);
-  if (!handler) return; // laissé aux collectors locaux (confirmation, pagination, help…)
+  if (!handler) {
+    // Laissé aux collectors locaux (confirmation, pagination, help…). Si personne ne
+    // répond (bouton expiré, redémarrage, clic d'un autre membre), on l'explique.
+    setTimeout(() => {
+      if (!interaction.deferred && !interaction.replied) {
+        safeRespond(interaction, errorReply('Ce bouton a expiré ou ne vous est pas destiné. Relancez la commande.'));
+      }
+    }, ORPHAN_COMPONENT_MS).unref?.();
+    return;
+  }
   try {
+    if (!componentExistsOnMessage(interaction)) throw new UserError('Ce bouton est invalide.');
     if (handler.guildOnly !== false && !interaction.inGuild()) {
       throw new UserError('Cette action n\'est disponible que sur un serveur.');
     }
@@ -125,12 +146,14 @@ async function handleAutocomplete(client, interaction) {
  * Une commande peut s'en passer avec `autoDelete: false`.
  */
 function autoDecorate(interaction, command) {
-  let done = false;
-  return (options, { ephemeral }) => {
-    if (done || ephemeral || command.autoDelete === false) return options;
+  let decorated = false;
+  return (options, { ephemeral, kind }) => {
+    if (ephemeral || command.autoDelete === false) return options;
     if (!options || typeof options !== 'object' || options instanceof MessagePayload || options.poll) return options;
-    if (!options.embeds?.length) return options;
-    done = true;
+    // Réponse d'origine déjà décorée : une édition qui remplace ses composants garde 🗑️.
+    if (decorated) return kind === 'edit' && options.components ? withDeleteButton(options, interaction.user.id) : options;
+    if (!options.embeds?.length || kind === 'followUp') return options;
+    decorated = true;
     return withDeleteButton(options, interaction.user.id);
   };
 }
@@ -207,3 +230,4 @@ async function reportError(client, interaction, err, source) {
 
 module.exports.reportError = reportError;
 module.exports.withDeleteButton = withDeleteButton;
+module.exports.componentExistsOnMessage = componentExistsOnMessage;

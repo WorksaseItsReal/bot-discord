@@ -264,7 +264,10 @@ const status = {
  * Survit aux redémarrages : l'état nécessaire est encodé dans les arguments.
  */
 function actionButton({ command, action, args = [], label, emoji, style = ButtonStyle.Secondary, disabled = false }) {
-  const customId = ['cmd', command, action, ...args.map(String)].join(':');
+  const parts = args.map(String);
+  // « : » sépare les arguments : il décalerait tous les suivants côté routeur.
+  if (parts.some((a) => a.includes(':'))) throw new Error(`actionButton(${command}.${action}) : « : » interdit dans les arguments`);
+  const customId = ['cmd', command, action, ...parts].join(':');
   if (customId.length > 100) throw new Error(`customId trop long (${customId.length}) : ${customId.slice(0, 40)}…`);
   const b = new ButtonBuilder().setCustomId(customId).setStyle(style);
   if (label) b.setLabel(truncate(label, 80));

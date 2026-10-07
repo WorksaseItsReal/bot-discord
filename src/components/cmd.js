@@ -14,15 +14,23 @@ const { UserError } = require('../core/errors');
  *   cmd:_:noop:<x>          étiquette désactivée (jamais cliquable)
  */
 module.exports = {
+  isSafeArg,
   id: 'cmd',
   guildOnly: false,
   async execute(interaction, client) {
     const [, command, action, ...args] = interaction.customId.split(':');
 
+    // Les customId sont contrôlés par le client : on refuse tout argument pouvant
+    // détourner une route de l'API Discord (« ../members/<id> », « a/b », « %2F »…).
+    if (args.some((a) => !isSafeArg(a))) {
+      throw new UserError('Ce bouton est invalide.');
+    }
+
     if (command === '_') return commonAction(interaction, action, args);
 
     const cmd = client.commands.get(command);
-    const handler = cmd?.buttons?.[action];
+    // hasOwn : « constructor », « toString »… ne doivent jamais être résolus.
+    const handler = cmd?.buttons && Object.hasOwn(cmd.buttons, action) ? cmd.buttons[action] : null;
     if (typeof handler !== 'function') {
       throw new UserError('Ce bouton n\'est plus disponible. Relancez la commande.');
     }
@@ -33,9 +41,15 @@ module.exports = {
   },
 };
 
+/** Argument de bouton sûr : pas de séparateur de chemin ni de « .. », longueur bornée. */
+function isSafeArg(arg) {
+  return typeof arg === 'string' && arg.length <= 100 && !/[\/\\?#%]|\.\./.test(arg);
+}
+
 async function commonAction(interaction, action, args) {
   if (action === 'delete') {
     const [ownerId] = args;
+    if (!/^\d{17,20}$/.test(ownerId ?? '')) throw new UserError('Ce bouton est invalide.');
     const canManage = interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages);
     if (interaction.user.id !== ownerId && !canManage) {
       throw new UserError('Seule la personne qui a lancé la commande (ou un modérateur) peut supprimer ce message.');

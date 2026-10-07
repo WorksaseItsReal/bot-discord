@@ -2,8 +2,8 @@
 
 
 /**
- * Fabrique d'embeds thématisés. Centralise couleurs, pied de page de marque et
- * limites Discord pour que TOUTES les commandes aient le même rendu soigné.
+ * Briques de base des embeds : marque (pied de page), limites Discord, troncature
+ * et mise en forme. Le rendu lui-même passe par le système de design (ui.js).
  */
 
 /** Limites officielles des embeds Discord. */
@@ -43,25 +43,6 @@ function brandFooter(suffix) {
 function ui() {
   return require('./ui');
 }
-
-/**
- * Raccourcis historiques, désormais rendus par le système de design (ui.js).
- * Préférez `card()` et `status.*` de src/utils/ui.js dans le nouveau code.
- */
-const embeds = {
-  success: (description, title) => ui().status.ok(description, title),
-  error: (description, title) => ui().status.fail(description, title),
-  warning: (description, title) => ui().status.warn(description, title),
-  info: (description, title) => ui().status.note(description, title),
-  loading: (description = 'Traitement en cours…') => ui().status.wait(description),
-  moderation: (title) => ui().card({ tone: 'caution', title }),
-  security: (title) => ui().card({ tone: 'caution', title }),
-  neutral: (title) => ui().card({ tone: 'brand', title }),
-  fun: (title) => ui().card({ tone: 'fun', title }),
-  utility: (title) => ui().card({ tone: 'info', title }),
-  /** Embed libre avec une couleur arbitraire. */
-  custom: (color, title) => ui().card({ tone: color ?? 'brand', title }),
-};
 
 /**
  * Barre de progression textuelle. Pure (testée).
@@ -145,15 +126,8 @@ function errorReply(description, { title, footer } = {}) {
   return { embeds: [ui().status.fail(description, title, footer ? { footer } : {})], ephemeral: true };
 }
 
-/** Réponse de succès normalisée. */
-function successReply(description, { ephemeral = false, title } = {}) {
-  return { embeds: [embeds.success(description, title)], ephemeral };
-}
-
 module.exports = {
-  embeds,
   errorReply,
-  successReply,
   setBrand,
   brand,
   brandFooter,
