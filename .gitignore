@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 
 # Environment / secrets — NEVER commit real credentials
 .env
@@ -21,6 +21,8 @@ logs/
 npm-debug.log*
 
 # Backups / transcripts generated at runtime
+# (sauvegardes SQLite de `npm run backup:db` : data/backups/, déjà couvert par data/)
+data/backups/
 backups/
 transcripts/
 

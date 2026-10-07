@@ -8,6 +8,19 @@ require('dotenv').config();
  * Les secrets ne vivent QUE dans le process.env (fichier .env non commité).
  */
 
+/**
+ * Nombre optionnel lu depuis l'environnement (ex : HEALTH_PORT).
+ * Renvoie `null` si absent, hors bornes ou non entier quand `integer` est demandé
+ * (la fonction correspondante reste alors désactivée).
+ */
+function parseNumberEnv(value, { min = 0, max = Number.MAX_SAFE_INTEGER, integer = true } = {}) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const n = Number(String(value).trim());
+  if (!Number.isFinite(n) || n < min || n > max) return null;
+  if (integer && !Number.isInteger(n)) return null;
+  return n;
+}
+
 function parseList(value) {
   if (!value) return [];
   return value
@@ -22,7 +35,16 @@ const config = {
   devGuildId: process.env.DEV_GUILD_ID || '',
   ownerIds: parseList(process.env.OWNER_IDS),
   databasePath: process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'gadget.sqlite'),
-  logLevel: process.env.LOG_LEVEL || 'info',
+  logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
+  /** `json` : une ligne JSON par entrée (agrégateurs de logs) ; sinon texte coloré. */
+  logFormat: (process.env.LOG_FORMAT || 'text').trim().toLowerCase(),
+  /** Port du serveur /healthz + /metrics (désactivé si non défini). */
+  healthPort: parseNumberEnv(process.env.HEALTH_PORT, { min: 0, max: 65535 }),
+  healthHost: process.env.HEALTH_HOST || '127.0.0.1',
+  /** Sauvegardes SQLite : dossier, rétention et intervalle automatique (heures, désactivé si non défini). */
+  dbBackupDir: process.env.DB_BACKUP_DIR || '',
+  dbBackupKeep: parseNumberEnv(process.env.DB_BACKUP_KEEP, { min: 1, max: 10_000 }) ?? 14,
+  dbBackupIntervalHours: parseNumberEnv(process.env.DB_BACKUP_INTERVAL_HOURS, { min: 0.1, max: 24 * 24, integer: false }),
   env: process.env.NODE_ENV || 'development',
   version: require('../../package.json').version,
   colors: {
@@ -59,4 +81,4 @@ function validate(opts = {}) {
   return errors;
 }
 
-module.exports = { config, validate, parseList };
+module.exports = { config, validate, parseList, parseNumberEnv };

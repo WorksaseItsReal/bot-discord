@@ -10,6 +10,8 @@ const { EventHandler } = require('./EventHandler');
 const { ComponentHandler } = require('./ComponentHandler');
 const { CooldownManager } = require('./cooldowns');
 const { DatabaseManager } = require('../database');
+const { AutoBackup, backupStem, defaultBackupDir } = require('../database/backup');
+const { startHealthServer } = require('./healthServer');
 const { GuildConfigRepository } = require('../database/repositories/GuildConfigRepository');
 const { SanctionRepository } = require('../database/repositories/SanctionRepository');
 const { StrikeRepository } = require('../database/repositories/StrikeRepository');
@@ -124,12 +126,53 @@ class GadgetClient extends Client {
 
   async start() {
     this.bootstrap();
+    // Avant le login : /healthz répond 503 tant que la connexion n'est pas prête.
+    await this.startOperations();
     await this.login(config.token);
     this.services.scheduler.start();
   }
 
   /**
-   * Arrêt propre : stoppe le scheduler (en attendant la fin du tick en cours),
+   * Exploitation (optionnelle, pilotée par l'environnement) : serveur /healthz +
+   * /metrics (HEALTH_PORT) et sauvegarde automatique de la base
+   * (DB_BACKUP_INTERVAL_HOURS). Un échec ici n'empêche jamais le bot de démarrer.
+   */
+  async startOperations(opts = config) {
+    if (opts === config) {
+      // Valeur présente mais rejetée par la config (hors bornes, non numérique) : on le signale.
+      const env = { HEALTH_PORT: 'healthPort', DB_BACKUP_INTERVAL_HOURS: 'dbBackupIntervalHours', DB_BACKUP_KEEP: 'dbBackupKeep' };
+      for (const [name, key] of Object.entries(env)) {
+        const raw = process.env[name]?.trim();
+        if (raw && Number(raw) !== opts[key]) logger.warn(`${name}=${raw} invalide : ignoré (voir .env.example).`);
+      }
+    }
+    if (opts.healthPort !== null && opts.healthPort !== undefined) {
+      try {
+        this.healthServer = await startHealthServer(this, { port: opts.healthPort, host: opts.healthHost });
+        logger.info(`Supervision : http://${opts.healthHost}:${this.healthServer.port}/healthz et /metrics`);
+      } catch (err) {
+        logger.warn(`Serveur de supervision non démarré (port ${opts.healthPort}) :`, err?.message);
+      }
+    }
+    if (opts.dbBackupIntervalHours) {
+      try {
+        this.autoBackup = new AutoBackup({
+          database: this.database,
+          intervalHours: opts.dbBackupIntervalHours,
+          dir: opts.dbBackupDir || defaultBackupDir(this.database.filePath),
+          stem: backupStem(this.database.filePath),
+          keep: opts.dbBackupKeep,
+        });
+        this.autoBackup.start();
+      } catch (err) {
+        logger.warn('Sauvegarde automatique non démarrée :', err?.message);
+      }
+    }
+  }
+
+  /**
+   * Arrêt propre : ferme le serveur de supervision, stoppe la sauvegarde
+   * automatique et le scheduler (en attendant ce qui est en cours),
    * ferme la connexion Discord puis la base. Idempotent : un signal et une
    * exception fatale simultanés partagent le même arrêt.
    */
@@ -140,6 +183,17 @@ class GadgetClient extends Client {
 
   async #doShutdown() {
     if (this.presenceTimer) clearInterval(this.presenceTimer);
+    try {
+      await this.healthServer?.close();
+    } catch (err) {
+      logger.warn('Fermeture du serveur de supervision :', err?.message);
+    }
+    try {
+      // Attendre une éventuelle sauvegarde en cours avant de fermer la base.
+      await this.autoBackup?.stop();
+    } catch (err) {
+      logger.warn('Arrêt de la sauvegarde automatique :', err?.message);
+    }
     try {
       // Attendre le tick en cours : il écrit en base, qu'on ne doit pas fermer sous lui.
       await this.services?.scheduler?.stop();

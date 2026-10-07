@@ -5,7 +5,10 @@ const { config } = require('../config');
 
 /**
  * Logger minimal, sans dépendance, avec niveaux et horodatage.
- * Niveaux: error < warn < info < debug.
+ * Niveaux: error < warn < info < debug (LOG_LEVEL).
+ *
+ * Deux formats (LOG_FORMAT) : `text` (défaut, coloré) ou `json` — une ligne JSON
+ * par entrée `{ time, level, scope, msg, err? }`, prête pour un agrégateur de logs.
  *
  * Tous les arguments passent par `sanitize()` avant affichage : les jetons
  * d'interaction/webhook présents dans les URL (`/interactions/:id/:token`,
@@ -79,6 +82,53 @@ function sanitize(value, depth = 0, seen = new WeakSet()) {
   }
 }
 
+function currentFormat() {
+  return config.logFormat === 'json' ? 'json' : 'text';
+}
+
+/** Erreur → objet JSON sûr (message et pile masqués, sans `requestBody`). */
+function errorToJson(err, seen) {
+  const out = { name: err.name ?? 'Error', message: redact(String(err.message ?? '')) };
+  if (err.stack) out.stack = redact(String(err.stack));
+  for (const key of Object.keys(err)) {
+    if (key === 'stack' || key === 'message' || key === 'name' || DROPPED_KEYS.has(key)) continue;
+    out[key] = sanitize(err[key], 1, seen);
+  }
+  if (err.cause !== undefined && !('cause' in out)) out.cause = sanitize(err.cause, 1, seen);
+  return out;
+}
+
+/** Valeur déjà assainie → texte sur une seule ligne. */
+function toText(value) {
+  return typeof value === 'string' ? value : util.inspect(value, { depth: MAX_DEPTH, breakLength: Infinity });
+}
+
+function jsonReplacer(_key, value) {
+  return typeof value === 'bigint' ? value.toString() : value;
+}
+
+/**
+ * Construit la ligne JSON d'une entrée. La première erreur passée devient `err`
+ * (structurée) ; le reste forme `msg`. Pur (testé).
+ */
+function formatJson(level, scope, args, now = new Date()) {
+  let err;
+  const parts = [];
+  for (const arg of args) {
+    if (!err && arg instanceof Error) err = errorToJson(arg, new WeakSet());
+    else parts.push(toText(sanitize(arg)));
+  }
+  const entry = { time: now.toISOString(), level, scope: scope || '', msg: parts.join(' ') || (err ? err.message : '') };
+  if (err) entry.err = err;
+  try {
+    return JSON.stringify(entry, jsonReplacer);
+  } catch {
+    // Propriété non sérialisable (cycle dans une instance, etc.) : on garde l'essentiel.
+    if (err) entry.err = { name: err.name, message: err.message, stack: err.stack };
+    return JSON.stringify(entry, jsonReplacer);
+  }
+}
+
 function format(level, scope, args) {
   const ts = new Date().toISOString();
   const tag = scope ? ` [${scope}]` : '';
@@ -89,7 +139,8 @@ function format(level, scope, args) {
 function log(level, scope, args) {
   if (LEVELS[level] > currentLevel()) return;
   const stream = level === 'error' || level === 'warn' ? console.error : console.log;
-  stream(...format(level, scope, args));
+  if (currentFormat() === 'json') stream(formatJson(level, scope, args));
+  else stream(...format(level, scope, args));
 }
 
 function createLogger(scope) {
@@ -102,4 +153,4 @@ function createLogger(scope) {
   };
 }
 
-module.exports = { logger: createLogger(''), createLogger, sanitize, redact };
+module.exports = { logger: createLogger(''), createLogger, sanitize, redact, formatJson };
