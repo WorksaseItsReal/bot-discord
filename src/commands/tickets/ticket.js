@@ -39,6 +39,9 @@ module.exports = {
       const role = interaction.options.getRole('role_support');
       const logs = interaction.options.getChannel('logs');
       const max = interaction.options.getInteger('max_par_membre');
+      // @everyone verrait tous les tickets ; un rôle d'intégration ne s'attribue pas.
+      if (role?.id === interaction.guild.id) throw new UserError('Le rôle @everyone ne peut pas être le rôle support : tout le monde verrait les tickets.');
+      if (role?.managed) throw new UserError(`Le rôle ${role.name} est géré par une intégration : choisissez un rôle support classique.`);
       if (category) patch.categoryId = category.id;
       if (role) patch.supportRoleId = role.id;
       if (logs) patch.logChannel = logs.id;

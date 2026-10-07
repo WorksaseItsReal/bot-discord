@@ -9,6 +9,7 @@ const REPLY_MODAL_ID = 'cmd:modmail:send';
 
 module.exports = {
   category: 'tickets',
+  assertStaffRole,
   data: new SlashCommandBuilder()
     .setName('modmail')
     .setDescription('Système ModMail (DM ↔ staff).')
@@ -32,6 +33,7 @@ module.exports = {
       const category = interaction.options.getChannel('categorie');
       const role = interaction.options.getRole('role_staff');
       const active = interaction.options.getBoolean('actif');
+      if (role) assertStaffRole(role, interaction.guild);
       if (category) patch.categoryId = category.id;
       if (role) patch.staffRoleId = role.id;
       if (active !== null) patch.enabled = active;
@@ -66,7 +68,7 @@ module.exports = {
       return interaction.editReply({ embeds: [status.ok('Votre réponse a été envoyée en message privé.', 'Réponse envoyée')] });
     }
     if (sub === 'close') {
-      if (!modmailThread(client, interaction.channel.id)) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+      assertOpenThread(client, interaction.channel.id);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
       return modmail.close(interaction.channel);
     }
@@ -110,7 +112,7 @@ module.exports = {
     async close(interaction, client) {
       const { modmail } = client.services;
       modmail.assertStaff(interaction.member);
-      if (!modmailThread(client, interaction.channelId)) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+      assertOpenThread(client, interaction.channelId);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
       return modmail.close(interaction.channel);
     },
@@ -119,6 +121,20 @@ module.exports = {
 
 function modmailThread(client, channelId) {
   return client.services.modmail.modmail?.getByChannel?.(channelId) ?? null;
+}
+
+/** Rôle staff valide : ni @everyone (tout le monde verrait les conversations), ni rôle d'intégration. */
+function assertStaffRole(role, guild) {
+  if (role.id === guild.id) throw new UserError('Le rôle @everyone ne peut pas être le rôle staff : tout le monde verrait les conversations.');
+  if (role.managed) throw new UserError(`Le rôle ${role.name} est géré par une intégration : choisissez un rôle staff classique.`);
+}
+
+/** Conversation ModMail encore ouverte (sinon : double clic sur « Fermer », salon non ModMail…). */
+function assertOpenThread(client, channelId) {
+  const thread = modmailThread(client, channelId);
+  if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+  if (thread.status !== 'open') throw new UserError('Cette conversation ModMail est déjà fermée.');
+  return thread;
 }
 
 function closingCard() {

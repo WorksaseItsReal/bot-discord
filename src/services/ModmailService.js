@@ -6,6 +6,9 @@ const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton,
 const { discordTimestamp } = require('../utils/time');
 const { UserError } = require('../core/errors');
 
+/** Durée du cache négatif « aucun serveur ModMail commun ». */
+const NO_GUILD_TTL_MS = 10 * 60_000;
+
 /** Section « nom du serveur » pour les cartes envoyées en MP. */
 function guildSection(guild) {
   return { emoji: ICONS.mail, label: guild?.name ? `ModMail · ${guild.name}` : 'ModMail' };
@@ -73,8 +76,28 @@ class ModmailService {
   /** @type {Map<string, Promise<void>>} */
   #locks = new Map();
 
-  /** @type {Map<string, number>} dernier avertissement « aucun serveur » par utilisateur */
-  #noticeAt = new Map();
+  /**
+   * Cache négatif : utilisateur → expiration. Évite de rescanner tous les serveurs
+   * (et d'appeler guild.members.fetch sur chacun) à chaque MP d'un inconnu.
+   * @type {Map<string, number>}
+   */
+  #noGuildUntil = new Map();
+
+  /** L'utilisateur est-il connu pour n'avoir aucun serveur ModMail commun ? */
+  isNoGuildCached(userId, now = Date.now()) {
+    const until = this.#noGuildUntil.get(userId);
+    if (until && until > now) return true;
+    if (until) this.#noGuildUntil.delete(userId);
+    return false;
+  }
+
+  #rememberNoGuild(userId, now = Date.now()) {
+    // Mémoire bornée : on purge les entrées expirées quand la table grossit.
+    if (this.#noGuildUntil.size >= 1000) {
+      for (const [id, until] of this.#noGuildUntil) if (until <= now) this.#noGuildUntil.delete(id);
+    }
+    this.#noGuildUntil.set(userId, now + NO_GUILD_TTL_MS);
+  }
 
   async #handleUserDM(message) {
     const userId = message.author.id;
@@ -93,22 +116,23 @@ class ModmailService {
       }
     }
 
-    if (!guild) guild = await this.#findGuild(userId);
     if (!guild) {
-      const last = this.#noticeAt.get(userId) ?? 0;
-      if (Date.now() - last > 10 * 60_000) {
-        this.#noticeAt.set(userId, Date.now());
-        await message
-          .reply({
-            embeds: [
-              status.warn(
-                'Aucun serveur commun avec le ModMail activé n\'a été trouvé : votre message n\'a pas été transmis.',
-                'Message non transmis',
-              ),
-            ],
-          })
-          .catch(() => {});
-      }
+      // Déjà cherché récemment sans succès (et déjà prévenu) : on ignore sans rescanner.
+      if (this.isNoGuildCached(userId)) return;
+      guild = await this.#findGuild(userId);
+    }
+    if (!guild) {
+      this.#rememberNoGuild(userId);
+      await message
+        .reply({
+          embeds: [
+            status.warn(
+              'Aucun serveur commun avec le ModMail activé n\'a été trouvé : votre message n\'a pas été transmis.',
+              'Message non transmis',
+            ),
+          ],
+        })
+        .catch(() => {});
       return;
     }
     const cfg = this.config.get(guild.id).modmail;
@@ -239,10 +263,12 @@ class ModmailService {
     });
   }
 
+  /** @returns {Promise<boolean>} false si la conversation était déjà fermée (double clic) */
   async close(channel) {
     const thread = this.modmail.getByChannel(channel.id);
     if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
-    this.modmail.close(channel.id);
+    // Garde atomique : seul le premier appel prévient le membre et supprime le salon.
+    if (!this.modmail.close(channel.id)) return false;
     const user = await this.client.users.fetch(thread.user_id).catch(() => null);
     const guild = channel.guild ?? this.client.guilds.cache.get(thread.guild_id);
     if (user) {
@@ -264,6 +290,7 @@ class ModmailService {
         .catch(() => {});
     }
     await channel.delete().catch(() => {});
+    return true;
   }
 
   /**
@@ -281,4 +308,4 @@ class ModmailService {
   }
 }
 
-module.exports = { ModmailService };
+module.exports = { ModmailService, NO_GUILD_TTL_MS };

@@ -12,7 +12,7 @@ const {
 const { UserError } = require('../../core/errors');
 const { progressBar, truncate } = require('../../utils/embeds');
 const { confirm } = require('../../utils/confirmation');
-const { assertInvoker } = require('../../utils/buttonGuard');
+const { assertInvoker, snowflake } = require('../../utils/buttonGuard');
 const { discordTimestamp } = require('../../utils/time');
 const {
   card,
@@ -29,6 +29,7 @@ const {
 } = require('../../utils/ui');
 const {
   LIMITS,
+  STATUSES,
   statusMeta,
   statusChoices,
   parseColor,
@@ -260,8 +261,7 @@ async function publishTo(interaction, service, project, channel) {
  * Liste paginée SANS état serveur : page, filtre et auteur sont encodés dans le bouton.
  *   cmd:projet:list:<ownerId>:<page>:<statut|->:<membreId|->:<p|r|n>
  */
-async function renderList(client, service, guild, { ownerId, page = 0, status = null, memberId = null }) {
-  const entries = service.list(guild.id, { status, memberId });
+async function renderList(client, service, guild, { ownerId, page = 0, status = null, memberId = null, entries = service.list(guild.id, { status, memberId }) }) {
   const why = status ? ` avec le statut **${statusMeta(status).label}**` : memberId ? ` pour <@${memberId}>` : '';
   if (!entries.length) {
     return {
@@ -384,11 +384,13 @@ module.exports = {
     /** cmd:projet:list:<ownerId>:<page>:<statut|->:<membreId|->:<tag> — navigation / actualisation. */
     async list(interaction, client, [ownerId, page, status, memberId]) {
       assertInvoker(interaction, ownerId);
+      // Arguments contrôlés par le client : statut connu et identifiant Discord uniquement.
+      if (status && status !== '-' && !Object.hasOwn(STATUSES, status)) throw new UserError('Bouton invalide (statut).');
       const view = await renderList(client, client.services.projects, interaction.guild, {
         ownerId,
         page: Number(page) || 0,
         status: status && status !== '-' ? status : null,
-        memberId: memberId && memberId !== '-' ? memberId : null,
+        memberId: memberId && memberId !== '-' ? snowflake(memberId, 'membre') : null,
       });
       await interaction.update(view);
     },
@@ -463,7 +465,7 @@ const HANDLERS = {
         ephemeral: true,
       });
     }
-    await interaction.reply(await renderList(client, service, guild, { ownerId: interaction.user.id, status, memberId: user?.id ?? null }));
+    await interaction.reply(await renderList(client, service, guild, { ownerId: interaction.user.id, status, memberId: user?.id ?? null, entries }));
   },
 
   async modifier({ interaction, service, guild, member }) {

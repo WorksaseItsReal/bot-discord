@@ -5,11 +5,22 @@ const { truncate } = require('../../utils/embeds');
 const { paginate } = require('../../utils/pagination');
 const { card, field, wide, subtext, code, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
-const { renderTag } = require('../utility/tag');
+const { renderTag, tagCard } = require('../utility/tag');
 
 /** Tags par page de /custom list. */
 const PER_PAGE = 8;
 const VARIABLES = '{user} · {server} · {membercount}';
+/** Nom de tag : lettres (toutes langues), chiffres, « _ » et « - » ; au moins une lettre ou un chiffre. */
+const TAG_NAME = /^(?=.*[\p{L}\p{N}])[\p{L}\p{N}_-]{1,32}$/u;
+
+/** Normalise et valide un nom de tag saisi (minuscules, espaces → « - »). */
+function normalizeTagName(input) {
+  const name = String(input ?? '').trim().toLowerCase().replace(/\s+/g, '-');
+  if (!TAG_NAME.test(name)) {
+    throw new UserError('Nom de tag invalide : 32 caractères maximum, uniquement des lettres, des chiffres, « _ » et « - ».');
+  }
+  return name;
+}
 
 /** Les boutons revérifient la permission par défaut de la commande. */
 function assertManageGuild(interaction) {
@@ -28,21 +39,17 @@ function oneLine(text, max = 90) {
   return truncate(String(text).replace(/\s+/g, ' ').trim(), max);
 }
 
-function formatLabel(isEmbed) {
-  return isEmbed ? `${ICONS.image} Embed` : `${ICONS.reason} Texte`;
-}
-
 module.exports = {
   category: 'configuration',
+  normalizeTagName,
   data: new SlashCommandBuilder()
     .setName('custom')
     .setDescription('Gère les commandes personnalisées (tags).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addSubcommand((s) =>
       s.setName('create').setDescription('Crée/modifie un tag.')
-        .addStringOption((o) => o.setName('nom').setDescription('Nom du tag').setRequired(true).setMaxLength(32))
-        .addStringOption((o) => o.setName('contenu').setDescription('Contenu (variables: {user} {server} {membercount})').setRequired(true).setMaxLength(2000))
-        .addBooleanOption((o) => o.setName('embed').setDescription('Afficher en embed ?')))
+        .addStringOption((o) => o.setName('nom').setDescription('Nom du tag (lettres, chiffres, _ et -)').setRequired(true).setMaxLength(32))
+        .addStringOption((o) => o.setName('contenu').setDescription('Contenu (variables: {user} {server} {membercount})').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) =>
       s.setName('delete').setDescription('Supprime un tag.').addStringOption((o) => o.setName('nom').setDescription('Nom').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les tags.')),
@@ -53,15 +60,12 @@ module.exports = {
     const guildId = interaction.guild.id;
 
     if (sub === 'create') {
-      const name = interaction.options.getString('nom').toLowerCase().replace(/\s+/g, '-').slice(0, 32);
+      const name = normalizeTagName(interaction.options.getString('nom'));
       const content = interaction.options.getString('contenu');
-      if (!name.replace(/-/g, '')) throw new UserError('Nom de tag invalide.');
-      if (name.includes(':')) throw new UserError('Le nom d\'un tag ne peut pas contenir « : ».');
       if (!content.trim()) throw new UserError('Le contenu du tag ne peut pas être vide.');
       if (content.length > 2000) throw new UserError('Le contenu du tag est trop long (2000 caractères max).');
       const existed = Boolean(repo.get(guildId, name));
-      const isEmbed = interaction.options.getBoolean('embed') ? 1 : 0;
-      repo.set({ guildId, name, content, isEmbed, createdBy: interaction.user.id });
+      repo.set({ guildId, name, content, createdBy: interaction.user.id });
       return interaction.reply({
         embeds: [
           card({
@@ -72,7 +76,6 @@ module.exports = {
             description: [`Utilisez **/tag ${name}** pour l'afficher.`, subtext(`Variables disponibles : ${VARIABLES}`)],
             fields: [
               field(ICONS.tag, 'Nom', code(name)),
-              field(ICONS.status, 'Format', formatLabel(isEmbed)),
               field(ICONS.count, 'Longueur', `${content.length} car.`),
               wide(ICONS.reason, 'Contenu', codeBlock(content)),
             ],
@@ -108,7 +111,6 @@ module.exports = {
           ephemeral: true,
         });
       }
-      const embedCount = list.filter((t) => t.is_embed).length;
       const pages = [];
       for (let i = 0; i < list.length; i += PER_PAGE) {
         pages.push(
@@ -117,9 +119,9 @@ module.exports = {
             section: 'configuration',
             icon: ICONS.tag,
             title: 'Tags du serveur',
-            description: [`**${list.length}** tag${list.length > 1 ? 's' : ''} · ${embedCount} en embed`, subtext('Afficher un tag : /tag <nom>')],
+            description: [`**${list.length}** tag${list.length > 1 ? 's' : ''}`, subtext('Afficher un tag : /tag <nom>')],
             fields: list.slice(i, i + PER_PAGE).map((t) =>
-              wide(ICONS.tag, t.name, `${formatLabel(t.is_embed)}${t.created_by ? ` · ${ICONS.user} <@${t.created_by}>` : ''}\n${subtext(oneLine(t.content))}`),
+              wide(ICONS.tag, t.name, `${t.created_by ? `${ICONS.user} <@${t.created_by}>\n` : ''}${subtext(oneLine(t.content))}`),
             ),
             footer: `Variables : ${VARIABLES}`,
           }),
@@ -143,19 +145,10 @@ module.exports = {
       const tag = client.repositories.customCommands.get(interaction.guildId, name);
       if (!tag) throw new UserError(`Le tag ${code(truncate(name ?? '?', 32))} n'existe plus.`);
       const content = renderTag(tag.content, { user: interaction.user, guild: interaction.guild });
+      // Aperçu identique au rendu de /tag (toujours une carte).
       await interaction.reply({
-        embeds: [
-          card({
-            tone: 'neutral',
-            section: { emoji: ICONS.next, label: `Aperçu · /tag ${tag.name}` },
-            title: tag.is_embed ? tag.name : undefined,
-            description: [
-              truncate(content, 3900) || '​',
-              '',
-              subtext(tag.is_embed ? 'Rendu en embed, comme avec /tag.' : 'Envoyé en texte simple par /tag (aperçu en carte ici).'),
-            ],
-          }),
-        ],
+        embeds: [tagCard(tag.name, content)],
+        allowedMentions: { parse: [] },
         ephemeral: true,
       });
     },

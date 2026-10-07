@@ -5,6 +5,7 @@ const { discordTimestamp } = require('../../utils/time');
 const { permissionLabel } = require('../../utils/permissionNames');
 const { card, field, wide, ICONS, code, subtext, bullets, actionButton, buttonRows } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+const { ensureMembers, PARTIAL_NOTE } = require('./inrole');
 
 const SNOWFLAKE = /^\d{17,20}$/;
 const KEY_PERMISSIONS = ['Administrator', 'ManageGuild', 'ManageRoles', 'ManageChannels', 'ManageMessages', 'BanMembers', 'KickMembers', 'ModerateMembers', 'MentionEveryone'];
@@ -75,9 +76,7 @@ module.exports = {
       const role = interaction.guild.roles.cache.get(roleId);
       if (!role) throw new UserError('Ce rôle n\'existe plus.');
       await interaction.deferReply({ ephemeral: true });
-      if (interaction.guild.members.cache.size < interaction.guild.memberCount) {
-        await interaction.guild.members.fetch({ time: 15_000 }).catch(() => null);
-      }
+      const { partial } = await ensureMembers(interaction.guild, client, 15_000);
       const members = [...role.members.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, 'fr'));
       const shown = members.slice(0, MAX_LISTED).map((m) => `${m} · ${code(m.user.username)}`);
       const rest = members.length - shown.length;
@@ -89,8 +88,14 @@ module.exports = {
             icon: ICONS.members,
             title: `Membres avec ${role.name}`,
             description: members.length
-              ? [`${role} · **${members.length}** membre${members.length > 1 ? 's' : ''}`, '', bullets(shown), rest > 0 ? subtext(`… et ${rest} autre${rest > 1 ? 's' : ''}. Liste complète : /inrole`) : null]
-              : [`Aucun membre n'a le rôle ${role}.`],
+              ? [
+                `${role} · **${members.length}** membre${members.length > 1 ? 's' : ''}`,
+                '',
+                bullets(shown),
+                rest > 0 ? subtext(`… et ${rest} autre${rest > 1 ? 's' : ''}. Liste complète : /inrole`) : null,
+                partial ? subtext(PARTIAL_NOTE) : null,
+              ]
+              : [`Aucun membre n'a le rôle ${role}.`, partial ? subtext(PARTIAL_NOTE) : null],
           }),
         ],
       });

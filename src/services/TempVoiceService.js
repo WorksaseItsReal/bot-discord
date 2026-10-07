@@ -2,6 +2,10 @@
 
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const { card, field, ICONS, bullets } = require('../utils/ui');
+const { CooldownManager } = require('../core/cooldowns');
+
+/** Délai minimal entre deux créations de vocal pour un même membre (anti va-et-vient). */
+const HUB_COOLDOWN_MS = 10_000;
 
 /**
  * Vocaux temporaires : rejoindre un salon "hub" crée un vocal personnel,
@@ -16,6 +20,8 @@ class TempVoiceService {
   constructor({ tempVoice, config }) {
     this.tempVoice = tempVoice;
     this.config = config;
+    /** Cooldown par membre sur le hub : évite les rafales création/suppression. */
+    this.hubCooldowns = new CooldownManager();
   }
 
   /** Réagit à un changement d'état vocal (join/leave). */
@@ -24,8 +30,12 @@ class TempVoiceService {
     const cfg = this.config.get(guild.id).tempVoice;
 
     // Création : arrivée dans le hub
-    if (cfg?.enabled && cfg.hubChannelId && newState.channelId === cfg.hubChannelId) {
-      await this.#createFor(newState, cfg).catch(() => {});
+    if (cfg?.enabled && cfg.hubChannelId && newState.channelId === cfg.hubChannelId && oldState.channelId !== newState.channelId) {
+      const userId = newState.member?.id ?? newState.id;
+      // En cooldown : le membre reste dans le hub, aucun salon n'est créé.
+      if (!this.hubCooldowns.hit(`${guild.id}:${userId}`, HUB_COOLDOWN_MS)) {
+        await this.#createFor(newState, cfg).catch(() => {});
+      }
     }
 
     // Suppression : un salon temporaire devenu vide
@@ -126,4 +136,4 @@ class TempVoiceService {
   }
 }
 
-module.exports = { TempVoiceService };
+module.exports = { TempVoiceService, HUB_COOLDOWN_MS };

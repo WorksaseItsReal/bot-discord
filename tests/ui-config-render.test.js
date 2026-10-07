@@ -140,7 +140,9 @@ test('health : carte technique et actualisation réservée à l\'auteur', async 
     stats: { commandsRun: 12, errors: 0 },
   };
   await assert.rejects(health.buttons.refresh(fakeInteraction({ userId: 'x' }), client, ['owner']), /réservé/);
-  const i = fakeInteraction({ userId: 'owner' });
+  // Expose des informations de processus : « Gérer le serveur » revérifié au clic.
+  await assert.rejects(health.buttons.refresh(fakeInteraction({ userId: 'owner' }), client, ['owner']), /Gérer le serveur/);
+  const i = fakeInteraction({ userId: 'owner', granted: [PermissionFlagsBits.ManageGuild] });
   await health.buttons.refresh(i, client, ['owner']);
   const { embeds, ids } = assertPayload(i.calls.update);
   assert.deepStrictEqual(ids, ['cmd:health:refresh:owner']);

@@ -1,7 +1,8 @@
 'use strict';
 
 const { UserError } = require('../core/errors');
-const { status, deleteButton, buttonRows, ICONS } = require('../utils/ui');
+const { status, ICONS } = require('../utils/ui');
+const { withDeleteButton } = require('../events/interactionCreate');
 const { parseColor, parseTags, buildProjectEmbed, buildTaskListEmbed } = require('../utils/projectFormat');
 
 /**
@@ -25,17 +26,6 @@ function deleteOwnerOf(message) {
   return null;
 }
 
-/** Ajoute 🗑️ à la dernière rangée (ou à une nouvelle rangée). */
-function withDelete(view, ownerId) {
-  if (!ownerId) return view;
-  const rows = [...view.components];
-  const last = rows[rows.length - 1];
-  const lastIsActions = last && last.components.length < 5 && last.components.every((c) => c.data?.style !== 5);
-  if (lastIsActions) last.addComponents(deleteButton(ownerId));
-  else if (rows.length < 5) rows.push(...buttonRows(deleteButton(ownerId)));
-  return { ...view, components: rows };
-}
-
 module.exports = {
   id: 'project',
   deleteOwnerOf,
@@ -49,8 +39,9 @@ module.exports = {
 
     if (action === 'refresh' && interaction.isButton()) {
       // Une réponse de commande garde son bouton 🗑️ ; une fiche publiée n'en a jamais.
-      const view = withDelete(service.render(project, interaction.guild), deleteOwnerOf(interaction.message));
-      await interaction.update(view);
+      const view = service.render(project, interaction.guild);
+      const ownerId = deleteOwnerOf(interaction.message);
+      await interaction.update(ownerId ? withDeleteButton(view, ownerId) : view);
       return;
     }
 

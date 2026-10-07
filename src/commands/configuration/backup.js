@@ -209,17 +209,16 @@ module.exports = {
             icon: ICONS.memory,
             title: 'Sauvegardes du serveur',
             description: [`**${list.length}** sauvegarde${list.length > 1 ? 's' : ''} · 15 au maximum`, autoLine],
-            fields: chunk.map((row) => {
-              const c = composition(backup.get(guildId, row.id)?.data);
-              return wide(
+            fields: chunk.map((row) =>
+              wide(
                 ICONS.memory,
                 truncate(row.name, 200),
                 [
-                  `${ICONS.id} ${code(row.id)}  ·  ${ICONS.role} **${c.roles}** rôles  ·  ${ICONS.channel} **${c.channels}** salons`,
+                  `${ICONS.id} ${code(row.id)}  ·  ${ICONS.role} **${row.role_count ?? 0}** rôles  ·  ${ICONS.channel} **${row.channel_count ?? 0}** salons`,
                   `${ICONS.date} ${discordTimestamp(row.created_at, 'D')} (${discordTimestamp(row.created_at, 'R')})${row.created_by ? ` · par <@${row.created_by}>` : ' · automatique'}`,
                 ].join('\n'),
-              );
-            }),
+              ),
+            ),
             footer: 'Détails : /backup info',
           }),
         );

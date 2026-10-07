@@ -1,14 +1,7 @@
 'use strict';
 
-const { PermissionFlagsBits } = require('discord.js');
 const { card, field, ICONS, status, subtext } = require('../utils/ui');
-
-/** Permissions qu'un rôle auto-attribuable ne doit jamais conférer. */
-const DANGEROUS_PERMISSIONS = [
-  PermissionFlagsBits.Administrator,
-  PermissionFlagsBits.ManageGuild,
-  PermissionFlagsBits.ManageRoles,
-];
+const { hasForbiddenPermissions } = require('../commands/roles/rolemenu');
 
 /**
  * Gestionnaire du select menu de rôles auto-attribuables.
@@ -42,7 +35,7 @@ module.exports = {
       if (!menuRoles.has(roleId)) continue;
       const role = interaction.guild.roles.cache.get(roleId);
       // Rôle supprimé, devenu sensible ou passé au-dessus du bot depuis la création du menu.
-      if (!role || role.managed || role.permissions.any(DANGEROUS_PERMISSIONS) || role.position >= me.roles.highest.position) {
+      if (!role || role.managed || hasForbiddenPermissions(role) || role.position >= me.roles.highest.position) {
         failed.push(roleId);
         continue;
       }

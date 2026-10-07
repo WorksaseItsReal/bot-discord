@@ -88,7 +88,8 @@ class ProjectService {
   list(guildId, { status = null, memberId = null } = {}) {
     let projects = memberId ? this.repo.listForMember(guildId, memberId) : this.repo.list(guildId);
     if (status) projects = projects.filter((p) => p.status === status);
-    return projects.map((project) => ({ project, counts: this.repo.taskCounts(project.id) }));
+    const counts = this.repo.taskCountsByProject(guildId);
+    return projects.map((project) => ({ project, counts: counts.get(project.id) ?? { total: 0, done: 0 } }));
   }
 
   /** Choix d'autocomplétion pour l'option « projet ». */

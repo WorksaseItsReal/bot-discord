@@ -6,12 +6,30 @@ const { row, selectMenu } = require('../../utils/components');
 const { card, field, ICONS, subtext, linkButton, buttonRows } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 
-/** Permissions qu'un rôle auto-attribuable ne doit jamais conférer. */
-const DANGEROUS_PERMISSIONS = [
+/**
+ * Permissions qu'un rôle auto-attribuable ne doit jamais conférer.
+ * Source unique, partagée avec le gestionnaire du menu (components/rolemenu.js).
+ */
+const FORBIDDEN_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.Administrator,
   PermissionFlagsBits.ManageGuild,
   PermissionFlagsBits.ManageRoles,
-];
+  PermissionFlagsBits.BanMembers,
+  PermissionFlagsBits.KickMembers,
+  PermissionFlagsBits.ModerateMembers,
+  PermissionFlagsBits.ManageChannels,
+  PermissionFlagsBits.ManageMessages,
+  PermissionFlagsBits.MentionEveryone,
+  PermissionFlagsBits.ManageWebhooks,
+  PermissionFlagsBits.ManageNicknames,
+  PermissionFlagsBits.ManageGuildExpressions,
+  PermissionFlagsBits.ViewAuditLog,
+]);
+
+/** Le rôle confère-t-il une permission de modération / d'administration ? */
+function hasForbiddenPermissions(role) {
+  return role.permissions.any(FORBIDDEN_PERMISSIONS);
+}
 
 /**
  * Carte publique du menu de rôles. Pure.
@@ -45,6 +63,8 @@ function panelCard({ title, intro, roles }) {
 module.exports = {
   category: 'roles',
   panelCard,
+  FORBIDDEN_PERMISSIONS,
+  hasForbiddenPermissions,
   data: new SlashCommandBuilder()
     .setName('rolemenu')
     .setDescription('Crée un menu de rôles auto-attribuables.')
@@ -72,8 +92,8 @@ module.exports = {
       if (!r || roles.some((x) => x.roleId === r.id)) continue;
       if (r.id === guild.id) throw new UserError('Le rôle @everyone ne peut pas faire partie d\'un menu de rôles.');
       if (r.managed) throw new UserError(`Le rôle ${r.name} est géré par une intégration et ne peut pas être auto-attribué.`);
-      if (r.permissions.any(DANGEROUS_PERMISSIONS)) {
-        throw new UserError(`Le rôle ${r.name} possède des permissions sensibles (Administrateur, Gérer le serveur ou Gérer les rôles) : il ne peut pas être auto-attribuable.`);
+      if (hasForbiddenPermissions(r)) {
+        throw new UserError(`Le rôle ${r.name} possède des permissions de modération ou d'administration : il ne peut pas être auto-attribuable.`);
       }
       if (r.position >= me.roles.highest.position) throw new UserError(`Le rôle ${r.name} est trop haut pour que je puisse l'attribuer.`);
       if (!isOwner && r.position >= interaction.member.roles.highest.position) {

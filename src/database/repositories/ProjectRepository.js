@@ -71,9 +71,9 @@ class ProjectRepository {
     this.countActiveByOwnerStmt = db.prepare(
       "SELECT COUNT(*) AS n FROM projects WHERE guild_id = ? AND owner_id = ? AND status NOT IN ('termine', 'abandonne')",
     );
-    this.byMessageStmt = db.prepare('SELECT * FROM projects WHERE message_id = ?');
     this.deleteStmt = db.prepare('DELETE FROM projects WHERE id = ?');
-    this.deleteGuildStmt = db.prepare('DELETE FROM projects WHERE guild_id = ?');
+    /** Requêtes UPDATE préparées, par combinaison de colonnes (clé : SQL). */
+    this.updateStmts = new Map();
 
     this.membersStmt = db.prepare('SELECT user_id, role, added_at FROM project_members WHERE project_id = ? ORDER BY added_at ASC');
     this.addMemberStmt = db.prepare(
@@ -94,6 +94,10 @@ class ProjectRepository {
     this.removeTaskStmt = db.prepare('DELETE FROM project_tasks WHERE id = ? AND project_id = ?');
     this.taskCountsStmt = db.prepare(
       'SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM project_tasks WHERE project_id = ?',
+    );
+    this.taskCountsByProjectStmt = db.prepare(
+      `SELECT t.project_id AS projectId, COUNT(t.id) AS total, COALESCE(SUM(t.done), 0) AS done
+       FROM project_tasks t JOIN projects p ON p.id = t.project_id WHERE p.guild_id = ? GROUP BY t.project_id`,
     );
     this.guildTaskCountsStmt = db.prepare(
       `SELECT COUNT(t.id) AS total, COALESCE(SUM(t.done), 0) AS done
@@ -135,10 +139,6 @@ class ProjectRepository {
     return hydrate(this.byNameStmt.get(guildId, name));
   }
 
-  getByMessage(messageId) {
-    return hydrate(this.byMessageStmt.get(messageId));
-  }
-
   list(guildId) {
     return this.listStmt.all(guildId).map(hydrate);
   }
@@ -169,7 +169,13 @@ class ProjectRepository {
       params[key] = key === 'tags' || key === 'links' ? JSON.stringify(value ?? []) : value ?? null;
     }
     sets.push('updated_at = @updatedAt');
-    this.db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = @id`).run(params);
+    const sql = `UPDATE projects SET ${sets.join(', ')} WHERE id = @id`;
+    let stmt = this.updateStmts.get(sql);
+    if (!stmt) {
+      stmt = this.db.prepare(sql);
+      this.updateStmts.set(sql, stmt);
+    }
+    stmt.run(params);
     return this.get(id);
   }
 
@@ -180,10 +186,6 @@ class ProjectRepository {
 
   delete(id) {
     return this.deleteStmt.run(id).changes > 0;
-  }
-
-  deleteGuild(guildId) {
-    return this.deleteGuildStmt.run(guildId).changes;
   }
 
   members(projectId) {
@@ -233,6 +235,16 @@ class ProjectRepository {
   taskCounts(projectId) {
     const r = this.taskCountsStmt.get(projectId);
     return { total: r.total, done: r.done };
+  }
+
+  /**
+   * Compteurs de tâches de tous les projets du serveur, en une requête.
+   * @returns {Map<number, { total: number, done: number }>} (projets sans tâche absents)
+   */
+  taskCountsByProject(guildId) {
+    const map = new Map();
+    for (const r of this.taskCountsByProjectStmt.all(guildId)) map.set(r.projectId, { total: r.total, done: r.done });
+    return map;
   }
 
   guildTaskCounts(guildId) {

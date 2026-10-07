@@ -114,7 +114,7 @@ module.exports = {
                 ICONS.gift,
                 `#${g.id} · ${truncate(g.prize, 120)}`,
                 [
-                  `${ICONS.expires} Fin ${discordTimestamp(g.ends_at, 'R')} · 🏆 ${g.winners} gagnant(s) · ${ICONS.members} ${giveaways.countEntries(g.id)} participant(s)`,
+                  `${ICONS.expires} Fin ${discordTimestamp(g.ends_at, 'R')} · 🏆 ${g.winners} gagnant(s) · ${ICONS.members} ${g.entry_count ?? 0} participant(s)`,
                   `${ICONS.owner} <@${g.host_id}> · <#${g.channel_id}>${url ? ` · [Voir](${url})` : ''}`,
                   g.required_role || g.forbidden_role ? conditions(g) : null,
                 ].filter(Boolean).join('\n'),

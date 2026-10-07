@@ -8,7 +8,14 @@ class BackupRepository {
        VALUES (@id, @guildId, @name, @data, @createdBy, @createdAt)`,
     );
     this.getStmt = db.prepare('SELECT * FROM backups WHERE id = ? AND guild_id = ?');
-    this.listStmt = db.prepare('SELECT id, name, created_by, created_at FROM backups WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?');
+    // Compteurs lus dans le JSON par SQLite (sans décoder toute la sauvegarde côté Node).
+    // Repli sur la longueur des tableaux pour les sauvegardes antérieures à `counts`.
+    this.listStmt = db.prepare(
+      `SELECT id, name, created_by, created_at,
+         CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.counts.roles'), json_array_length(data, '$.roles'), 0) ELSE 0 END AS role_count,
+         CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.counts.channels'), json_array_length(data, '$.channels'), 0) ELSE 0 END AS channel_count
+       FROM backups WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?`,
+    );
     this.deleteStmt = db.prepare('DELETE FROM backups WHERE id = ? AND guild_id = ?');
     this.countStmt = db.prepare('SELECT COUNT(*) AS n FROM backups WHERE guild_id = ?');
     this.pruneStmt = db.prepare(
@@ -34,6 +41,7 @@ class BackupRepository {
     return row;
   }
 
+  /** Résumés (sans `data`) : id, name, created_by, created_at, role_count, channel_count. */
   list(guildId, limit = 15) {
     return this.listStmt.all(guildId, limit);
   }

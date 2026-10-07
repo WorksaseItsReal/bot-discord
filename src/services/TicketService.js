@@ -6,6 +6,9 @@ const { card, field, wide, ICONS, userLine, code, subtext, bullets, status } = r
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 
+/** Nombre maximal de messages repris dans un transcript. */
+const TRANSCRIPT_MAX = 1000;
+
 /** Libellés de statut d'un ticket (pastille). */
 const STATUS_LABELS = {
   open: '🟢 Ouvert · en attente',
@@ -250,16 +253,51 @@ class TicketService {
     ) ?? null;
   }
 
+  /**
+   * Historique du salon, du plus ancien au plus récent, en remontant par pages
+   * de 100 (`before` : plus ancien identifiant reçu) jusqu'à `max` messages.
+   * @returns {Promise<{ messages: import('discord.js').Message[], truncated: boolean } | null>}
+   */
+  async fetchHistory(channel, max = TRANSCRIPT_MAX) {
+    const collected = [];
+    let before;
+    let full = false;
+    while (collected.length < max) {
+      const limit = Math.min(100, max - collected.length);
+      const page = await channel.messages.fetch(before ? { limit, before } : { limit }).catch(() => null);
+      if (!page) {
+        if (!collected.length) return null;
+        break;
+      }
+      const batch = [...page.values()];
+      collected.push(...batch);
+      full = batch.length === limit;
+      if (!full || !batch.length) break;
+      // Les pages arrivent du plus récent au plus ancien : on remonte depuis le plus ancien.
+      before = batch.reduce((oldest, m) => ((m.createdTimestamp ?? 0) < (oldest.createdTimestamp ?? 0) ? m : oldest)).id;
+    }
+    // Limite atteinte : reste-t-il des messages plus anciens ?
+    let truncated = false;
+    if (collected.length >= max && full) {
+      const more = await channel.messages.fetch({ limit: 1, before }).catch(() => null);
+      truncated = Boolean(more?.size);
+    }
+    collected.sort((a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0));
+    return { messages: collected, truncated };
+  }
+
   async generateTranscript(channel) {
-    const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
-    if (!messages) return 'Transcript indisponible.';
+    const history = await this.fetchHistory(channel);
+    if (!history) return 'Transcript indisponible.';
+    const { messages, truncated } = history;
     const ticket = this.tickets.getByChannel(channel.id);
     const header = [
       `Transcript — #${channel.name ?? channel.id}${ticket ? ` (ticket #${ticket.id})` : ''}`,
-      `Généré le ${new Date().toISOString()} · ${messages.size} message(s)`,
+      `Généré le ${new Date().toISOString()} · ${messages.length} message(s)`,
+      truncated ? `⚠ Transcript tronqué : seuls les ${messages.length} derniers messages sont inclus.` : null,
       '─'.repeat(60),
-    ];
-    const lines = [...messages.values()].reverse().map((m) => {
+    ].filter(Boolean);
+    const lines = messages.map((m) => {
       const extras = [
         m.embeds?.length ? `[${m.embeds.length} embed(s)]` : null,
         m.attachments?.size ? `[pièces jointes : ${[...m.attachments.values()].map((a) => a.url).join(', ')}]` : null,
@@ -285,7 +323,7 @@ class TicketService {
           section: 'tickets',
           icon: '📄',
           title: `Transcript du ticket #${ticket.id}`,
-          description: ['Voici l\'historique du ticket au format texte.', subtext('Les 100 derniers messages sont inclus.')],
+          description: ['Voici l\'historique du ticket au format texte.', subtext(`Les ${TRANSCRIPT_MAX} derniers messages au maximum sont inclus.`)],
           fields: [
             field(ICONS.user, 'Auteur', `<@${ticket.user_id}>`),
             field(ICONS.count, 'Messages', `**${count}**`),
@@ -376,4 +414,4 @@ class TicketService {
   }
 }
 
-module.exports = { TicketService, STATUS_LABELS };
+module.exports = { TicketService, STATUS_LABELS, TRANSCRIPT_MAX };

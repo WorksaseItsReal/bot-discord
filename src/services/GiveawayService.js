@@ -7,6 +7,9 @@ const { discordTimestamp } = require('../utils/time');
 const { pickWinners } = require('../utils/random');
 const { UserError } = require('../core/errors');
 
+/** Délai de regroupement des mises à jour du compteur de participants. */
+const EDIT_DEBOUNCE_MS = 5_000;
+
 /** Lien direct vers le message d'un giveaway (null si pas encore publié). */
 function giveawayUrl(g) {
   return g?.message_id ? `https://discord.com/channels/${g.guild_id}/${g.channel_id}/${g.message_id}` : null;
@@ -39,6 +42,10 @@ class GiveawayService {
   constructor({ client, giveaways }) {
     this.client = client;
     this.giveaways = giveaways;
+    /** @type {Map<number, NodeJS.Timeout>} giveaways dont la carte doit être réactualisée */
+    this.pendingEdits = new Map();
+    /** @type {Map<number, Promise<void>>} réactualisations en cours (end() les attend) */
+    this.inflightEdits = new Map();
   }
 
   /** Carte du giveaway en cours. */
@@ -207,13 +214,43 @@ class GiveawayService {
       throw new UserError(`Les membres ayant le rôle <@&${g.forbidden_role}> ne peuvent pas participer à ce giveaway.`);
     }
     const joined = this.giveaways.toggleEntry(giveawayId, member.id);
-    // Met à jour le compteur affiché
-    const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
-    if (channel && g.message_id) {
-      const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-      if (msg) await msg.edit(this.render(g)).catch(() => {});
-    }
+    // Compteur affiché : une seule édition groupée toutes les ~5 s (pas une par clic).
+    this.scheduleEdit(giveawayId);
     return joined;
+  }
+
+  /** Programme la réactualisation de la carte (regroupe les participations rapprochées). */
+  scheduleEdit(giveawayId) {
+    if (this.pendingEdits.has(giveawayId)) return;
+    const timer = setTimeout(() => {
+      this.pendingEdits.delete(giveawayId);
+      const job = this.#refreshLive(giveawayId)
+        .catch(() => {})
+        .finally(() => this.inflightEdits.delete(giveawayId));
+      this.inflightEdits.set(giveawayId, job);
+    }, EDIT_DEBOUNCE_MS);
+    timer.unref?.();
+    this.pendingEdits.set(giveawayId, timer);
+  }
+
+  /** Annule une réactualisation programmée et attend celle en cours. */
+  async #cancelEdit(giveawayId) {
+    clearTimeout(this.pendingEdits.get(giveawayId));
+    this.pendingEdits.delete(giveawayId);
+    await this.inflightEdits.get(giveawayId);
+  }
+
+  /** Réédite la carte en direct, sauf si le giveaway s'est terminé entre-temps (jamais de « résurrection »). */
+  async #refreshLive(giveawayId) {
+    const current = this.giveaways.get(giveawayId);
+    if (!current || current.ended || !current.message_id) return;
+    const channel = await this.client.channels.fetch(current.channel_id).catch(() => null);
+    const msg = channel?.messages ? await channel.messages.fetch(current.message_id).catch(() => null) : null;
+    if (!msg) return;
+    // Relecture juste avant l'édition : end() a pu passer pendant les appels réseau.
+    const fresh = this.giveaways.get(giveawayId);
+    if (!fresh || fresh.ended) return;
+    await msg.edit(this.render(fresh));
   }
 
   /** Nombre de participants (affichage). */
@@ -238,18 +275,24 @@ class GiveawayService {
       // Garde atomique : un seul appel (commande, scheduler…) peut terminer le giveaway.
       throw new UserError('Ce giveaway est déjà terminé.');
     }
+    // Une édition « en direct » tardive ne doit jamais écraser la carte de fin.
+    await this.#cancelEdit(giveawayId);
 
-    const entries = this.giveaways.entries(giveawayId);
-    const winners = await this.#drawWinners(entries, g.winners);
-    if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll.');
     const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
+    const message = g.message_id && channel?.messages ? await channel.messages.fetch(g.message_id).catch(() => null) : null;
+
+    let entries = this.giveaways.entries(giveawayId);
+    if (reroll) {
+      // Les gagnants précédents (lus sur la carte de fin) ne peuvent pas être retirés.
+      const previous = new Set(previousWinners(message));
+      entries = entries.filter((id) => !previous.has(id));
+    }
+    const winners = await this.#drawWinners(entries, g.winners);
+    if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll (les gagnants précédents sont exclus).');
 
     if (channel?.isTextBased()) {
       await channel.send(this.#announcement(g, winners, reroll)).catch(() => {});
-      if (g.message_id && !reroll) {
-        const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-        if (msg) await msg.edit(this.renderEnded(g, winners)).catch(() => {});
-      }
+      if (message && !reroll) await message.edit(this.renderEnded(g, winners)).catch(() => {});
     }
     return winners;
   }
@@ -259,4 +302,14 @@ class GiveawayService {
   }
 }
 
-module.exports = { GiveawayService, giveawayUrl, conditions };
+/**
+ * Gagnants affichés sur la carte de fin (champ « Gagnant(s) »), seule trace
+ * persistée du tirage : la base ne stocke pas les gagnants.
+ */
+function previousWinners(message) {
+  const embed = message?.embeds?.[0];
+  const fieldValue = embed?.fields?.find((f) => /Gagnant/.test(f.name))?.value ?? '';
+  return [...fieldValue.matchAll(/<@!?(\d{17,20})>/g)].map((m) => m[1]);
+}
+
+module.exports = { GiveawayService, giveawayUrl, conditions, previousWinners, EDIT_DEBOUNCE_MS };

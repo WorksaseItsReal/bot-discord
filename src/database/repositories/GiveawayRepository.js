@@ -9,8 +9,13 @@ class GiveawayRepository {
     );
     this.setMessageStmt = db.prepare('UPDATE giveaways SET message_id = ? WHERE id = ?');
     this.byIdStmt = db.prepare('SELECT * FROM giveaways WHERE id = ?');
-    this.byMessageStmt = db.prepare('SELECT * FROM giveaways WHERE message_id = ?');
-    this.activeByGuildStmt = db.prepare('SELECT * FROM giveaways WHERE guild_id = ? AND ended = 0 ORDER BY ends_at ASC');
+    // Nombre de participants inclus (entry_count) : une seule requête pour toute la liste.
+    this.activeByGuildStmt = db.prepare(
+      `SELECT g.*, COUNT(e.user_id) AS entry_count
+       FROM giveaways g LEFT JOIN giveaway_entries e ON e.giveaway_id = g.id
+       WHERE g.guild_id = ? AND g.ended = 0
+       GROUP BY g.id ORDER BY g.ends_at ASC`,
+    );
     this.dueStmt = db.prepare('SELECT * FROM giveaways WHERE ended = 0 AND ends_at <= ?');
     this.markEndedStmt = db.prepare('UPDATE giveaways SET ended = 1 WHERE id = ? AND ended = 0');
     this.deleteStmt = db.prepare('DELETE FROM giveaways WHERE id = ?');
@@ -34,10 +39,7 @@ class GiveawayRepository {
     return this.byIdStmt.get(id);
   }
 
-  getByMessage(messageId) {
-    return this.byMessageStmt.get(messageId);
-  }
-
+  /** Giveaways en cours du serveur, avec `entry_count`. */
   listActive(guildId) {
     return this.activeByGuildStmt.all(guildId);
   }

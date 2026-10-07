@@ -9,8 +9,14 @@ class SuggestionRepository {
     );
     this.setMessageStmt = db.prepare('UPDATE suggestions SET message_id = ? WHERE id = ?');
     this.byIdStmt = db.prepare('SELECT * FROM suggestions WHERE id = ?');
-    this.byMessageStmt = db.prepare('SELECT * FROM suggestions WHERE message_id = ?');
-    this.listStmt = db.prepare('SELECT * FROM suggestions WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?');
+    // Votes inclus (up / down) : une seule requête pour toute la liste.
+    this.listStmt = db.prepare(
+      `SELECT s.*,
+         COALESCE(SUM(CASE WHEN v.value = 1 THEN 1 ELSE 0 END), 0) AS up,
+         COALESCE(SUM(CASE WHEN v.value = -1 THEN 1 ELSE 0 END), 0) AS down
+       FROM suggestions s LEFT JOIN suggestion_votes v ON v.suggestion_id = s.id
+       WHERE s.guild_id = ? GROUP BY s.id ORDER BY s.created_at DESC, s.id DESC LIMIT ?`,
+    );
     this.setStatusStmt = db.prepare(
       'UPDATE suggestions SET status = @status, decision_reason = @reason, decided_by = @by, decided_at = @at WHERE id = @id',
     );
@@ -40,10 +46,7 @@ class SuggestionRepository {
     return this.byIdStmt.get(id);
   }
 
-  getByMessage(messageId) {
-    return this.byMessageStmt.get(messageId);
-  }
-
+  /** Dernières suggestions du serveur, avec leurs votes (`up`, `down`). */
   list(guildId, limit = 15) {
     return this.listStmt.all(guildId, limit);
   }

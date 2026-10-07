@@ -10,6 +10,28 @@ const TARGET_LABELS = { all: 'Tous les membres', humans: 'Humains', bots: 'Bots'
 const BATCH = 5;
 /** Intervalle minimal entre deux mises à jour de la carte de progression. */
 const PROGRESS_EVERY_MS = 3_000;
+/** Au-delà, le jeton d'interaction (15 min) est sur le point d'expirer : on édite le message directement. */
+const TOKEN_SAFE_MS = 14 * 60 * 1000;
+/** Serveurs ayant un /massrole en cours (une seule exécution à la fois par serveur). */
+const running = new Set();
+
+/**
+ * Éditeur de la réponse : passe par l'interaction tant que son jeton est valide,
+ * puis par le message de réponse (récupéré une fois) au-delà de 14 minutes.
+ */
+function replyEditor(interaction, now = () => Date.now()) {
+  const startedAt = interaction.createdTimestamp ?? now();
+  let message = null;
+  return async (payload) => {
+    if (now() - startedAt < TOKEN_SAFE_MS) {
+      // Mémorise le message tant que le jeton le permet encore.
+      if (!message) message = await interaction.fetchReply().catch(() => null);
+      return interaction.editReply(payload);
+    }
+    if (!message) throw new Error('Message de progression introuvable');
+    return message.edit(payload);
+  };
+}
 
 /** Carte de progression / résultat. Pure. */
 function progressCard({ action, role, target, total, done, failed, startedAt, finished }) {
@@ -44,6 +66,8 @@ function progressCard({ action, role, target, total, done, failed, startedAt, fi
 module.exports = {
   category: 'roles',
   progressCard,
+  replyEditor,
+  running,
   data: new SlashCommandBuilder()
     .setName('massrole')
     .setDescription('Ajoute ou retire un rôle en masse.')
@@ -65,41 +89,53 @@ module.exports = {
       throw new UserError('Ce rôle est au-dessus (ou égal) à votre rôle le plus haut.');
     }
 
-    await interaction.deferReply();
-    const startedAt = Date.now();
-    const members = await interaction.guild.members.fetch();
-    const filtered = members.filter((m) => {
-      if (target === 'humans' && m.user.bot) return false;
-      if (target === 'bots' && !m.user.bot) return false;
-      return action === 'add' ? !m.roles.cache.has(role.id) : m.roles.cache.has(role.id);
-    });
-
-    let done = 0;
-    let failed = 0;
-    const list = [...filtered.values()];
-    const state = () => ({ action, role, target, total: list.length, done, failed, startedAt });
-    await interaction.editReply({ embeds: [progressCard({ ...state(), finished: list.length === 0 })] });
-    if (!list.length) return;
-
-    let lastUpdate = Date.now();
-    // Traitement par lots pour éviter les rate limits
-    for (let i = 0; i < list.length; i += BATCH) {
-      const batch = list.slice(i, i + BATCH);
-      await Promise.all(
-        batch.map((m) =>
-          (action === 'add' ? m.roles.add(role) : m.roles.remove(role))
-            .then(() => (done += 1))
-            .catch(() => (failed += 1)),
-        ),
-      );
-      if (i + BATCH < list.length) {
-        if (Date.now() - lastUpdate >= PROGRESS_EVERY_MS) {
-          lastUpdate = Date.now();
-          await interaction.editReply({ embeds: [progressCard({ ...state(), finished: false })] }).catch(() => {});
-        }
-        await new Promise((r) => setTimeout(r, 1000));
-      }
+    const guildId = interaction.guild.id;
+    if (running.has(guildId)) throw new UserError('Un /massrole est déjà en cours sur ce serveur. Attendez qu\'il se termine.');
+    running.add(guildId);
+    try {
+      await run(interaction, { action, role, target });
+    } finally {
+      running.delete(guildId);
     }
-    await interaction.editReply({ embeds: [progressCard({ ...state(), finished: true })] });
   },
 };
+
+async function run(interaction, { action, role, target }) {
+  await interaction.deferReply();
+  const edit = replyEditor(interaction);
+  const startedAt = Date.now();
+  const members = await interaction.guild.members.fetch();
+  const filtered = members.filter((m) => {
+    if (target === 'humans' && m.user.bot) return false;
+    if (target === 'bots' && !m.user.bot) return false;
+    return action === 'add' ? !m.roles.cache.has(role.id) : m.roles.cache.has(role.id);
+  });
+
+  let done = 0;
+  let failed = 0;
+  const list = [...filtered.values()];
+  const state = () => ({ action, role, target, total: list.length, done, failed, startedAt });
+  await edit({ embeds: [progressCard({ ...state(), finished: list.length === 0 })] });
+  if (!list.length) return;
+
+  let lastUpdate = Date.now();
+  // Traitement par lots pour éviter les rate limits
+  for (let i = 0; i < list.length; i += BATCH) {
+    const batch = list.slice(i, i + BATCH);
+    await Promise.all(
+      batch.map((m) =>
+        (action === 'add' ? m.roles.add(role) : m.roles.remove(role))
+          .then(() => (done += 1))
+          .catch(() => (failed += 1)),
+      ),
+    );
+    if (i + BATCH < list.length) {
+      if (Date.now() - lastUpdate >= PROGRESS_EVERY_MS) {
+        lastUpdate = Date.now();
+        await edit({ embeds: [progressCard({ ...state(), finished: false })] }).catch(() => {});
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  await edit({ embeds: [progressCard({ ...state(), finished: true })] });
+}

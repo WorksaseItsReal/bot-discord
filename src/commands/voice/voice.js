@@ -9,6 +9,13 @@ function requirePermission(interaction, flag, label) {
   if (!interaction.memberPermissions?.has(flag)) throw new UserError(`Il faut la permission **${label}** pour faire cela.`);
 }
 
+/** L'auteur doit pouvoir rejoindre le salon cible ET y déplacer des membres (pas de déplacement « par procuration »). */
+function assertCanMoveTo(interaction, channel) {
+  if (!channel.permissionsFor?.(interaction.member)?.has([PermissionFlagsBits.Connect, PermissionFlagsBits.MoveMembers])) {
+    throw new UserError(`Vous ne pouvez pas déplacer de membres vers ${channel}.`);
+  }
+}
+
 /** Membre connecté en vocal, ou erreur claire. */
 async function voiceMember(guild, userId) {
   const member = await guild.members.fetch(userId).catch(() => null);
@@ -128,7 +135,8 @@ module.exports = {
       const channel = interaction.options.getChannel('salon');
       const from = member.voice.channel;
       if (from?.id === channel.id) throw new UserError(`${user} est déjà dans ${channel}.`);
-      await member.voice.setChannel(channel);
+      assertCanMoveTo(interaction, channel);
+      await member.voice.setChannel(channel, `Par ${interaction.user.tag}`);
       return interaction.reply(moveView({ member, from, to: channel, moderator: interaction.user, ownerId }));
     }
     if (sub === 'kick' || sub === 'disconnect') {
@@ -173,9 +181,7 @@ module.exports = {
       const member = await voiceMember(interaction.guild, memberId);
       const target = interaction.guild.channels.cache.get(channelId);
       if (!target?.isVoiceBased?.()) throw new UserError('Le salon d\'origine n\'existe plus.');
-      if (!target.permissionsFor(interaction.member)?.has(PermissionFlagsBits.MoveMembers)) {
-        throw new UserError(`Vous ne pouvez pas déplacer de membres vers ${target}.`);
-      }
+      assertCanMoveTo(interaction, target);
       const from = member.voice.channel;
       if (from?.id === target.id) throw new UserError(`${member} est déjà dans ${target}.`);
       await member.voice.setChannel(target, `Par ${interaction.user.tag}`);

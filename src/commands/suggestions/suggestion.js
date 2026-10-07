@@ -110,11 +110,10 @@ module.exports = {
       for (let i = 0; i < list.length; i += PER_PAGE) {
         const lines = list.slice(i, i + PER_PAGE).map((s) => {
           const meta = STATUS[s.status] ?? { pill: s.status };
-          const tally = repo.tally(s.id);
           const url = suggestions.url(s);
           return [
             `${meta.pill.split(' ')[0]} **#${s.id}** · ${truncate(s.content.replace(/\s+/g, ' '), 90)}`,
-            subtext(`<@${s.author_id}> · 👍 ${tally.up} · 👎 ${tally.down} · ${discordTimestamp(s.created_at, 'R')}${url ? ` · [Voir](${url})` : ''}`),
+            subtext(`<@${s.author_id}> · 👍 ${s.up} · 👎 ${s.down} · ${discordTimestamp(s.created_at, 'R')}${url ? ` · [Voir](${url})` : ''}`),
           ].join('\n');
         });
         pages.push(

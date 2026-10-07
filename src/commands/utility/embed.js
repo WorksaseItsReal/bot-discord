@@ -6,6 +6,7 @@ const {
 } = require('discord.js');
 const { status, TONES, ICONS, linkButton, buttonRows } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+const { parseColor } = require('../../utils/projectFormat');
 
 /**
  * Constructeur d'embeds : via modal interactif (/embed create) ou en une
@@ -86,12 +87,6 @@ function isHttpUrl(value) {
   } catch {
     return false;
   }
-}
-
-function parseColor(hex) {
-  if (!hex) return null;
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  return m ? parseInt(m[1], 16) : null;
 }
 
 module.exports.parseColor = parseColor;

@@ -1,10 +1,18 @@
 'use strict';
 
-const { SlashCommandBuilder, version: djsVersion } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, version: djsVersion } = require('discord.js');
 const { wsLatency } = require('../../utils/latency');
 const { formatDuration } = require('../../utils/time');
 const { card, field, subtext, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { assertInvoker } = require('../../utils/buttonGuard');
+const { UserError } = require('../../core/errors');
+
+/** Informations de processus (PID, mémoire, plateforme) : réservées à « Gérer le serveur ». */
+function assertCanView(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+    throw new UserError('Il faut la permission **Gérer le serveur** pour consulter l\'état technique du bot.');
+  }
+}
 
 /** Mesure la base de données : { ok, ms }. */
 function probeDatabase(client) {
@@ -69,15 +77,20 @@ function render(client, ownerId) {
 
 module.exports = {
   category: 'configuration',
-  data: new SlashCommandBuilder().setName('health').setDescription('État de santé technique du bot (latence, DB, services).'),
+  data: new SlashCommandBuilder()
+    .setName('health')
+    .setDescription('État de santé technique du bot (latence, DB, services).')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
+    assertCanView(interaction);
     await interaction.reply({ ...render(client, interaction.user.id), ephemeral: true });
   },
   buttons: {
     /** cmd:health:refresh:<ownerId> */
     async refresh(interaction, client, [ownerId]) {
       assertInvoker(interaction, ownerId);
+      assertCanView(interaction);
       await interaction.update(render(client, ownerId));
     },
   },
