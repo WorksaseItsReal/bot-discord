@@ -2,7 +2,7 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { card, field, wide, kv, ICONS, status, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { needPermission } = require('../../services/ModerationService');
+const { assertAdmin } = require('../../services/ModerationService');
 
 const ACTION_LABELS = { kick: `${ICONS.kick} Expulsion`, ban: `${ICONS.ban} Bannissement`, lockdown: '🚨 Lockdown' };
 const EXECUTOR_LABELS = { strip: 'Retrait des rôles', ban: 'Bannissement', none: 'Aucune' };
@@ -50,10 +50,6 @@ function renderPanel(client, guildId, notice) {
       actionButton({ command: 'antiraid', action: 'antibot', args: [c.antiBot ? 'off' : 'on'], label: c.antiBot ? 'Anti-bot : oui' : 'Anti-bot : non', emoji: ICONS.bot }),
     ),
   };
-}
-
-function assertAdmin(interaction) {
-  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) throw needPermission('Administrator');
 }
 
 module.exports = {

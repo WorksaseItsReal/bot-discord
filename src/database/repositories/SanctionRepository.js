@@ -25,6 +25,12 @@ class SanctionRepository {
     this.activeByTypeStmt = db.prepare(
       "SELECT * FROM sanctions WHERE guild_id = ? AND type = ? AND active = 1 ORDER BY created_at DESC",
     );
+    this.deactivateForUserStmt = db.prepare(
+      'UPDATE sanctions SET active = 0 WHERE guild_id = ? AND user_id = ? AND type = ? AND active = 1',
+    );
+    this.reasonsLikeStmt = db.prepare(
+      "SELECT reason FROM sanctions WHERE guild_id = ? AND user_id = ? AND reason LIKE ? ESCAPE '\\'",
+    );
   }
 
   /**
@@ -76,6 +82,17 @@ class SanctionRepository {
 
   listActiveByType(guildId, type) {
     return this.activeByTypeStmt.all(guildId, type);
+  }
+
+  /** Désactive les sanctions actives d'un type pour un membre. @returns {number} lignes modifiées */
+  deactivateActive(guildId, userId, type) {
+    return this.deactivateForUserStmt.run(guildId, userId, type).changes;
+  }
+
+  /** Raisons des sanctions d'un membre commençant par `prefix` (littéral, sans joker). */
+  reasonsStartingWith(guildId, userId, prefix) {
+    const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+    return this.reasonsLikeStmt.all(guildId, userId, `${escaped}%`).map((r) => r.reason);
   }
 }
 

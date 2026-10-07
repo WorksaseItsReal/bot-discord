@@ -4,7 +4,7 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { confirm } = require('../../utils/confirmation');
 const { card, field, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { serverLockCard } = require('../../services/LockdownService');
-const { needPermission } = require('../../services/ModerationService');
+const { assertAdmin } = require('../../services/ModerationService');
 
 function enableButton() {
   return actionButton({ command: 'lockdown', action: 'enable', label: 'Activer le lockdown', emoji: '🚨', style: ButtonStyle.Danger });
@@ -36,7 +36,7 @@ function renderStatus(lockdown, guild) {
 
 /** Demande confirmation puis verrouille tout ; la carte remplace la confirmation. */
 async function runEnable(interaction, client) {
-  const ok = await confirm(interaction, { description: 'Verrouiller **tous** les salons textuels du serveur ?', confirmLabel: 'Lockdown' });
+  const ok = await confirm(interaction, { description: 'Verrouiller **tous** les salons écrits du serveur ?', confirmLabel: 'Lockdown' });
   if (!ok) return;
   const n = await client.services.lockdown.enable(interaction.guild, interaction.member, `Lockdown par ${interaction.user.tag}`);
   await interaction.editReply({ embeds: [serverLockCard({ enabled: true, count: n, moderator: interaction.user })], components: buttonRows(disableButton()) });
@@ -46,10 +46,6 @@ async function runDisable(interaction, client) {
   await interaction.deferReply({ ephemeral: true });
   const n = await client.services.lockdown.disable(interaction.guild, interaction.member);
   await interaction.editReply({ embeds: [serverLockCard({ enabled: false, count: n, moderator: interaction.user })], components: buttonRows(enableButton()) });
-}
-
-function assertAdmin(interaction) {
-  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) throw needPermission('Administrator');
 }
 
 module.exports = {

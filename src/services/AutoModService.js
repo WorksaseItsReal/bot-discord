@@ -6,6 +6,7 @@ const { truncate } = require('../utils/embeds');
 const { PermissionFlagsBits } = require('discord.js');
 const { field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
 const { logCard } = require('./LoggingService');
+const { historyButton } = require('./ModerationService');
 
 /** Libellés des actions AutoMod. */
 const ACTION_LABELS = { delete: 'Message supprimé', warn: 'Avertissement', timeout: 'Timeout' };
@@ -13,6 +14,17 @@ const ACTION_LABELS = { delete: 'Message supprimé', warn: 'Avertissement', time
 /** Inactivité au-delà de laquelle l'état d'un membre est oublié (mémoire bornée). */
 const TRACKER_TTL_MS = 10 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 60 * 1000;
+/** Deux messages identiques espacés de plus de 30 s ne sont pas des doublons. */
+const DUPLICATE_WINDOW_MS = 30 * 1000;
+/** Sévérité des actions : la violation la plus sévère l'emporte. */
+const SEVERITY = { delete: 1, warn: 2, timeout: 3 };
+
+/** Violation la plus sévère (à égalité, la première détectée). Pur. */
+function mostSevere(hits) {
+  let best = null;
+  for (const h of hits) if (!best || (SEVERITY[h.action] ?? 0) > (SEVERITY[best.action] ?? 0)) best = h;
+  return best;
+}
 
 /**
  * Moteur AutoMod. Combine des détecteurs purs et un suivi temporel en mémoire
@@ -24,14 +36,21 @@ class AutoModService {
    * @param {import('./ConfigService').ConfigService} deps.config
    * @param {import('./LoggingService').LoggingService} deps.logging
    * @param {import('./ModerationService').ModerationService} deps.moderation
+   * @param {import('./StrikeService').StrikeService} [deps.strikes] (sinon : client.services.strikes)
    */
-  constructor({ config, logging, moderation }) {
+  constructor({ config, logging, moderation, strikes }) {
     this.config = config;
     this.logging = logging;
     this.moderation = moderation;
-    /** @type {Map<string, {spam:number[], flood:number[], last:string|null, lastCount:number, seen:number}>} */
+    this._strikes = strikes ?? null;
+    /** @type {Map<string, {spam:number[], flood:number[], last:string|null, lastAt:number, lastCount:number, seen:number}>} */
     this.tracker = new Map();
     this.lastPrune = Date.now();
+  }
+
+  /** Service de strikes (injecté, ou résolu via le client du LoggingService). */
+  get strikes() {
+    return this._strikes ?? this.logging?.client?.services?.strikes ?? null;
   }
 
   /** Oublie les membres inactifs pour borner la mémoire du tracker. */
@@ -69,7 +88,9 @@ class AutoModService {
   }
 
   /**
-   * Détermine la première violation applicable. Renvoie { filter, action, duration, reason } ou null.
+   * Détermine la violation la plus sévère. Renvoie { action, duration, reason } ou null.
+   * Tous les filtres sont évalués : le comptage spam/flood a lieu à CHAQUE message
+   * (avant les doublons), sinon un message filtré par ailleurs échapperait au comptage.
    * @param {import('discord.js').Message} message
    * @param {object} filters
    * @param {{ temporal?: boolean }} [opts]
@@ -77,40 +98,30 @@ class AutoModService {
   inspect(message, filters = {}, { temporal = true } = {}) {
     const content = message.content || '';
     const f = filters;
+    const hits = [];
+    const hit = (filter, reason) => hits.push(this.#v(filter, reason));
 
-    if (f.antiInvite?.enabled && checks.hasInvite(content)) return this.#v(f.antiInvite, 'Invitation Discord interdite');
-    if (f.antiLink?.enabled && checks.hasLink(content)) return this.#v(f.antiLink, 'Lien interdit');
-    if (f.badWords?.enabled && checks.containsBadWord(content, f.badWords.words)) return this.#v(f.badWords, 'Mot interdit');
-    if (f.antiMassMention?.enabled && checks.isMassMention(content, f.antiMassMention)) return this.#v(f.antiMassMention, 'Mentions massives');
-    if (f.antiCaps?.enabled && checks.isExcessiveCaps(content, f.antiCaps)) return this.#v(f.antiCaps, 'Excès de majuscules');
-    if (f.antiEmojiSpam?.enabled && checks.isEmojiSpam(content, f.antiEmojiSpam)) return this.#v(f.antiEmojiSpam, 'Spam d\'emojis');
+    if (f.antiInvite?.enabled && checks.hasInvite(content)) hit(f.antiInvite, 'Invitation Discord interdite');
+    if (f.antiLink?.enabled && checks.hasLink(content)) hit(f.antiLink, 'Lien interdit');
+    if (f.badWords?.enabled && checks.containsBadWord(content, f.badWords.words)) hit(f.badWords, 'Mot interdit');
+    if (f.antiMassMention?.enabled && checks.isMassMention(content, f.antiMassMention)) hit(f.antiMassMention, 'Mentions massives');
+    if (f.antiCaps?.enabled && checks.isExcessiveCaps(content, f.antiCaps)) hit(f.antiCaps, 'Excès de majuscules');
+    if (f.antiEmojiSpam?.enabled && checks.isEmojiSpam(content, f.antiEmojiSpam)) hit(f.antiEmojiSpam, 'Spam d\'emojis');
 
-    if (!temporal) return null;
+    if (temporal) this.#inspectTemporal(message, content, f, hit);
+    return mostSevere(hits);
+  }
 
-    // Détecteurs temporels / d'état
+  /** Détecteurs temporels / d'état (spam, flood, doublons, répétitions). */
+  #inspectTemporal(message, content, f, hit) {
     const now = Date.now();
     if (now - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(now);
     const key = this.#key(message.guild.id, message.author.id);
-    const state = this.tracker.get(key) || { spam: [], flood: [], last: null, lastCount: 0, seen: now };
+    const state = this.tracker.get(key) || { spam: [], flood: [], last: null, lastAt: 0, lastCount: 0, seen: now };
     state.seen = now;
     this.tracker.set(key, state);
 
-    if (f.antiDuplicate?.enabled || f.antiRepeat?.enabled) {
-      if (state.last === content && content.length > 0) {
-        state.lastCount += 1;
-        if (f.antiDuplicate?.enabled) return this.#v(f.antiDuplicate, 'Message dupliqué');
-        if (f.antiRepeat?.enabled && state.lastCount >= 3) {
-          state.lastCount = 0; // réinitialise : pas une sanction par message suivant
-          return this.#v(f.antiRepeat, 'Message répété');
-        }
-      } else {
-        state.last = content;
-        state.lastCount = 1;
-      }
-    }
-
-    // Chaque filtre activé est évalué avec SA fenêtre et SA limite.
-    let hit = null;
+    // 1) Spam / flood : chaque filtre activé est évalué avec SA fenêtre et SA limite.
     for (const [name, filter, reason] of [
       ['spam', f.antiSpam, 'Spam détecté'],
       ['flood', f.antiFlood, 'Flood détecté'],
@@ -121,12 +132,28 @@ class AutoModService {
       times.push(now);
       if (times.length >= (filter.limit || 5)) {
         state[name] = []; // réinitialise après violation
-        hit ??= this.#v(filter, reason);
+        hit(filter, reason);
       } else {
         state[name] = times;
       }
     }
-    return hit;
+
+    // 2) Doublons / répétitions : même contenu que le message précédent, dans les 30 s.
+    if (f.antiDuplicate?.enabled || f.antiRepeat?.enabled) {
+      const recent = now - state.lastAt < DUPLICATE_WINDOW_MS;
+      if (content.length > 0 && recent && state.last === content) {
+        state.lastCount += 1;
+        if (f.antiDuplicate?.enabled) hit(f.antiDuplicate, 'Message dupliqué');
+        if (f.antiRepeat?.enabled && state.lastCount >= 3) {
+          state.lastCount = 0; // réinitialise : pas une sanction par message suivant
+          hit(f.antiRepeat, 'Message répété');
+        }
+      } else {
+        state.last = content;
+        state.lastCount = 1;
+      }
+      state.lastAt = now;
+    }
   }
 
   #v(filter, reason) {
@@ -135,6 +162,7 @@ class AutoModService {
 
   async #applyAction(message, violation) {
     const guild = message.guild;
+    const reason = `AutoMod: ${violation.reason}`;
     await message.delete().catch(() => {});
 
     let timedOut = false;
@@ -142,13 +170,28 @@ class AutoModService {
     if (violation.action === 'timeout') {
       const duration = violation.duration || '5m';
       const ms = parseDuration(duration) || 300_000;
-      timedOut = await message.member.timeout(ms, `AutoMod: ${violation.reason}`).then(() => true, () => false);
-      actionText = timedOut ? `${ACTION_LABELS.timeout} (${duration})` : `${ACTION_LABELS.delete} · timeout impossible`;
+      // Via ModerationService : garde-fous, sanction enregistrée (historique, scheduler), DM et log.
+      const res = await this.moderation.timeout(guild, message.member, guild.members.me, reason, ms).then((r) => r, () => null);
+      timedOut = Boolean(res);
+      actionText = timedOut
+        ? `${ACTION_LABELS.timeout} (${duration})${res?.id ? ` · sanction #${res.id}` : ''}`
+        : `${ACTION_LABELS.delete} · timeout impossible`;
     } else if (violation.action === 'warn') {
       const warned = await this.moderation
-        .record(guild, message.author, guild.members.me, { type: 'warn', reason: `AutoMod: ${violation.reason}` })
+        .record(guild, message.author, guild.members.me, { type: 'warn', reason })
         .then((r) => r, () => null);
-      actionText = warned?.id ? `${ACTION_LABELS.warn} (sanction #${warned.id})` : ACTION_LABELS.warn;
+      // Un avertissement AutoMod compte comme un strike (l'escalade reste déclenchée par /warn).
+      let count = null;
+      try {
+        count = warned ? this.strikes?.add(guild.id, message.author.id, 1)?.count ?? null : null;
+      } catch {
+        count = null;
+      }
+      actionText = [
+        ACTION_LABELS.warn,
+        warned?.id ? `sanction #${warned.id}` : null,
+        count != null ? `${count} strike${count > 1 ? 's' : ''}` : null,
+      ].filter(Boolean).join(' · ');
     }
 
     const embed = logCard({
@@ -169,10 +212,10 @@ class AutoModService {
       timedOut
         ? actionButton({ command: 'untimeout', action: 'revoke', args: [message.author.id], label: 'Retirer le timeout', emoji: ICONS.unmute, style: ButtonStyle.Success })
         : null,
-      actionButton({ command: 'sanctions', action: 'history', args: [message.author.id], label: 'Sanctions', emoji: ICONS.history }),
+      historyButton(message.author.id),
     );
     await this.logging.send(guild.id, 'automod', embed, components);
   }
 }
 
-module.exports = { AutoModService };
+module.exports = { AutoModService, mostSevere, DUPLICATE_WINDOW_MS };

@@ -3,6 +3,27 @@
 /** Libellés français des sanctions d'escalade. */
 const ACTION_LABELS = { mute: 'Timeout', timeout: 'Timeout', kick: 'Expulsion', ban: 'Bannissement' };
 
+/** Permission que l'INVOCATEUR de /warn doit avoir pour qu'un palier soit appliqué. */
+const ACTION_PERMISSIONS = { mute: 'ModerateMembers', timeout: 'ModerateMembers', kick: 'KickMembers', ban: 'BanMembers' };
+
+/**
+ * Préfixe de la raison des sanctions d'escalade. La raison encode le palier
+ * appliqué (« Escalade automatique (palier de 5 strikes) ») : c'est ce qui permet
+ * de savoir, sans migration, quels paliers ont déjà été appliqués à un membre.
+ */
+const ESCALATION_PREFIX = 'Escalade automatique (';
+
+/** Raison d'une sanction d'escalade pour le palier `t`. Pur. */
+function escalationReason(t) {
+  return `${ESCALATION_PREFIX}palier de ${t.strikes} strikes)`;
+}
+
+/** Palier encodé dans une raison d'escalade (ancien format « (N strikes) » accepté), sinon 0. Pur. */
+function parseEscalationLevel(reason) {
+  const m = /^Escalade automatique \((?:palier de )?(\d+) strikes\)/.exec(reason ?? '');
+  return m ? Number(m[1]) : 0;
+}
+
 /** « 3 strikes → Timeout (1h) ». Pur. */
 function describeThreshold(t) {
   if (!t) return null;
@@ -58,6 +79,22 @@ class StrikeService {
     return matched;
   }
 
+  /**
+   * Palier d'escalade à appliquer maintenant.
+   *
+   * Règle : on applique le PLUS HAUT palier atteint (count >= seuil) s'il est
+   * strictement au-dessus du plus haut palier déjà appliqué (`appliedLevel`).
+   *  - un palier n'est jamais réappliqué à chaque warn suivant ;
+   *  - un palier manqué (permission manquante, échec, ajout de plusieurs strikes,
+   *    seuils modifiés) est rattrapé au warn suivant ;
+   *  - si plusieurs paliers sont dépassés d'un coup, seul le plus sévère s'applique.
+   * @returns {{ strikes:number, action:string, duration:string|null }|null}
+   */
+  pendingEscalation(guildId, count, appliedLevel = 0) {
+    const matched = this.resolveAction(guildId, count);
+    return matched && matched.strikes > appliedLevel ? matched : null;
+  }
+
   /** Prochain palier non encore atteint (ou null). */
   nextThreshold(guildId, count) {
     const { strikes } = this.config.get(guildId);
@@ -66,4 +103,4 @@ class StrikeService {
   }
 }
 
-module.exports = { StrikeService, ACTION_LABELS, describeThreshold };
+module.exports = { StrikeService, ACTION_LABELS, ACTION_PERMISSIONS, ESCALATION_PREFIX, escalationReason, parseEscalationLevel, describeThreshold };

@@ -2,8 +2,8 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { confirm } = require('../../utils/confirmation');
-const { ICONS, actionButton, buttonRows } = require('../../utils/ui');
-const { sanctionCard } = require('../../services/ModerationService');
+const { buttonRows } = require('../../utils/ui');
+const { sanctionCard, historyButton, assertReason } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -23,6 +23,7 @@ module.exports = {
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
 
     const cfg = client.services.config.get(interaction.guild.id);
+    assertReason(cfg, reason);
     if (cfg.moderation.confirmDangerous) {
       const ok = await confirm(interaction, { description: `Expulser ${user} du serveur ?`, confirmLabel: 'Expulser' });
       if (!ok) return;
@@ -34,7 +35,7 @@ module.exports = {
     const { id } = await client.services.moderation.kick(interaction.guild, member, interaction.member, reason);
     const payload = {
       embeds: [sanctionCard({ id, type: 'kick', user, moderator: interaction.user, reason })],
-      components: buttonRows(actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history })),
+      components: buttonRows(historyButton(user.id)),
     };
     // Après confirmation, la carte remplace la demande de confirmation (éphémère).
     await interaction.editReply(payload);

@@ -2,12 +2,12 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows } = require('../../utils/ui');
-const { assertOverwritable, channelCard, channelForButton } = require('../../services/LockdownService');
-const { needPermission } = require('../../services/ModerationService');
+const { channelCard, channelForButton, channelForCommand } = require('../../services/LockdownService');
+const { requirePermission } = require('../../services/ModerationService');
 
-async function unhide(channel, user) {
-  assertOverwritable(channel);
-  await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { ViewChannel: null }, { reason: `Unhide par ${user.tag}` });
+/** Rend le salon visible (restaure l'état sauvegardé par /hide, sinon retire le refus). */
+function unhide(client, channel, user) {
+  return client.services.lockdown.unhideChannel(channel, `Unhide par ${user.tag}`);
 }
 
 /** Carte « Salon visible » + bouton inverse « Masquer ». */
@@ -33,18 +33,18 @@ module.exports = {
         ChannelType.GuildStageVoice, ChannelType.GuildForum, ChannelType.GuildCategory,
       )),
 
-  async execute(interaction) {
-    const channel = interaction.options.getChannel('salon') || interaction.channel;
-    await unhide(channel, interaction.user);
+  async execute(interaction, client) {
+    const channel = channelForCommand(interaction);
+    await unhide(client, channel, interaction.user);
     await interaction.reply(render(channel, interaction.user, interaction.user.id));
   },
 
   buttons: {
     /** cmd:unhide:run:<channelId>:<ownerId> — « Afficher » (inverse de /hide). */
     async run(interaction, client, [channelId, ownerId]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) throw needPermission('ManageChannels');
+      requirePermission(interaction, 'ManageChannels');
       const channel = await channelForButton(interaction, channelId);
-      await unhide(channel, interaction.user);
+      await unhide(client, channel, interaction.user);
       await interaction.update(render(channel, interaction.user, ownerId));
     },
   },

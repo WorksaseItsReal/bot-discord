@@ -4,7 +4,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('disco
 const { truncate } = require('../../utils/embeds');
 const { card, field, ICONS, code, status, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { fitList } = require('../../services/LoggingService');
-const { needPermission } = require('../../services/ModerationService');
+const { requirePermission } = require('../../services/ModerationService');
 
 /** Filtres disponibles et leur libellé français (l'ordre est celui d'affichage). */
 const FILTER_LABELS = {
@@ -158,7 +158,7 @@ module.exports = {
   buttons: {
     /** cmd:automod:toggle:<on|off> — « Gérer le serveur » revérifiée (permission de la commande). */
     async toggle(interaction, client, [state]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) throw needPermission('ManageGuild');
+      requirePermission(interaction, 'ManageGuild');
       const enabled = state === 'on';
       client.services.config.update(interaction.guildId, { automod: { enabled } });
       await interaction.update(renderPanel(client, interaction.guildId, `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`));

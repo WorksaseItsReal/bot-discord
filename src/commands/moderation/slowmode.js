@@ -3,8 +3,8 @@
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { parseDuration, formatDuration } = require('../../utils/time');
 const { card, field, ICONS, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { channelForButton } = require('../../services/LockdownService');
-const { needPermission } = require('../../services/ModerationService');
+const { channelForButton, channelForCommand } = require('../../services/LockdownService');
+const { requirePermission } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 const MAX_SECONDS = 21_600; // limite Discord : 6 heures
@@ -62,7 +62,7 @@ module.exports = {
         .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice, ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.GuildForum),
     ),
   async execute(interaction) {
-    const channel = interaction.options.getChannel('salon') || interaction.channel;
+    const channel = channelForCommand(interaction);
     const input = interaction.options.getString('duree').trim();
     const off = ['0', 'off', 'non', 'aucun'].includes(input.toLowerCase());
     const ms = off ? 0 : parseDuration(/^\d+$/.test(input) ? `${input}s` : input);
@@ -77,7 +77,7 @@ module.exports = {
   buttons: {
     /** cmd:slowmode:set:<channelId>:<secondes>:<ownerId> — bouton inverse (« Gérer les salons » revérifiée). */
     async set(interaction, client, [channelId, rawSeconds, ownerId]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) throw needPermission('ManageChannels');
+      requirePermission(interaction, 'ManageChannels');
       const seconds = Math.min(MAX_SECONDS, Math.max(0, Number.parseInt(rawSeconds, 10) || 0));
       const channel = await channelForButton(interaction, channelId);
       // Valeur actuelle conservée pour proposer « Rétablir » après une désactivation.

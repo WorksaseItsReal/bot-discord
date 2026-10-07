@@ -3,7 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { parseDuration } = require('../../utils/time');
 const { ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { sanctionCard } = require('../../services/ModerationService');
+const { sanctionCard, historyButton, assertReason } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -22,6 +22,7 @@ module.exports = {
     const reason = interaction.options.getString('raison');
     const durationMs = durationStr ? parseDuration(durationStr) : null;
     if (durationStr && !durationMs) throw new UserError('Durée invalide. Exemples : `1h`, `30m`.');
+    assertReason(client.services.config.get(interaction.guild.id), reason);
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
 
@@ -31,7 +32,7 @@ module.exports = {
       embeds: [sanctionCard({ id, type: 'mute', user, moderator: interaction.user, reason, durationMs, expiresAt })],
       components: buttonRows(
         actionButton({ command: 'unmute', action: 'revoke', args: [user.id], label: 'Démuter', emoji: ICONS.unmute, style: ButtonStyle.Success }),
-        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+        historyButton(user.id),
       ),
     });
   },

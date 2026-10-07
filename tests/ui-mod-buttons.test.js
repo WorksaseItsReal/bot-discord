@@ -45,6 +45,9 @@ function fakeButton({ perms = [], customId = 'cmd:x:y', guild = {}, client = {},
   };
 }
 
+const UID = '123456789012345678';
+const CID = '223456789012345678';
+
 const customIds = (payload) => payload.components.flatMap((r) => (r.toJSON?.() ?? r).components.map((c) => c.custom_id ?? c.url));
 
 test('Débannir : refusé sans « Bannir des membres », aucune action exécutée', async () => {
@@ -56,20 +59,20 @@ test('Débannir : refusé sans « Bannir des membres », aucune action exécuté
 });
 
 test('Débannir : fige le bouton et publie la carte de levée', async () => {
-  const client = { services: { moderation: { unban: async () => ({ ok: true, user: null }) } } };
-  const rows = buttonRows(actionButton({ command: 'unban', action: 'revoke', args: ['123'], label: 'Débannir' }));
+  const client = { services: { moderation: { unban: async (_g, id) => ({ ok: true, user: { id, toString: () => `<@${id}>` } }) } } };
+  const rows = buttonRows(actionButton({ command: 'unban', action: 'revoke', args: [UID], label: 'Débannir' }));
   const i = fakeButton({
     perms: ['BanMembers'],
     client,
-    customId: 'cmd:unban:revoke:123',
+    customId: `cmd:unban:revoke:${UID}`,
     guild: { members: { me: { permissions: new PermissionsBitField(['BanMembers']) } } },
     message: { components: rows, flags: new MessageFlagsBitField(0) },
   });
-  await unban.buttons.revoke(i, client, ['123']);
+  await unban.buttons.revoke(i, client, [UID]);
   assert.equal(i.calls.update[0].components[0].components[0].disabled, true);
   const card = i.calls.followUp[0].embeds[0].toJSON();
   assert.equal(card.color, TONES.success);
-  assert.ok(customIds(i.calls.followUp[0]).includes('cmd:sanctions:history:123'));
+  assert.ok(customIds(i.calls.followUp[0]).includes(`cmd:sanctions:history:${UID}`));
   assert.ok(customIds(i.calls.followUp[0]).some((id) => id.startsWith('cmd:_:delete')));
 });
 
@@ -77,23 +80,23 @@ test('Retirer le timeout / Démuter : permission revérifiée puis état du memb
   const client = { services: { moderation: {} } };
   await assert.rejects(untimeout.buttons.revoke(fakeButton({ client }), client, ['5']), { name: 'UserError' });
   await assert.rejects(unmute.buttons.revoke(fakeButton({ client }), client, ['5']), { name: 'UserError' });
-  const member = { id: '5', isCommunicationDisabled: () => false };
+  const member = { id: UID, isCommunicationDisabled: () => false };
   const i = fakeButton({ perms: ['ModerateMembers'], client, guild: { members: { fetch: async () => member } } });
-  await assert.rejects(untimeout.buttons.revoke(i, client, ['5']), /plus en timeout/);
+  await assert.rejects(untimeout.buttons.revoke(i, client, [UID]), /plus en timeout/);
 });
 
 test('Déverrouiller / Verrouiller : « Gérer les salons » exigée, rendu inverse avec 🗑️', async () => {
   let locked = null;
-  const channel = { id: 'c1', guildId: 'g1', toString: () => '<#c1>', permissionsFor: () => new PermissionsBitField(['ManageChannels']) };
+  const channel = { id: CID, guildId: 'g1', toString: () => `<#${CID}>`, permissionsFor: () => new PermissionsBitField(['ManageChannels']) };
   const client = { services: { lockdown: { lockChannel: async (c) => { locked = c; } } } };
-  const guild = { channels: { cache: new Map([['c1', channel]]) } };
-  await assert.rejects(lock.buttons.run(fakeButton({ client, guild }), client, ['c1', 'owner1']), { name: 'UserError' });
+  const guild = { channels: { cache: new Map([[CID, channel]]) } };
+  await assert.rejects(lock.buttons.run(fakeButton({ client, guild }), client, [CID, UID]), { name: 'UserError' });
   assert.equal(locked, null);
   const i = fakeButton({ perms: ['ManageChannels'], client, guild });
-  await lock.buttons.run(i, client, ['c1', 'owner1']);
+  await lock.buttons.run(i, client, [CID, UID]);
   assert.equal(locked, channel);
   const ids = customIds(i.calls.update[0]);
-  assert.deepEqual(ids, ['cmd:unlock:run:c1:owner1', 'cmd:_:delete:owner1']);
+  assert.deepEqual(ids, [`cmd:unlock:run:${CID}:${UID}`, `cmd:_:delete:${UID}`]);
 });
 
 test('AntiRaid / AutoMod : interrupteurs réservés à la permission déclarée par la commande', async () => {

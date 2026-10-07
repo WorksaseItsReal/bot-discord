@@ -3,7 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { parseDuration } = require('../../utils/time');
 const { ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { sanctionCard } = require('../../services/ModerationService');
+const { sanctionCard, historyButton, assertReason } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -22,6 +22,7 @@ module.exports = {
     const reason = interaction.options.getString('raison');
     const durationMs = parseDuration(interaction.options.getString('duree'));
     if (!durationMs) throw new UserError('Durée invalide. Exemples : `10m`, `1h`, `1d`.');
+    assertReason(client.services.config.get(interaction.guild.id), reason);
 
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
@@ -32,7 +33,7 @@ module.exports = {
       embeds: [sanctionCard({ id, type: 'timeout', user, moderator: interaction.user, reason, durationMs, expiresAt })],
       components: buttonRows(
         actionButton({ command: 'untimeout', action: 'revoke', args: [user.id], label: 'Retirer le timeout', emoji: ICONS.unmute, style: ButtonStyle.Success }),
-        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+        historyButton(user.id),
       ),
     });
   },

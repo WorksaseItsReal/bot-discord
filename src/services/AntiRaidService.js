@@ -8,6 +8,8 @@ const logger = createLogger('antiraid');
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Délai minimal entre deux alertes « vague d'arrivées » (et lockdowns auto) par serveur. */
 const JOIN_ALERT_COOLDOWN_MS = 60_000;
+/** Fréquence de purge des fenêtres d'actions destructrices vides (mémoire bornée). */
+const WINDOW_PRUNE_INTERVAL_MS = 60_000;
 
 const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements' };
 const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
@@ -39,6 +41,20 @@ class AntiRaidService {
     this.destructiveWindows = new Map();
     /** @type {Map<string, number>} dernier déclenchement d'alerte de vague par serveur */
     this.joinAlertAt = new Map();
+    this.lastWindowPrune = Date.now();
+  }
+
+  /** Oublie les fenêtres d'actions destructrices devenues vides. */
+  pruneWindows(now = Date.now()) {
+    this.lastWindowPrune = now;
+    for (const [key, w] of this.destructiveWindows) {
+      if (w.count(now) === 0) this.destructiveWindows.delete(key);
+    }
+  }
+
+  /** Marque un ban lancé par le bot (pas de log en double dans guildBanAdd). */
+  #markBan(guildId, userId) {
+    this.client.services?.moderation?.markBotAction?.('ban', guildId, userId);
   }
 
   isWhitelisted(guildId, userId, roleIds = []) {
@@ -105,6 +121,8 @@ class AntiRaidService {
 
   /**
    * Action destructrice détectée via audit log (suppression salon/rôle, ban…).
+   * Alimentée par l'événement `guildAuditLogEntryCreate` (une entrée = une action,
+   * pas de double comptage ni de fetch des audit logs par événement).
    * @param {import('discord.js').Guild} guild
    * @param {string} executorId
    * @param {'channelDelete'|'roleDelete'|'ban'} type
@@ -112,7 +130,7 @@ class AntiRaidService {
   async handleDestructive(guild, executorId, type) {
     const cfg = this.config.get(guild.id).antiraid;
     if (!cfg?.enabled || !executorId) return;
-    if (executorId === this.client.user.id) return;
+    if (executorId === this.client.user?.id) return;
     if (executorId === guild.ownerId) return;
     const executor = await guild.members.fetch(executorId).catch(() => null);
     if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [])) return;
@@ -125,6 +143,8 @@ class AntiRaidService {
     const limit = thresholds[type];
     if (!limit) return;
 
+    const now = Date.now();
+    if (now - this.lastWindowPrune > WINDOW_PRUNE_INTERVAL_MS) this.pruneWindows(now);
     const key = `${guild.id}:${executorId}:${type}`;
     const w = this.#window(this.destructiveWindows, key, cfg.destructiveWindowSeconds * 1000);
     const count = w.hit();
@@ -150,7 +170,10 @@ class AntiRaidService {
   async #punishNewMember(member, reason, cfg) {
     try {
       const ban = cfg.action === 'ban';
-      if (ban) await member.ban({ reason });
+      if (ban) {
+        this.#markBan(member.guild.id, member.id);
+        await member.ban({ reason });
+      }
       else await member.kick(reason);
       await this.alert(member.guild, {
         tone: 'caution',
@@ -176,6 +199,7 @@ class AntiRaidService {
     if (!member) return false;
     try {
       if (cfg.punishExecutor === 'ban') {
+        this.#markBan(guild.id, member.id);
         await member.ban({ reason: `AntiRaid: ${type} massif` });
         return true;
       }
@@ -192,10 +216,11 @@ class AntiRaidService {
 
   /** @returns {Promise<number|null>} salons verrouillés (null si le service est indisponible) */
   async #tryLockdown(guild) {
-    // Délègue au LockdownService s'il est disponible
+    // Délègue au LockdownService s'il est disponible. Pas de carte « Lockdown activé » :
+    // l'alerte AntiRaid (avec le nombre de salons et le bouton de levée) en tient lieu.
     const lockdown = this.client.services?.lockdown;
     if (!lockdown) return null;
-    return lockdown.enable(guild, guild.members.me, 'AntiRaid automatique').catch(() => 0);
+    return lockdown.enable(guild, guild.members.me, 'AntiRaid automatique', { log: false }).catch(() => 0);
   }
 
   /**

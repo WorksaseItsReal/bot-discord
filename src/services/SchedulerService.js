@@ -96,15 +96,25 @@ class SchedulerService {
         continue;
       }
       const guild = this.client.guilds.cache.get(s.guild_id);
+      if (!guild) {
+        // Client prêt et serveur absent du cache : le bot a quitté le serveur, la
+        // sanction ne pourra jamais être levée → on la désactive (sinon réessai à vie).
+        if (this.client.isReady?.()) this.sanctions.deactivate(s.id);
+        continue;
+      }
       // Serveur indisponible (outage, cache pas encore prêt) : on réessaie au prochain tick.
-      if (!guild?.available) continue;
+      if (!guild.available) continue;
       if (s.type === 'tempban') {
+        const moderation = this.client.services?.moderation;
+        // Marqué AVANT l'appel : guildBanRemove ne journalise pas une seconde fois cette levée.
+        moderation?.markBotAction?.('unban', guild.id, s.user_id);
         try {
           await guild.bans.remove(s.user_id, 'Fin du bannissement temporaire');
           this.sanctions.deactivate(s.id);
           logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
           await this.#logExpiry(guild, s, 'unban', `<@${s.user_id}> a purgé son bannissement temporaire et peut de nouveau rejoindre le serveur.`);
         } catch (e) {
+          moderation?.unmarkBotAction?.('unban', guild.id, s.user_id);
           // 10026 Unknown Ban : déjà débanni manuellement → rien à faire.
           if (e?.code === 10026) this.sanctions.deactivate(s.id);
           else logger.debug(`Débannissement automatique échoué (réessai) guild=${s.guild_id} user=${s.user_id}`, e?.message);

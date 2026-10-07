@@ -3,7 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { parseDuration } = require('../../utils/time');
 const { ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { sanctionCard } = require('../../services/ModerationService');
+const { sanctionCard, historyButton, assertReason, resolveTargetMember } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -21,14 +21,16 @@ module.exports = {
     const durationMs = parseDuration(interaction.options.getString('duree'));
     if (!durationMs) throw new UserError('Durée invalide. Exemples : `7d`, `12h`.');
     const reason = interaction.options.getString('raison');
+    assertReason(client.services.config.get(interaction.guild.id), reason);
+    // Données résolues de l'interaction : un fetch en échec ne peut plus faire sauter la hiérarchie.
+    const member = resolveTargetMember(interaction, 'membre');
     await interaction.deferReply();
-    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     const { id, expiresAt } = await client.services.moderation.ban(interaction.guild, user, interaction.member, reason, { durationMs, targetMember: member });
     await interaction.editReply({
       embeds: [sanctionCard({ id, type: 'tempban', user, moderator: interaction.user, reason, durationMs, expiresAt })],
       components: buttonRows(
         actionButton({ command: 'unban', action: 'revoke', args: [user.id], label: 'Débannir', emoji: ICONS.unlock, style: ButtonStyle.Success }),
-        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+        historyButton(user.id),
       ),
     });
   },

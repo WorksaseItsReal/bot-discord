@@ -4,7 +4,7 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { confirm } = require('../../utils/confirmation');
 const { parseDuration, formatDuration } = require('../../utils/time');
 const { field, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { sanctionCard } = require('../../services/ModerationService');
+const { sanctionCard, historyButton, assertReason, resolveTargetMember } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -30,8 +30,10 @@ module.exports = {
     const durationMs = durationStr ? parseDuration(durationStr) : null;
     if (durationStr && !durationMs) throw new UserError('Durée invalide. Exemples valides : `7d`, `12h`, `1h30m`.');
 
-    const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
     const cfg = client.services.config.get(interaction.guild.id);
+    assertReason(cfg, reason);
+    // Données résolues de l'interaction : un fetch en échec ne peut plus faire sauter la hiérarchie.
+    const targetMember = resolveTargetMember(interaction, 'membre');
 
     if (cfg.moderation.confirmDangerous) {
       const ok = await confirm(interaction, {
@@ -65,7 +67,7 @@ module.exports = {
       ],
       components: buttonRows(
         actionButton({ command: 'unban', action: 'revoke', args: [user.id], label: 'Débannir', emoji: ICONS.unlock, style: ButtonStyle.Success }),
-        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+        historyButton(user.id),
       ),
     };
     // Après confirmation, la carte remplace la demande de confirmation (éphémère).

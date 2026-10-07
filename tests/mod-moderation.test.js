@@ -99,17 +99,22 @@ test('lock deux fois puis unlock restaure l\'état d\'origine (salon en lecture 
   assert.equal(locks.list('g1').length, 0);
 });
 
-test('disable() ne touche que les salons verrouillés', async () => {
+test('disable() ne touche que les salons verrouillés par un lockdown (les /lock individuels restent)', async () => {
   const { db } = memoryDb();
   const locks = new LockRepository(db);
   const svc = new LockdownService({ locks, logging: noopLogging });
   const locked = fakeChannel('c1');
   const other = fakeChannel('c2');
-  await svc.lockChannel(locked, null, 'x');
-  const guild = { id: 'g1', channels: { cache: new Map([['c1', locked], ['c2', other]]) } };
+  const manual = fakeChannel('c3');
+  await svc.lockChannel(locked, null, 'x', { scope: 'lockdown' });
+  await svc.lockChannel(manual, null, 'x');
+  const guild = { id: 'g1', channels: { cache: new Map([['c1', locked], ['c2', other], ['c3', manual]]) } };
+  assert.equal(svc.status(guild), 1);
   assert.equal(await svc.disable(guild, 'mod'), 1);
   assert.equal(other.permissionOverwrites.edits.length, 0);
+  assert.equal(manual.permissionOverwrites.edits.length, 1); // seulement le lock
   assert.equal(locked.permissionOverwrites.edits.at(-1).SendMessages, null);
+  assert.deepEqual(locks.list('g1').map((l) => l.channel_id), ['c3']);
 });
 
 test('lock refuse un fil', async () => {

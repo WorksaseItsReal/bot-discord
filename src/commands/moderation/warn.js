@@ -4,8 +4,9 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { truncate } = require('../../utils/embeds');
 const { parseDuration } = require('../../utils/time');
 const { field, wide, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { sanctionCard } = require('../../services/ModerationService');
-const { describeThreshold } = require('../../services/StrikeService');
+const { permissionLabel } = require('../../utils/permissionNames');
+const { sanctionCard, historyButton, assertReason } = require('../../services/ModerationService');
+const { describeThreshold, escalationReason, ACTION_LABELS, ACTION_PERMISSIONS } = require('../../services/StrikeService');
 const { UserError } = require('../../core/errors');
 
 /** Ton de la carte selon l'escalade réellement appliquée. */
@@ -14,6 +15,13 @@ const ESCALATION_TONES = { timeout: 'caution', kick: 'caution', ban: 'danger' };
 /**
  * Avertit un membre, incrémente ses strikes et applique automatiquement
  * l'escalade configurée (mute/timeout, kick, ban) si un palier est atteint.
+ *
+ * Règle d'escalade (voir StrikeService.pendingEscalation) : le plus haut palier
+ * atteint est appliqué s'il n'a pas déjà été appliqué à ce membre (d'après son
+ * historique de sanctions). L'escalade n'est appliquée que si l'INVOCATEUR a la
+ * permission correspondante (Expulser / Bannir / Exclure temporairement) : sinon,
+ * la carte indique que le palier est atteint et la permission requise, et le
+ * palier sera appliqué au prochain warn d'un modérateur qui l'a.
  */
 module.exports = {
   category: 'moderation',
@@ -28,20 +36,20 @@ module.exports = {
   async execute(interaction, client) {
     const user = interaction.options.getUser('membre');
     const reason = interaction.options.getString('raison');
+    assertReason(client.services.config.get(interaction.guild.id), reason);
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
 
     // Avertissement + escalade éventuelle (timeout/kick/ban, DM, logs) : peut dépasser 3 s.
     await interaction.deferReply();
     const { moderation, strikes } = client.services;
+    const guildId = interaction.guild.id;
     const { id } = await moderation.warn(interaction.guild, member, interaction.member, reason);
-    const { count, action } = strikes.add(interaction.guild.id, user.id, 1);
+    const { count } = strikes.add(guildId, user.id, 1);
 
-    let escalation = null;
-    if (action && count === action.strikes) {
-      escalation = await applyEscalation(client, interaction, member, action, count);
-    }
-    const next = strikes.nextThreshold?.(interaction.guild.id, count);
+    const step = strikes.pendingEscalation(guildId, count, moderation.appliedEscalationLevel(guildId, user.id));
+    const escalation = step ? await applyEscalation(client, interaction, member, step) : null;
+    const next = strikes.nextThreshold(guildId, count);
 
     await interaction.editReply({
       embeds: [
@@ -66,32 +74,49 @@ module.exports = {
         escalation?.ok && escalation.type === 'ban'
           ? actionButton({ command: 'unban', action: 'revoke', args: [user.id], label: 'Débannir', emoji: ICONS.unlock, style: ButtonStyle.Success })
           : null,
-        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+        historyButton(user.id),
       ),
     });
   },
 };
 
-/** @returns {Promise<{ ok: boolean, type: 'timeout'|'kick'|'ban'|null, text: string }|null>} */
-async function applyEscalation(client, interaction, member, action, count) {
+/**
+ * Applique le palier `step` au nom de l'invocateur (sanction enregistrée avec lui
+ * comme modérateur), après avoir vérifié qu'il en a la permission.
+ * @returns {Promise<{ ok: boolean, type: 'timeout'|'kick'|'ban'|null, text: string }|null>}
+ */
+async function applyEscalation(client, interaction, member, step) {
   const { moderation } = client.services;
-  const reason = `Escalade automatique (${count} strikes)`;
+  const permission = ACTION_PERMISSIONS[step.action];
+  if (!permission) return null;
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits[permission])) {
+    const label = ACTION_LABELS[step.action] ?? step.action;
+    return {
+      ok: false,
+      type: null,
+      text: `${ICONS.warning} Palier de **${step.strikes} strikes** atteint (${label}), mais il faut la permission **${permissionLabel(permission)}** pour l'appliquer. Il sera appliqué au prochain avertissement donné par un modérateur qui l'a.`,
+    };
+  }
+  const reason = escalationReason(step);
+  const moderator = interaction.member;
   try {
-    if (action.action === 'mute' || action.action === 'timeout') {
-      const ms = parseDuration(action.duration || '1h') || 3_600_000;
-      await moderation.timeout(interaction.guild, member, interaction.guild.members.me, reason, ms);
-      return { ok: true, type: 'timeout', text: `${ICONS.mute} Timeout de **${action.duration || '1h'}** appliqué (palier de ${count} strikes).` };
+    if (step.action === 'mute' || step.action === 'timeout') {
+      const ms = parseDuration(step.duration || '1h') || 3_600_000;
+      await moderation.timeout(interaction.guild, member, moderator, reason, ms);
+      return { ok: true, type: 'timeout', text: `${ICONS.mute} Timeout de **${step.duration || '1h'}** appliqué (palier de ${step.strikes} strikes).` };
     }
-    if (action.action === 'kick') {
-      await moderation.kick(interaction.guild, member, interaction.guild.members.me, reason);
-      return { ok: true, type: 'kick', text: `${ICONS.kick} Membre **expulsé** (palier de ${count} strikes).` };
+    if (step.action === 'kick') {
+      await moderation.kick(interaction.guild, member, moderator, reason);
+      return { ok: true, type: 'kick', text: `${ICONS.kick} Membre **expulsé** (palier de ${step.strikes} strikes).` };
     }
-    if (action.action === 'ban') {
-      await moderation.ban(interaction.guild, member.user, interaction.guild.members.me, reason, { targetMember: member });
-      return { ok: true, type: 'ban', text: `${ICONS.ban} Membre **banni** (palier de ${count} strikes).` };
+    if (step.action === 'ban') {
+      await moderation.ban(interaction.guild, member.user, moderator, reason, { targetMember: member });
+      return { ok: true, type: 'ban', text: `${ICONS.ban} Membre **banni** (palier de ${step.strikes} strikes).` };
     }
   } catch (err) {
     return { ok: false, type: null, text: `${ICONS.error} Échec de l'escalade : ${err.message}` };
   }
   return null;
 }
+
+module.exports.applyEscalation = applyEscalation;

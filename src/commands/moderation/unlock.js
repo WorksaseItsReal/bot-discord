@@ -1,9 +1,10 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows } = require('../../utils/ui');
-const { channelCard, channelForButton } = require('../../services/LockdownService');
-const { needPermission } = require('../../services/ModerationService');
+const { channelCard, channelForButton, channelForCommand } = require('../../services/LockdownService');
+const { requirePermission } = require('../../services/ModerationService');
+const { LOCK_CHANNEL_TYPES } = require('./lock');
 
 /** Carte « Salon déverrouillé » + bouton inverse « Verrouiller ». */
 function render(channel, moderator, ownerId) {
@@ -22,20 +23,20 @@ module.exports = {
     .setName('unlock')
     .setDescription('Déverrouille un salon.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .addChannelOption((o) => o.setName('salon').setDescription('Salon (par défaut: actuel)').addChannelTypes(ChannelType.GuildText)),
+    .addChannelOption((o) => o.setName('salon').setDescription('Salon (par défaut: actuel)').addChannelTypes(...LOCK_CHANNEL_TYPES)),
 
   async execute(interaction, client) {
-    const channel = interaction.options.getChannel('salon') || interaction.channel;
-    await client.services.lockdown.unlockChannel(channel);
+    const channel = channelForCommand(interaction);
+    await client.services.lockdown.unlockChannel(channel, `Unlock par ${interaction.user.tag}`);
     await interaction.reply(render(channel, interaction.user, interaction.user.id));
   },
 
   buttons: {
     /** cmd:unlock:run:<channelId>:<ownerId> — « Déverrouiller » (inverse de /lock). */
     async run(interaction, client, [channelId, ownerId]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) throw needPermission('ManageChannels');
+      requirePermission(interaction, 'ManageChannels');
       const channel = await channelForButton(interaction, channelId);
-      await client.services.lockdown.unlockChannel(channel);
+      await client.services.lockdown.unlockChannel(channel, `Unlock par ${interaction.user.tag}`);
       await interaction.update(render(channel, interaction.user, ownerId));
     },
   },

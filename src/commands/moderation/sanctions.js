@@ -5,7 +5,8 @@ const { truncate } = require('../../utils/embeds');
 const { discordTimestamp, formatDuration } = require('../../utils/time');
 const { card, field, ICONS, userLine, subtext, code, status } = require('../../utils/ui');
 const { paginate } = require('../../utils/pagination');
-const { TYPE_LABELS, sanctionIcon, userFromId, needPermission } = require('../../services/ModerationService');
+const { TYPE_LABELS, sanctionIcon, userFromId, requirePermission } = require('../../services/ModerationService');
+const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
 
 const PER_PAGE = 5;
@@ -141,8 +142,9 @@ module.exports = {
 
   buttons: {
     /** cmd:sanctions:history:<userId> — historique éphémère, réservé aux modérateurs. */
-    async history(interaction, client, [userId]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) throw needPermission('ModerateMembers');
+    async history(interaction, client, [rawUserId]) {
+      requirePermission(interaction, 'ModerateMembers');
+      const userId = snowflake(rawUserId, 'membre');
       const user = (await client.users.fetch(userId).catch(() => null)) ?? userFromId(userId);
       return showHistory(interaction, client, user);
     },

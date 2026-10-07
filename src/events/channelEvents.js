@@ -40,7 +40,8 @@ function channelChanges(oldC, newC) {
 }
 
 /**
- * Regroupe les événements de salons (création/suppression/màj) : logs + antiraid.
+ * Regroupe les événements de salons (création/suppression/màj) : logs.
+ * (L'AntiRaid est alimenté par guildAuditLogEntryCreate, voir banEvents.js.)
  * Un module d'événement = un nom ; on exporte donc un tableau via index des events.
  */
 module.exports = [
@@ -78,6 +79,7 @@ module.exports = [
         repos?.tickets?.delete(channel.id);
         repos?.modmail?.close(channel.id);
         repos?.tempVoice?.delete(channel.id);
+        repos?.locks?.deleteChannel?.(channel.guild.id, channel.id); // états lock / hide
       } catch {
         /* nettoyage best-effort */
       }
@@ -99,7 +101,6 @@ module.exports = [
           id: channel.id,
         }),
       );
-      if (executor) await client.services.antiraid.handleDestructive(channel.guild, executor, 'channelDelete').catch(() => {});
     },
   },
   {

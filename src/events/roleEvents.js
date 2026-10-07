@@ -67,7 +67,6 @@ module.exports = [
           id: role.id,
         }),
       );
-      if (executor) await client.services.antiraid.handleDestructive(role.guild, executor, 'roleDelete').catch(() => {});
     },
   },
   {

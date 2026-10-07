@@ -1,12 +1,26 @@
 'use strict';
 
-const { ChannelType, ButtonStyle, MessageFlags } = require('discord.js');
+const { ChannelType, ButtonStyle, MessageFlags, PermissionFlagsBits } = require('discord.js');
 const { assertCanModerate } = require('../utils/permissions');
 const { truncate } = require('../utils/embeds');
 const { formatDuration, discordTimestamp } = require('../utils/time');
-const { card, field, wide, ICONS, userLine, subtext, buttonRows, deleteButton } = require('../utils/ui');
+const { card, field, wide, ICONS, userLine, subtext, buttonRows, deleteButton, actionButton } = require('../utils/ui');
 const { permissionLabel } = require('../utils/permissionNames');
+const { snowflake, SNOWFLAKE } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
+const { ESCALATION_PREFIX, parseEscalationLevel } = require('./StrikeService');
+
+/** Durée pendant laquelle une action du bot est reconnue dans les événements Discord (anti-doublon de logs). */
+const BOT_ACTION_TTL_MS = 15_000;
+
+/** Refus posés par le rôle Muted, selon le type de salon. */
+const MUTE_DENIES = {
+  [ChannelType.GuildText]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildAnnouncement]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildForum]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildVoice]: ['SendMessages', 'AddReactions', 'Speak'],
+  [ChannelType.GuildCategory]: ['SendMessages', 'AddReactions', 'Speak', 'SendMessagesInThreads'],
+};
 
 /**
  * Présentation de chaque type de sanction (et de levée de sanction).
@@ -170,6 +184,48 @@ function needPermission(flag) {
   return new UserError(`Il vous faut la permission **${permissionLabel(flag)}** pour cette action.`);
 }
 
+/** Exige une permission du cliqueur / de l'invocateur (nom de flag, ex : 'BanMembers'). */
+function requirePermission(interaction, flag) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits[flag])) throw needPermission(flag);
+}
+
+/** Boutons d'administration (antiraid, lockdown…) : réservés aux administrateurs. */
+function assertAdmin(interaction) {
+  requirePermission(interaction, 'Administrator');
+}
+
+/** Bouton « 📜 Sanctions » (historique éphémère du membre), partagé par toutes les cartes. */
+function historyButton(userId) {
+  return actionButton({ command: 'sanctions', action: 'history', args: [userId], label: 'Sanctions', emoji: ICONS.history });
+}
+
+/**
+ * Raison obligatoire (option `moderation.requireReason`) pour les commandes de sanction.
+ * @param {{ moderation?: { requireReason?: boolean } }} cfg config du serveur
+ */
+function assertReason(cfg, reason) {
+  if (cfg?.moderation?.requireReason && !reason?.trim()) {
+    throw new UserError('Une **raison** est obligatoire sur ce serveur : renseignez l\'option `raison`.');
+  }
+}
+
+/**
+ * Membre visé par une option utilisateur, à partir des données RÉSOLUES de
+ * l'interaction (pas de fetch qui pourrait échouer silencieusement et faire
+ * sauter les garde-fous de hiérarchie).
+ * @returns {import('discord.js').GuildMember|null} null si l'utilisateur n'est pas sur le serveur
+ */
+function resolveTargetMember(interaction, option = 'membre') {
+  const user = interaction.options.getUser(option);
+  const member = interaction.options.getMember(option) ?? interaction.guild.members.cache.get(user?.id) ?? null;
+  if (!member) return null;
+  // Membre présent mais données incomplètes (payload brut) : on refuse plutôt que d'ignorer la hiérarchie.
+  if (!member.roles?.highest || !member.guild) {
+    throw new UserError('Impossible de vérifier les rôles de ce membre pour le moment. Réessayez dans quelques secondes.');
+  }
+  return member;
+}
+
 /**
  * Rangées de composants du message, où le bouton cliqué devient une étiquette
  * désactivée (ex : « ✅ Débanni par Bob »). Les autres boutons (🗑️…) sont conservés.
@@ -203,6 +259,29 @@ async function settleAndAnnounce(interaction, { label, embed, buttons = [] }) {
 }
 
 /**
+ * Fabrique du handler de bouton de levée de sanction (cmd:<unban|unmute|untimeout>:revoke:<userId>).
+ * Revérifie la permission du cliqueur, valide l'identifiant (customId contrôlé par le client),
+ * exécute `run` puis fige le bouton et publie la carte de levée.
+ * @param {{
+ *   permission: string, type: 'unban'|'unmute'|'untimeout', done: string,
+ *   run: (interaction: import('discord.js').ButtonInteraction, client: object, userId: string) => Promise<import('discord.js').User|null>,
+ * }} opts `run` renvoie l'utilisateur RÉSOLU sur lequel l'action a porté
+ */
+function revokeHandler({ permission, type, done, run }) {
+  return async function revoke(interaction, client, [rawUserId]) {
+    requirePermission(interaction, permission);
+    const userId = snowflake(rawUserId, 'membre');
+    const user = await run(interaction, client, userId);
+    const id = user?.id ?? userId;
+    await settleAndAnnounce(interaction, {
+      label: `${done} par ${interaction.user.username}`,
+      embed: sanctionCard({ type, user, userId: id, moderator: interaction.user }),
+      buttons: [historyButton(id)],
+    });
+  };
+}
+
+/**
  * Orchestre les actions de modération : garde-fous de hiérarchie, exécution de
  * l'action Discord, enregistrement de la sanction, DM au membre et log.
  * Les commandes restent fines et délèguent toute la logique ici.
@@ -218,6 +297,48 @@ class ModerationService {
     this.sanctions = sanctions;
     this.config = config;
     this.logging = logging;
+    /**
+     * Actions (ban/unban) lancées par le bot, marquées AVANT l'appel API : les
+     * événements guildBanAdd/guildBanRemove les reconnaissent et ne les journalisent
+     * pas une seconde fois. Clé `<type>:<guildId>:<userId>` → expiration.
+     * @type {Map<string, number>}
+     */
+    this.recentBotActions = new Map();
+  }
+
+  /** Marque une action du bot (avant l'appel API). */
+  markBotAction(type, guildId, userId, ttlMs = BOT_ACTION_TTL_MS) {
+    const now = Date.now();
+    for (const [k, exp] of this.recentBotActions) if (exp <= now) this.recentBotActions.delete(k);
+    this.recentBotActions.set(`${type}:${guildId}:${userId}`, now + ttlMs);
+  }
+
+  /** Retire une marque (l'appel API a échoué : l'événement ne viendra pas du bot). */
+  unmarkBotAction(type, guildId, userId) {
+    this.recentBotActions.delete(`${type}:${guildId}:${userId}`);
+  }
+
+  /** true si le bot vient de lancer cette action (marque encore fraîche). */
+  isRecentBotAction(type, guildId, userId) {
+    const key = `${type}:${guildId}:${userId}`;
+    const exp = this.recentBotActions.get(key);
+    if (!exp) return false;
+    if (exp <= Date.now()) {
+      this.recentBotActions.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  /** Marque l'action, exécute l'appel API, retire la marque en cas d'échec. */
+  async #asBot(type, guildId, userId, fn) {
+    this.markBotAction(type, guildId, userId);
+    try {
+      return await fn();
+    } catch (err) {
+      this.unmarkBotAction(type, guildId, userId);
+      throw err;
+    }
   }
 
   /** Récupère (ou crée) le rôle "Muted" et applique les refus dans les salons. */
@@ -229,13 +350,15 @@ class ModerationService {
       role = await guild.roles.create({ name: 'Muted', colors: { primaryColor: 0x607d8b }, reason: 'Rôle de mute Inspecteur Gadget' });
     }
     if (cfg.moderation.mutedRoleId !== role.id) this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
-    // Applique les refus (best-effort) sur les salons texte/vocaux
+    // Applique les refus (best-effort) uniquement là où ils manquent : un salon dont
+    // l'overwrite refuse déjà tout (ou synchronisé avec une catégorie qui le fait) est ignoré.
     for (const channel of guild.channels.cache.values()) {
-      if (![ChannelType.GuildText, ChannelType.GuildVoice, ChannelType.GuildCategory, ChannelType.GuildForum].includes(channel.type)) continue;
+      const denies = MUTE_DENIES[channel.type];
+      if (!denies || !channel.permissionOverwrites) continue;
       const ow = channel.permissionOverwrites.cache.get(role.id);
-      if (ow) continue;
+      if (ow && denies.every((p) => ow.deny?.has?.(PermissionFlagsBits[p]))) continue;
       await channel.permissionOverwrites
-        .edit(role, { SendMessages: false, AddReactions: false, Speak: false, SendMessagesInThreads: false }, { reason: 'Configuration mute' })
+        .edit(role, Object.fromEntries(denies.map((p) => [p, false])), { reason: 'Configuration mute' })
         .catch(() => {});
     }
     return role;
@@ -252,6 +375,9 @@ class ModerationService {
     const role = await this.ensureMutedRole(guild);
     if (targetMember.roles.cache.has(role.id)) throw new UserError('Ce membre est déjà mute.');
     await targetMember.roles.add(role, reason || undefined);
+    // Un nouveau mute remplace tout mute encore actif (rôle retiré à la main…) :
+    // le scheduler ne doit pas lever le nouveau mute à l'échéance de l'ancien.
+    this.#deactivateActive(guild.id, targetMember.id, 'mute');
     return this.record(guild, targetMember.user, moderator, { type: 'mute', reason, durationMs });
   }
 
@@ -345,7 +471,9 @@ class ModerationService {
     }
     const type = durationMs ? 'tempban' : 'ban';
     return this.record(guild, targetUser, moderator, { type, reason, durationMs }, async () => {
-      await guild.bans.create(targetUser.id, { reason: reason || undefined, deleteMessageSeconds });
+      await this.#asBot('ban', guild.id, targetUser.id, () =>
+        guild.bans.create(targetUser.id, { reason: reason || undefined, deleteMessageSeconds }),
+      );
       // Un nouveau ban (permanent ou temporaire) remplace tout ban temporaire en cours :
       // le scheduler ne doit pas débannir l'utilisateur à l'expiration de l'ancien.
       this.#deactivateActive(guild.id, targetUser.id, 'tempban');
@@ -354,9 +482,14 @@ class ModerationService {
 
   /** Désactive les sanctions actives d'un type donné pour un membre. */
   #deactivateActive(guildId, userId, type) {
-    for (const s of this.sanctions.listActiveByType(guildId, type)) {
-      if (s.user_id === userId) this.sanctions.deactivate(s.id);
-    }
+    this.sanctions.deactivateActive(guildId, userId, type);
+  }
+
+  /** Plus haut palier d'escalade déjà appliqué à ce membre (0 si aucun), d'après l'historique. */
+  appliedEscalationLevel(guildId, userId) {
+    return this.sanctions
+      .reasonsStartingWith(guildId, userId, ESCALATION_PREFIX)
+      .reduce((max, r) => Math.max(max, parseEscalationLevel(r)), 0);
   }
 
   /** Appelé quand un utilisateur est débanni (commande ou manuellement). */
@@ -364,20 +497,22 @@ class ModerationService {
     this.#deactivateActive(guildId, userId, 'tempban');
   }
 
-  /** @returns {Promise<{ ok: true, user: import('discord.js').User|null }>} */
+  /**
+   * Débannit un utilisateur. L'identifiant est validé (jamais de `bans.fetch('')`,
+   * qui renverrait TOUTE la liste des bans) et l'action porte sur l'utilisateur
+   * RÉSOLU par Discord (`existing.user.id`), pas sur la valeur reçue.
+   * @returns {Promise<{ ok: true, user: import('discord.js').User }>}
+   */
   async unban(guild, userId, moderator, reason) {
+    if (typeof userId !== 'string' || !SNOWFLAKE.test(userId)) throw new UserError('Identifiant utilisateur invalide.');
     const existing = await guild.bans.fetch(userId).catch(() => null);
-    if (!existing) throw new UserError('Cet utilisateur n\'est pas banni.');
-    await guild.bans.remove(userId, reason || undefined);
+    const user = existing?.user;
+    if (!user?.id || user.id !== userId) throw new UserError('Cet utilisateur n\'est pas banni.');
+    await this.#asBot('unban', guild.id, user.id, () => guild.bans.remove(user.id, reason || undefined));
     // Désactive les bans temporaires actifs correspondants
-    this.#deactivateActive(guild.id, userId, 'tempban');
-    const user = existing.user ?? null;
-    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId, moderator, reason }));
+    this.#deactivateActive(guild.id, user.id, 'tempban');
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId: user.id, moderator, reason }));
     return { ok: true, user };
-  }
-
-  history(guildId, userId, limit) {
-    return this.sanctions.listByUser(guildId, userId, limit);
   }
 
   async #notifyUser(guild, user, { type, reason, durationMs }) {
@@ -390,10 +525,17 @@ module.exports = {
   ModerationService,
   TYPE_LABELS,
   SANCTIONS,
+  BOT_ACTION_TTL_MS,
   sanctionCard,
   sanctionIcon,
   userFromId,
   needPermission,
+  requirePermission,
+  assertAdmin,
+  assertReason,
+  historyButton,
+  resolveTargetMember,
+  revokeHandler,
   settleComponents,
   settleAndAnnounce,
 };

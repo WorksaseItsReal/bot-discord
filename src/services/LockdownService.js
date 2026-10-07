@@ -3,6 +3,7 @@
 const { PermissionFlagsBits, ChannelType } = require('discord.js');
 const { card, field, wide, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
+const { snowflake } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
 
 /** Présentation des actions sur un salon (lock, unlock, hide, unhide). */
@@ -44,7 +45,7 @@ function serverLockCard({ enabled, count, moderator, reason, section = 'security
     icon: enabled ? '🚨' : ICONS.unlock,
     title: enabled ? 'Lockdown activé' : 'Lockdown levé',
     description: enabled
-      ? `**${count}** salon${plural} textuel${plural} ${count > 1 ? 'sont' : 'est'} désormais en lecture seule.`
+      ? `**${count}** salon${plural} ${count > 1 ? 'sont' : 'est'} désormais en lecture seule.`
       : count
         ? `**${count}** salon${plural} ${count > 1 ? 'ont' : 'a'} retrouvé ${count > 1 ? 'leurs' : 'ses'} permissions d'origine.`
         : 'Aucun salon n\'était verrouillé : rien à restaurer.',
@@ -54,6 +55,63 @@ function serverLockCard({ enabled, count, moderator, reason, section = 'security
       reason ? wide(ICONS.reason, 'Raison', truncate(reason, 1024)) : null,
     ],
   });
+}
+
+/**
+ * Permissions refusées à @everyone par un verrouillage, selon le type de salon.
+ * Écrire, écrire dans les fils et créer des fils : sinon le lock se contourne
+ * en ouvrant un fil. Types inconnus : SendMessages seul.
+ */
+const LOCK_PERMS = {
+  [ChannelType.GuildText]: ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads'],
+  [ChannelType.GuildAnnouncement]: ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads'],
+  [ChannelType.GuildForum]: ['SendMessages', 'SendMessagesInThreads'], // SendMessages = créer un post
+  [ChannelType.GuildVoice]: ['SendMessages'], // salon textuel intégré au vocal
+};
+const DEFAULT_LOCK_PERMS = ['SendMessages'];
+/** Types de salons verrouillés par lockall / lockdown. */
+const LOCKABLE_TYPES = new Set(Object.keys(LOCK_PERMS).map(Number));
+/** Parallélisme des opérations de masse (lockall / unlockall). */
+const BATCH_SIZE = 5;
+
+/** Portée d'un verrouillage : /lock individuel ou lockall / lockdown (y compris AntiRaid). */
+const SCOPES = Object.freeze({ manual: 'manual', lockdown: 'lockdown' });
+
+function lockPermsFor(channel) {
+  return LOCK_PERMS[channel?.type] ?? DEFAULT_LOCK_PERMS;
+}
+
+/** État tri-valué d'un flag dans un overwrite (absent → null). */
+function overwriteState(ow, flag) {
+  return bitToState(ow?.allow?.bitfield, ow?.deny?.bitfield, flag);
+}
+
+/**
+ * Normalise une ligne sauvegardée.
+ *  - format actuel : `{ v: 2, scope, perms: { SendMessages: true|false|null, … } }` ;
+ *  - ancien format : `{ allow, deny }` (bitfields complets d'avant le lock). L'ancien
+ *    code ne refusait que SendMessages : seul ce bit est restauré (les autres n'ont
+ *    pas été touchés). Pas de portée → traité comme un lockdown (comportement d'avant).
+ * @returns {{ scope?: string, perms: Record<string, boolean|null> }}
+ */
+function normalizeLock(data) {
+  if (data?.perms) return { scope: data.scope, perms: { ...data.perms } };
+  return { scope: data?.scope, perms: { SendMessages: bitToState(data?.allow, data?.deny) } };
+}
+
+/** Ligne prise en compte par lockdown status / unlockall / lockdown disable. */
+function isLockdownLock(row) {
+  return (normalizeLock(row.data).scope ?? SCOPES.lockdown) === SCOPES.lockdown;
+}
+
+/** Exécute `fn` par lots de `size` (Promise.allSettled) ; renvoie le nombre de succès. */
+async function inBatches(items, fn, size = BATCH_SIZE) {
+  let done = 0;
+  for (let i = 0; i < items.length; i += size) {
+    const results = await Promise.allSettled(items.slice(i, i + size).map((item) => fn(item)));
+    done += results.filter((r) => r.status === 'fulfilled' && r.value !== false).length;
+  }
+  return done;
 }
 
 /**
@@ -71,104 +129,157 @@ class LockdownService {
     this.logging = logging;
   }
 
-  /** Verrouille un salon (retire SendMessages à @everyone) en sauvegardant l'état. */
-  async lockChannel(channel, moderator, reason) {
+  /**
+   * Verrouille un salon : refuse à @everyone d'écrire et de créer / écrire dans des
+   * fils, en sauvegardant l'état tri-valué d'ORIGINE de chaque permission touchée.
+   * Un second lock ne remplace jamais l'état d'origine par l'état « verrouillé » ;
+   * il ne fait que compléter les permissions qui n'étaient pas encore sauvegardées.
+   * @param {{ scope?: 'manual'|'lockdown' }} [opts]
+   */
+  async lockChannel(channel, moderator, reason, { scope = SCOPES.manual } = {}) {
     assertOverwritable(channel);
     const everyone = channel.guild.roles.everyone;
-    // Ne sauvegarde l'état d'origine qu'au premier verrouillage : un second lock
-    // ne doit pas écraser l'état réel par l'état « verrouillé ».
-    if (!this.locks.get(channel.guild.id, channel.id)) {
-      const current = channel.permissionOverwrites.cache.get(everyone.id);
-      this.locks.save(channel.guild.id, channel.id, {
-        allow: current?.allow?.bitfield?.toString() ?? '0',
-        deny: current?.deny?.bitfield?.toString() ?? '0',
-      });
+    const perms = lockPermsFor(channel);
+    const saved = this.locks.get(channel.guild.id, channel.id);
+    const state = saved ? normalizeLock(saved.data) : { scope, perms: {} };
+    const current = channel.permissionOverwrites.cache.get(everyone.id);
+    const missing = perms.filter((p) => !(p in state.perms));
+    if (!saved || missing.length) {
+      for (const p of missing) state.perms[p] = overwriteState(current, p);
+      this.locks.save(channel.guild.id, channel.id, { v: 2, scope: state.scope, perms: state.perms });
     }
-    await channel.permissionOverwrites.edit(everyone, { SendMessages: false }, { reason });
+    try {
+      await channel.permissionOverwrites.edit(everyone, Object.fromEntries(perms.map((p) => [p, false])), { reason });
+    } catch (err) {
+      // Salon non verrouillé : on n'en garde pas une trace qui fausserait le statut du lockdown.
+      if (!saved) this.locks.delete(channel.guild.id, channel.id);
+      throw err;
+    }
   }
 
-  /** Déverrouille un salon en restaurant l'état sauvegardé (ou en réinitialisant). */
-  async unlockChannel(channel) {
+  /**
+   * Déverrouille un salon en restaurant l'état sauvegardé de chaque permission.
+   * Sans état sauvegardé (salon non verrouillé par le bot) : on ne retire que le
+   * refus d'écriture (SendMessages → neutre), sans toucher aux autres réglages.
+   */
+  async unlockChannel(channel, reason) {
     assertOverwritable(channel);
     const everyone = channel.guild.roles.everyone;
     const saved = this.locks.get(channel.guild.id, channel.id);
     if (saved) {
-      await channel.permissionOverwrites.edit(everyone, {
-        SendMessages: bitToState(saved.data.allow, saved.data.deny),
-      });
+      await channel.permissionOverwrites.edit(everyone, normalizeLock(saved.data).perms, { reason });
       this.locks.delete(channel.guild.id, channel.id);
     } else {
-      await channel.permissionOverwrites.edit(everyone, { SendMessages: null });
+      await channel.permissionOverwrites.edit(everyone, { SendMessages: null }, { reason });
     }
   }
 
-  async #eachTextChannel(guild, fn) {
-    const channels = guild.channels.cache.filter(
-      (c) => c.type === ChannelType.GuildText && c.manageable,
-    );
-    let done = 0;
-    for (const channel of channels.values()) {
-      try {
-        await fn(channel);
-        done += 1;
-      } catch {
-        /* ignore un salon problématique */
-      }
+  /**
+   * Masque un salon à @everyone en sauvegardant l'état d'origine de ViewChannel
+   * (état distinct du verrouillage : sorte `hide` dans LockRepository).
+   */
+  async hideChannel(channel, reason) {
+    assertOverwritable(channel);
+    const everyone = channel.guild.roles.everyone;
+    if (!this.locks.get(channel.guild.id, channel.id, 'hide')) {
+      const current = channel.permissionOverwrites.cache.get(everyone.id);
+      this.locks.save(channel.guild.id, channel.id, { v: 2, perms: { ViewChannel: overwriteState(current, 'ViewChannel') } }, 'hide');
     }
-    return done;
+    await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }, { reason });
   }
 
-  async enable(guild, moderator, reason = 'Lockdown') {
-    const n = await this.#eachTextChannel(guild, (c) => this.lockChannel(c, moderator, reason));
-    await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }));
+  /**
+   * Rend un salon visible : restaure l'état d'origine de ViewChannel (autorisé ou neutre).
+   * Sans état sauvegardé (ou si le salon était déjà masqué avant /hide), on ne retire que
+   * le refus posé par le bot (ViewChannel → neutre) : /unhide doit rendre le salon visible.
+   */
+  async unhideChannel(channel, reason) {
+    assertOverwritable(channel);
+    const everyone = channel.guild.roles.everyone;
+    const saved = this.locks.get(channel.guild.id, channel.id, 'hide');
+    const original = saved?.data?.perms?.ViewChannel;
+    await channel.permissionOverwrites.edit(everyone, { ViewChannel: original === true ? true : null }, { reason });
+    if (saved) this.locks.delete(channel.guild.id, channel.id, 'hide');
+  }
+
+  /**
+   * Verrouille tous les salons où l'on peut écrire (textuels, annonces, forums,
+   * texte des vocaux), par lots de 5.
+   * @param {{ log?: boolean }} [opts] log=false : l'appelant publie sa propre carte (AntiRaid)
+   */
+  async enable(guild, moderator, reason = 'Lockdown', { log = true } = {}) {
+    const channels = [...guild.channels.cache.values()].filter((c) => LOCKABLE_TYPES.has(c.type) && c.manageable);
+    const n = await inBatches(channels, (c) => this.lockChannel(c, moderator, reason, { scope: SCOPES.lockdown }));
+    if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }));
     return n;
   }
 
+  /**
+   * Lève le lockdown : ne restaure QUE les salons verrouillés par lockall / lockdown
+   * (les /lock individuels restent, à lever avec /unlock), par lots de 5.
+   */
   async disable(guild, moderator) {
-    // Ne restaure QUE les salons dont l'état a été sauvegardé lors du verrouillage.
-    let n = 0;
-    for (const lock of this.locks.list(guild.id)) {
+    const rows = this.locks.list(guild.id).filter(isLockdownLock);
+    const n = await inBatches(rows, async (lock) => {
       const channel = guild.channels.cache.get(lock.channel_id);
       if (!channel?.permissionOverwrites) {
         this.locks.delete(guild.id, lock.channel_id); // salon supprimé entre-temps
-        continue;
+        return false;
       }
-      try {
-        await this.unlockChannel(channel);
-        n += 1;
-      } catch {
-        /* ignore un salon problématique */
-      }
-    }
+      await this.unlockChannel(channel, 'Fin du lockdown');
+      return true;
+    });
     await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }));
     return n;
   }
 
+  /** Nombre de salons verrouillés par un lockdown en cours. */
   status(guild) {
-    return this.locks.list(guild.id).length;
+    return this.locks.list(guild.id).filter(isLockdownLock).length;
   }
 }
 
-/** Restaure l'état tri-valué (true / false / null) de SendMessages. */
-function bitToState(allow, deny) {
-  const SEND = PermissionFlagsBits.SendMessages;
-  if ((BigInt(allow || 0) & SEND) === SEND) return true;
-  if ((BigInt(deny || 0) & SEND) === SEND) return false;
+/** Restaure l'état tri-valué (true / false / null) d'un flag (SendMessages par défaut). */
+function bitToState(allow, deny, flag = 'SendMessages') {
+  const bit = typeof flag === 'bigint' ? flag : PermissionFlagsBits[flag];
+  if ((BigInt(allow || 0) & bit) === bit) return true;
+  if ((BigInt(deny || 0) & bit) === bit) return false;
   return null; // neutre (hérite)
 }
 
 /**
- * Salon visé par un bouton (id encodé dans le customId) : doit exister sur ce
- * serveur et le cliqueur doit pouvoir le gérer (« Gérer les salons » sur CE salon).
+ * Vérifie que le membre a « Gérer les salons » sur CE salon (overwrites compris).
+ * @param {import('discord.js').GuildMember} member
+ */
+function assertCanManageChannel(member, channel) {
+  if (!channel?.permissionsFor?.(member)?.has(PermissionFlagsBits.ManageChannels)) {
+    throw new UserError(`Il vous faut la permission **Gérer les salons** dans ${channel ?? 'ce salon'}.`);
+  }
+}
+
+/**
+ * Salon visé par l'option `salon` d'une commande (ou le salon courant), avec la
+ * même vérification que les boutons : « Gérer les salons » sur CE salon.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+function channelForCommand(interaction, option = 'salon') {
+  const picked = interaction.options.getChannel(option);
+  const channel = picked ? interaction.guild.channels.cache.get(picked.id) ?? picked : interaction.channel;
+  assertCanManageChannel(interaction.member, channel);
+  return channel;
+}
+
+/**
+ * Salon visé par un bouton (id encodé dans le customId) : identifiant validé, doit
+ * exister sur ce serveur et le cliqueur doit pouvoir le gérer (« Gérer les salons » sur CE salon).
  * @param {import('discord.js').ButtonInteraction} interaction
  */
-async function channelForButton(interaction, channelId) {
+async function channelForButton(interaction, rawChannelId) {
+  const channelId = snowflake(rawChannelId, 'salon');
   const channel = interaction.guild.channels.cache.get(channelId)
     ?? (await interaction.client.channels.fetch(channelId).catch(() => null));
   if (!channel || channel.guildId !== interaction.guildId) throw new UserError('Ce salon n\'existe plus.');
-  if (!channel.permissionsFor?.(interaction.member)?.has(PermissionFlagsBits.ManageChannels)) {
-    throw new UserError(`Il vous faut la permission **Gérer les salons** dans ${channel}.`);
-  }
+  assertCanManageChannel(interaction.member, channel);
   return channel;
 }
 
@@ -179,4 +290,18 @@ function assertOverwritable(channel) {
   }
 }
 
-module.exports = { LockdownService, bitToState, assertOverwritable, channelCard, serverLockCard, channelForButton, CHANNEL_ACTIONS };
+module.exports = {
+  LockdownService,
+  bitToState,
+  assertOverwritable,
+  assertCanManageChannel,
+  channelCard,
+  serverLockCard,
+  channelForButton,
+  channelForCommand,
+  normalizeLock,
+  lockPermsFor,
+  CHANNEL_ACTIONS,
+  LOCK_PERMS,
+  SCOPES,
+};

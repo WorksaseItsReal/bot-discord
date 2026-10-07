@@ -3,7 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows } = require('../../utils/ui');
 const { serverLockCard } = require('../../services/LockdownService');
-const { needPermission } = require('../../services/ModerationService');
+const { assertAdmin } = require('../../services/ModerationService');
 
 /** Carte « Serveur déverrouillé » + bouton inverse « Tout verrouiller ». */
 function render(count, moderator, ownerId) {
@@ -18,10 +18,9 @@ function render(count, moderator, ownerId) {
 
 module.exports = {
   category: 'moderation',
-  render,
   data: new SlashCommandBuilder()
     .setName('unlockall')
-    .setDescription('Déverrouille tous les salons textuels du serveur.')
+    .setDescription('Lève le verrouillage posé par /lockall ou /lockdown.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction, client) {
@@ -33,7 +32,7 @@ module.exports = {
   buttons: {
     /** cmd:unlockall:run:<ownerId> — « Tout déverrouiller » (inverse de /lockall), réservé aux administrateurs. */
     async run(interaction, client, [ownerId]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) throw needPermission('Administrator');
+      assertAdmin(interaction);
       await interaction.deferUpdate();
       const n = await client.services.lockdown.disable(interaction.guild, interaction.member);
       await interaction.editReply(render(n, interaction.user, ownerId));

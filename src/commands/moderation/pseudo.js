@@ -2,7 +2,8 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { card, field, ICONS, userLine, code, actionButton, buttonRows } = require('../../utils/ui');
-const { needPermission } = require('../../services/ModerationService');
+const { requirePermission } = require('../../services/ModerationService');
+const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
 
 /** Vérifie que `actor` peut renommer `target` (propriétaire, hiérarchie, rôle du bot). */
@@ -71,8 +72,8 @@ module.exports = {
   buttons: {
     /** cmd:pseudo:undo:<targetId>:<ancien pseudo encodé> — permission et hiérarchie revérifiées. */
     async undo(interaction, client, [targetId, encoded = '']) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageNicknames)) throw needPermission('ManageNicknames');
-      const target = await interaction.guild.members.fetch(targetId).catch(() => null);
+      requirePermission(interaction, 'ManageNicknames');
+      const target = await interaction.guild.members.fetch(snowflake(targetId, 'membre')).catch(() => null);
       if (!target) throw new UserError('Ce membre n\'est plus sur le serveur.');
       assertCanRename(interaction.guild, interaction.member, target);
       let previous;
