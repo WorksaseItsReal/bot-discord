@@ -8,9 +8,12 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  RoleSelectMenuBuilder,
 } = require('discord.js');
 const { truncate, progressBar } = require('../../utils/embeds');
-const { card, field, wide, ICONS, code, status, actionButton, buttonRows, ButtonStyle, subtext } = require('../../utils/ui');
+const { card, field, wide, ICONS, code, status, actionButton, buttonRows, ButtonStyle, subtext, bullets } = require('../../utils/ui');
 const { parseDuration } = require('../../utils/time');
 const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
@@ -20,7 +23,18 @@ const { PRESETS } = require('../../utils/automod/presets');
 const native = require('../../services/NativeAutoMod');
 const { UserError } = require('../../core/errors');
 
-/** Filtres et libellés français, regroupés pour l'affichage. */
+/**
+ * /automod : UN tableau de bord interactif (éphémère) pour TOUT configurer.
+ * Navigation par menu, réglages par boutons, menus et formulaires ; chaque
+ * interaction met à jour le même message. « Gérer le serveur » est revérifiée
+ * à chaque clic.
+ *
+ * Vues : home · grp:<security|spam|content> · filter:<clé> · lists · escalation ·
+ *        newmembers · notify · native · presets · stats:<jours>
+ */
+
+// ---------------------------------------------------------------- métadonnées
+
 const FILTER_LABELS = {
   antiSpam: 'Anti-spam',
   antiFlood: 'Anti-flood',
@@ -38,11 +52,32 @@ const FILTER_LABELS = {
   antiZalgo: 'Texte zalgo',
 };
 const FILTERS = Object.keys(FILTER_LABELS);
-const GROUPS = [
-  ['🛡️ Sécurité', ['antiPhishing', 'antiCrossChannel', 'antiInvite', 'antiLink']],
-  ['💬 Spam', ['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiMassMention']],
-  ['✍️ Contenu', ['badWords', 'antiCaps', 'antiEmojiSpam', 'antiWall', 'antiZalgo']],
-];
+
+/** Ce que fait chaque filtre (affiché dans sa vue détaillée). */
+const FILTER_INFO = {
+  antiPhishing: 'Repère les liens d\'arnaque : faux domaines Discord/Steam, punycode, liens raccourcis, appâts « Nitro gratuit ».',
+  antiCrossChannel: 'Repère le même message posté dans plusieurs salons en peu de temps : signe typique d\'un compte piraté. Toutes les copies sont supprimées.',
+  antiInvite: 'Bloque les invitations vers d\'autres serveurs, même masquées (« discord . gg / code »). Liste blanche disponible.',
+  antiLink: 'Bloque les liens, avec ou sans « https:// ». Les GIF Discord/Tenor et la liste blanche restent autorisés.',
+  antiSpam: 'Trop de messages en quelques secondes.',
+  antiFlood: 'Rafale de messages sur une fenêtre plus longue.',
+  antiDuplicate: 'Le même message envoyé deux fois de suite (30 s).',
+  antiRepeat: 'Le même message répété 3 fois de suite.',
+  antiMassMention: 'Trop de mentions dans un seul message (@everyone compris).',
+  badWords: 'Mots interdits, résistant aux contournements (c0n, c.o.n, cooon, accents, lettres cyrilliques…). « mot* » bloque aussi les dérivés.',
+  antiCaps: 'Messages majoritairement en MAJUSCULES.',
+  antiEmojiSpam: 'Trop d\'emojis dans un message.',
+  antiWall: 'Pavés de texte : trop de lignes ou trop de caractères.',
+  antiZalgo: 'Texte « zalgo » illisible (diacritiques empilés).',
+};
+
+const GROUPS = {
+  security: { label: 'Sécurité', emoji: '🛡️', description: 'Arnaques, comptes piratés, invitations, liens', filters: ['antiPhishing', 'antiCrossChannel', 'antiInvite', 'antiLink'] },
+  spam: { label: 'Spam', emoji: '💬', description: 'Spam, flood, doublons, répétitions, mentions', filters: ['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiMassMention'] },
+  content: { label: 'Contenu', emoji: '✍️', description: 'Mots interdits, majuscules, emojis, pavés, zalgo', filters: ['badWords', 'antiCaps', 'antiEmojiSpam', 'antiWall', 'antiZalgo'] },
+};
+const groupOf = (filter) => Object.keys(GROUPS).find((g) => GROUPS[g].filters.includes(filter)) ?? 'security';
+
 /** Seuil réglable par filtre : [clé de config, libellé, min, max]. */
 const THRESHOLDS = {
   antiSpam: ['limit', 'messages', 2, 30],
@@ -54,8 +89,26 @@ const THRESHOLDS = {
   antiCrossChannel: ['channels', 'salons', 2, 10],
   antiWall: ['maxLines', 'lignes', 3, 100],
 };
+/** Fenêtre réglable (secondes) : [min, max]. */
+const WINDOWS = { antiSpam: [2, 120], antiFlood: [5, 300], antiCrossChannel: [10, 600] };
+
 const ACTION_LABELS = { delete: 'Suppression', warn: 'Avertissement', timeout: 'Timeout', kick: 'Expulsion' };
-const NOTIFY_LABELS = { channel: 'Dans le salon (8 s)', dm: 'En message privé', none: 'Aucune' };
+const NOTIFY_LABELS = { channel: 'Dans le salon (supprimé après 8 s)', dm: 'En message privé', none: 'Aucune' };
+const MAX_IGNORED = 25;
+
+const NAV = [
+  { value: 'home', label: 'Accueil', emoji: '🏠', description: 'Vue d\'ensemble' },
+  ...Object.entries(GROUPS).map(([key, g]) => ({ value: `grp:${key}`, label: `Filtres · ${g.label}`, emoji: g.emoji, description: g.description })),
+  { value: 'lists', label: 'Listes', emoji: '📋', description: 'Mots interdits, domaines et invitations autorisés' },
+  { value: 'escalation', label: 'Sanctions progressives', emoji: '📈', description: 'Sanction plus lourde en cas de récidive' },
+  { value: 'newmembers', label: 'Nouveaux venus', emoji: '🐣', description: 'Restrictions des comptes récents' },
+  { value: 'notify', label: 'Notifications & exemptions', emoji: '🔔', description: 'Prévenir le membre, salons et rôles ignorés' },
+  { value: 'native', label: 'AutoMod de Discord', emoji: '🧱', description: 'Règles natives (actives même bot hors ligne)' },
+  { value: 'presets', label: 'Préréglages', emoji: '🎚️', description: 'Faible, Équilibré ou Strict en un clic' },
+  { value: 'stats:7', label: 'Statistiques', emoji: '📊', description: 'Infractions par filtre et par membre' },
+];
+
+// ---------------------------------------------------------------- helpers purs
 
 /** « 🟢 **Anti-spam** · Timeout (5m) ». Pur. */
 function filterLine(name, fc = {}) {
@@ -75,20 +128,94 @@ function newMembersText(nm) {
   return `🟢 Compte < ${nm.accountAgeDays} j ou arrivé < ${nm.joinedMinutes} min\nBloque : ${blocked.join(', ') || 'rien'}`;
 }
 
-/** Panneau AutoMod (éphémère) : état, filtres groupés, réglages, raccourcis. */
-function renderPanel(client, guildId, notice) {
-  const cfg = client.services.config.get(guildId).automod;
+/**
+ * « 3=timeout 10m, 5=timeout 1h, 8=kick » → paliers validés. Pur.
+ * @returns {Array<{ count:number, action:string, duration:string|null }>}
+ */
+function parseSteps(text) {
+  const steps = [];
+  for (const raw of String(text ?? '').split(/[,;\n]+/)) {
+    const part = raw.trim();
+    if (!part) continue;
+    const m = part.match(/^(\d{1,2})\s*[=:→>-]+\s*(timeout|kick|expulsion|exclusion)\s*(\S+)?$/i);
+    if (!m) throw new UserError(`Palier invalide : « ${truncate(part, 40)} ». Format : \`3=timeout 10m\` ou \`8=kick\`.`);
+    const count = Number(m[1]);
+    const action = /^(kick|expulsion)$/i.test(m[2]) ? 'kick' : 'timeout';
+    const duration = action === 'timeout' ? m[3] ?? '10m' : null;
+    if (count < 2 || count > 50) throw new UserError('Chaque palier doit être entre 2 et 50 infractions.');
+    if (action === 'timeout') {
+      const ms = parseDuration(duration);
+      if (!ms || ms > 28 * 86_400_000) throw new UserError(`Durée invalide « ${duration} » (ex : 10m, 1h, 1d ; 28 jours maximum).`);
+    }
+    steps.push({ count, action, duration });
+  }
+  if (!steps.length) throw new UserError('Indiquez au moins un palier.');
+  if (steps.length > 5) throw new UserError('5 paliers maximum.');
+  const counts = steps.map((s) => s.count);
+  if (new Set(counts).size !== counts.length) throw new UserError('Deux paliers ne peuvent pas avoir le même nombre d\'infractions.');
+  return steps.sort((a, b) => a.count - b.count);
+}
+
+const stepsToText = (steps = []) => steps.map((s) => `${s.count}=${s.action}${s.duration ? ` ${s.duration}` : ''}`).join(', ');
+
+/** Découpe une saisie « a, b\nc » en éléments. Pur. */
+const splitItems = (text) => String(text ?? '').split(/[,\n;]+/).map((s) => s.trim()).filter(Boolean);
+
+/** Normalise un domaine saisi (« https://www.Site.com/x » → « site.com »). */
+function cleanDomain(input) {
+  const d = String(input ?? '').trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/[/?#].*$/, '');
+  if (!/^[a-z0-9.-]+\.[a-z]{2,24}$/.test(d)) throw new UserError(`Domaine invalide : « ${truncate(input, 40)} ». Exemple : \`youtube.com\`.`);
+  return d;
+}
+
+function cleanInvite(input) {
+  const c = String(input ?? '').trim().replace(/^(https?:\/\/)?(www\.)?(discord\.gg|discord(app)?\.com\/invite)\//i, '').toLowerCase();
+  if (!/^[a-z0-9-]{2,32}$/.test(c)) throw new UserError(`Code d'invitation invalide : « ${truncate(input, 40)} ».`);
+  return c;
+}
+
+// ---------------------------------------------------------------- composants
+
+const CMD = 'automod';
+const backHome = () => actionButton({ command: 'automod', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
+
+function navRow(current) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('cmd:automod:nav')
+      .setPlaceholder('Aller à…')
+      .addOptions(NAV.map((o) => ({ ...o, default: o.value === current }))),
+  );
+}
+
+const input = (id, label, { value, placeholder, style = TextInputStyle.Short, max = 100, required = false } = {}) => {
+  // Discord limite les libellés de champ à 45 caractères.
+  const t = new TextInputBuilder().setCustomId(id).setLabel(truncate(label, 45)).setStyle(style).setMaxLength(max).setRequired(required);
+  if (value != null && String(value) !== '') t.setValue(String(value).slice(0, max));
+  if (placeholder) t.setPlaceholder(placeholder.slice(0, 100));
+  return new ActionRowBuilder().addComponents(t);
+};
+
+// ---------------------------------------------------------------- vues
+
+function cfgOf(client, guildId) {
+  return client.services.config.get(guildId).automod;
+}
+
+/** Accueil : état général, filtres groupés, réglages transverses. */
+function homeView(client, guildId, notice) {
+  const cfg = cfgOf(client, guildId);
   const active = FILTERS.filter((f) => cfg.filters?.[f]?.enabled).length;
-  const lines = GROUPS.flatMap(([title, keys]) => ['', `**${title}**`, ...keys.map((k) => filterLine(k, cfg.filters?.[k]))]);
+  const lines = Object.values(GROUPS).flatMap((g) => ['', `**${g.emoji} ${g.label}**`, ...g.filters.map((k) => filterLine(k, cfg.filters?.[k]))]);
   return {
     embeds: [
       card({
         tone: cfg.enabled ? 'success' : 'neutral',
         section: 'automod',
         icon: ICONS.automod,
-        title: 'AutoMod',
+        title: 'AutoMod · Tableau de bord',
         description: [
-          notice ? `${ICONS.success} ${notice}` : null,
+          notice ? `${ICONS.success} ${notice}\n` : null,
           cfg.enabled ? '🟢 Le filtrage automatique est **actif**.' : '🔴 Le filtrage automatique est **désactivé**.',
           `\`${progressBar(active / FILTERS.length, 14)}\` **${active}** / ${FILTERS.length} filtres`,
           ...lines,
@@ -99,24 +226,391 @@ function renderPanel(client, guildId, notice) {
           field('🔔', 'Prévenir le membre', NOTIFY_LABELS[cfg.notify] ?? NOTIFY_LABELS.none),
           field(ICONS.channel, 'Salons ignorés', fitList((cfg.ignoredChannels ?? []).map((c) => `<#${c}>`), 1000) ?? '*Aucun*'),
           field(ICONS.role, 'Rôles ignorés', fitList((cfg.ignoredRoles ?? []).map((r) => `<@&${r}>`), 1000) ?? '*Aucun*'),
-          field('✅', 'Liste blanche', `${cfg.filters?.antiLink?.allowedDomains?.length ?? 0} domaine(s) · ${cfg.filters?.antiInvite?.allowedCodes?.length ?? 0} invitation(s)`),
+          field('✅', 'Listes', `${cfg.filters?.badWords?.words?.length ?? 0} mot(s) interdit(s)\n${cfg.filters?.antiLink?.allowedDomains?.length ?? 0} domaine(s) · ${cfg.filters?.antiInvite?.allowedCodes?.length ?? 0} invitation(s) autorisés`),
         ],
-        footer: 'Les membres avec « Gérer les messages » ne sont jamais filtrés.',
+        footer: 'Choisissez une section dans le menu · « Gérer les messages » n\'est jamais filtré',
       }),
     ],
-    components: buttonRows(
-      cfg.enabled
-        ? actionButton({ command: 'automod', action: 'toggle', args: ['off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
-        : actionButton({ command: 'automod', action: 'toggle', args: ['on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
-      actionButton({ command: 'automod', action: 'test', label: 'Tester un message', emoji: '🧪' }),
-      actionButton({ command: 'automod', action: 'stats', args: ['7'], label: 'Statistiques', emoji: ICONS.stats }),
-    ),
+    components: [
+      navRow('home'),
+      ...buttonRows(
+        cfg.enabled
+          ? actionButton({ command: 'automod', action: 'toggle', args: ['off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'automod', action: 'toggle', args: ['on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+        actionButton({ command: 'automod', action: 'test', label: 'Tester un message', emoji: '🧪', style: ButtonStyle.Primary }),
+        actionButton({ command: 'automod', action: 'go', args: ['presets'], label: 'Préréglages', emoji: '🎚️' }),
+        actionButton({ command: 'automod', action: 'go', args: ['home'], label: 'Actualiser', emoji: ICONS.refresh }),
+      ),
+    ],
   };
 }
 
-/** Analyse « à blanc » d'un texte (sans sanction, sans compter le spam). */
+/** Liste des filtres d'un groupe, avec un menu pour en régler un. */
+function groupView(client, guildId, groupKey, notice) {
+  const group = GROUPS[groupKey] ?? GROUPS.security;
+  const cfg = cfgOf(client, guildId);
+  const details = group.filters.map((k) => {
+    const fc = cfg.filters?.[k] ?? {};
+    const extras = [];
+    const t = THRESHOLDS[k];
+    if (t && fc[t[0]] != null) extras.push(`${fc[t[0]]} ${t[1]}`);
+    if (WINDOWS[k] && fc.windowSeconds) extras.push(`sur ${fc.windowSeconds} s`);
+    return `${filterLine(k, fc)}${extras.length ? ` · ${extras.join(' ')}` : ''}\n${subtext(FILTER_INFO[k])}`;
+  });
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: 'automod',
+        icon: group.emoji,
+        title: `Filtres · ${group.label}`,
+        description: [notice ? `${ICONS.success} ${notice}\n` : null, details.join('\n\n')],
+        footer: 'Choisissez un filtre dans le menu pour le régler',
+      }),
+    ],
+    components: [
+      navRow(`grp:${groupKey}`),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`cmd:automod:fpick:${groupKey}`)
+          .setPlaceholder('Régler un filtre…')
+          .addOptions(group.filters.map((k) => ({
+            value: k,
+            label: FILTER_LABELS[k],
+            emoji: cfg.filters?.[k]?.enabled ? '🟢' : '🔴',
+            description: truncate(FILTER_INFO[k], 100),
+          }))),
+      ),
+      ...buttonRows(backHome()),
+    ],
+  };
+}
+
+/** Vue détaillée d'un filtre : activation, sanction, réglages. */
+function filterView(client, guildId, key, notice) {
+  if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+  const cfg = cfgOf(client, guildId);
+  const fc = cfg.filters?.[key] ?? {};
+  const t = THRESHOLDS[key];
+  const hasSettings = Boolean(t || WINDOWS[key] || fc.action === 'timeout');
+  const fields = [
+    field(ICONS.status, 'État', fc.enabled ? '🟢 Actif' : '🔴 Désactivé'),
+    field(ICONS.shield, 'Sanction', ACTION_LABELS[fc.action] ?? ACTION_LABELS.delete),
+    field(ICONS.duration, 'Durée du timeout', fc.action === 'timeout' ? fc.duration ?? '5m' : '—'),
+  ];
+  if (t) fields.push(field(ICONS.count, 'Seuil', `${fc[t[0]] ?? '—'} ${t[1]}`));
+  if (WINDOWS[key]) fields.push(field(ICONS.time, 'Fenêtre', `${fc.windowSeconds ?? '—'} s`));
+  if (key === 'badWords') fields.push(field('🚫', 'Mots', `${fc.words?.length ?? 0} (section Listes)`));
+  if (key === 'antiLink') fields.push(field('🌐', 'Domaines autorisés', `${fc.allowedDomains?.length ?? 0} (section Listes)`));
+  if (key === 'antiInvite') fields.push(field('✉️', 'Invitations autorisées', `${fc.allowedCodes?.length ?? 0} (section Listes)`));
+  return {
+    embeds: [
+      card({
+        tone: fc.enabled ? 'success' : 'neutral',
+        section: 'automod',
+        icon: GROUPS[groupOf(key)].emoji,
+        title: FILTER_LABELS[key],
+        description: [notice ? `${ICONS.success} ${notice}\n` : null, FILTER_INFO[key]],
+        fields,
+        footer: 'La sanction la plus sévère l\'emporte si plusieurs filtres se déclenchent',
+      }),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`cmd:automod:faction:${key}`)
+          .setPlaceholder('Sanction…')
+          .addOptions(
+            { value: 'delete', label: 'Suppression', emoji: '🗑️', description: 'Le message est retiré', default: (fc.action ?? 'delete') === 'delete' },
+            { value: 'warn', label: 'Avertissement', emoji: ICONS.warn, description: 'Retiré + avertissement (+1 strike)', default: fc.action === 'warn' },
+            { value: 'timeout', label: 'Timeout', emoji: ICONS.mute, description: 'Retiré + exclusion temporaire', default: fc.action === 'timeout' },
+          ),
+      ),
+      ...buttonRows(
+        fc.enabled
+          ? actionButton({ command: 'automod', action: 'ftoggle', args: [key], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'automod', action: 'ftoggle', args: [key], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+        hasSettings ? actionButton({ command: 'automod', action: 'fset', args: [key], label: 'Réglages', emoji: ICONS.settings, style: ButtonStyle.Primary }) : null,
+        ['badWords', 'antiLink', 'antiInvite'].includes(key) ? actionButton({ command: 'automod', action: 'go', args: ['lists'], label: 'Listes', emoji: ICONS.list }) : null,
+        actionButton({ command: 'automod', action: 'go', args: [`grp.${groupOf(key)}`], label: 'Retour', emoji: ICONS.back }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function listsView(client, guildId, notice) {
+  const cfg = cfgOf(client, guildId);
+  const words = cfg.filters?.badWords?.words ?? [];
+  const domains = cfg.filters?.antiLink?.allowedDomains ?? [];
+  const codes = cfg.filters?.antiInvite?.allowedCodes ?? [];
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: 'automod',
+        icon: ICONS.list,
+        title: 'Listes',
+        description: notice ? `${notice}` : 'Modifiez une liste avec les boutons ci-dessous.',
+        fields: [
+          wide('🚫', `Mots interdits (${words.length}/1000)`, words.length ? truncate(words.map(code).join(' · '), 1024) : '*Aucun*'),
+          wide('🌐', `Domaines autorisés (${domains.length})`, domains.length ? truncate(domains.map(code).join(' · '), 1024) : '*Aucun* — quand l\'anti-liens est actif, seuls les GIF Discord/Tenor passent.'),
+          wide('✉️', `Invitations autorisées (${codes.length})`, codes.length ? truncate(codes.map((c) => code(`discord.gg/${c}`)).join(' · '), 1024) : '*Aucune* — l\'invitation personnalisée du serveur reste autorisée.'),
+        ],
+        footer: 'Astuce : « mot* » bloque aussi les mots qui commencent par « mot »',
+      }),
+    ],
+    components: [
+      navRow('lists'),
+      ...buttonRows(
+        actionButton({ command: 'automod', action: 'list', args: ['words'], label: 'Mots interdits', emoji: '🚫', style: ButtonStyle.Primary }),
+        actionButton({ command: 'automod', action: 'list', args: ['domains'], label: 'Domaines', emoji: '🌐' }),
+        actionButton({ command: 'automod', action: 'list', args: ['invites'], label: 'Invitations', emoji: '✉️' }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function escalationView(client, guildId, notice) {
+  const esc = cfgOf(client, guildId).escalation ?? {};
+  return {
+    embeds: [
+      card({
+        tone: esc.enabled ? 'success' : 'neutral',
+        section: 'automod',
+        icon: '📈',
+        title: 'Sanctions progressives',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          'En cas de récidive, la sanction monte automatiquement. Le compteur survit aux redémarrages.',
+        ],
+        fields: [
+          field(ICONS.status, 'État', esc.enabled ? '🟢 Actives' : '🔴 Désactivées'),
+          field(ICONS.time, 'Fenêtre', `${esc.windowMinutes ?? 30} min`),
+          wide('🪜', 'Paliers', bullets((esc.steps ?? []).map((s) => `**${s.count}** infractions → ${ACTION_LABELS[s.action] ?? s.action}${s.duration ? ` **${s.duration}**` : ''}`))),
+        ],
+      }),
+    ],
+    components: [
+      navRow('escalation'),
+      ...buttonRows(
+        actionButton({ command: 'automod', action: 'esc', args: ['toggle'], label: esc.enabled ? 'Désactiver' : 'Activer', emoji: esc.enabled ? '🔴' : '🟢', style: esc.enabled ? ButtonStyle.Danger : ButtonStyle.Success }),
+        actionButton({ command: 'automod', action: 'esc', args: ['set'], label: 'Fenêtre et paliers', emoji: ICONS.settings, style: ButtonStyle.Primary }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function newMembersView(client, guildId, notice) {
+  const nm = cfgOf(client, guildId).newMembers ?? {};
+  const flag = (on) => (on ? '✅' : '❌');
+  return {
+    embeds: [
+      card({
+        tone: nm.enabled ? 'success' : 'neutral',
+        section: 'automod',
+        icon: '🐣',
+        title: 'Nouveaux venus',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          'Pendant leur période de probation, les comptes récents ou fraîchement arrivés ne peuvent pas poster certains contenus.',
+        ],
+        fields: [
+          field(ICONS.status, 'État', nm.enabled ? '🟢 Active' : '🔴 Désactivée'),
+          field(ICONS.date, 'Compte de moins de', `${nm.accountAgeDays ?? 7} jour(s)`),
+          field('📥', 'Ou arrivé depuis moins de', `${nm.joinedMinutes ?? 30} min`),
+          field(ICONS.link, 'Liens', flag(nm.blockLinks)),
+          field('✉️', 'Invitations', flag(nm.blockInvites)),
+          field('📎', 'Fichiers et stickers', flag(nm.blockMedia)),
+        ],
+        footer: 'Les GIF Discord/Tenor et la liste blanche restent autorisés',
+      }),
+    ],
+    components: [
+      navRow('newmembers'),
+      ...buttonRows(
+        actionButton({ command: 'automod', action: 'nm', args: ['enabled'], label: nm.enabled ? 'Désactiver' : 'Activer', emoji: nm.enabled ? '🔴' : '🟢', style: nm.enabled ? ButtonStyle.Danger : ButtonStyle.Success }),
+        actionButton({ command: 'automod', action: 'nm', args: ['blockLinks'], label: `Liens ${flag(nm.blockLinks)}` }),
+        actionButton({ command: 'automod', action: 'nm', args: ['blockInvites'], label: `Invitations ${flag(nm.blockInvites)}` }),
+        actionButton({ command: 'automod', action: 'nm', args: ['blockMedia'], label: `Fichiers ${flag(nm.blockMedia)}` }),
+        actionButton({ command: 'automod', action: 'nm', args: ['set'], label: 'Durées', emoji: ICONS.settings, style: ButtonStyle.Primary }),
+      ),
+      ...buttonRows(backHome()),
+    ],
+  };
+}
+
+function notifyView(client, guildId, notice) {
+  const cfg = cfgOf(client, guildId);
+  // Présélection : uniquement des salons existants et d'un type accepté par le menu.
+  const allowedTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice];
+  const cache = client.guilds?.cache?.get(guildId)?.channels?.cache;
+  const channels = (cfg.ignoredChannels ?? [])
+    .filter((id) => !cache || allowedTypes.includes(cache.get(id)?.type))
+    .slice(0, MAX_IGNORED);
+  const roles = (cfg.ignoredRoles ?? []).slice(0, MAX_IGNORED);
+  const channelMenu = new ChannelSelectMenuBuilder()
+    .setCustomId('cmd:automod:ignch')
+    .setPlaceholder('Salons ignorés (aucun)')
+    .setChannelTypes(...allowedTypes)
+    .setMinValues(0)
+    .setMaxValues(MAX_IGNORED);
+  if (channels.length) channelMenu.setDefaultChannels(...channels);
+  const roleMenu = new RoleSelectMenuBuilder().setCustomId('cmd:automod:ignrole').setPlaceholder('Rôles ignorés (aucun)').setMinValues(0).setMaxValues(MAX_IGNORED);
+  if (roles.length) roleMenu.setDefaultRoles(...roles);
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: 'automod',
+        icon: '🔔',
+        title: 'Notifications & exemptions',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          'Choisissez comment prévenir le membre, puis les salons et rôles que l\'AutoMod doit ignorer. Les fils suivent leur salon parent.',
+        ],
+        fields: [
+          field('🔔', 'Prévenir le membre', NOTIFY_LABELS[cfg.notify] ?? NOTIFY_LABELS.none),
+          field(ICONS.channel, 'Salons ignorés', `${channels.length}`),
+          field(ICONS.role, 'Rôles ignorés', `${roles.length}`),
+        ],
+        footer: `${MAX_IGNORED} salons et ${MAX_IGNORED} rôles maximum · « Gérer les messages » n'est jamais filtré`,
+      }),
+    ],
+    components: [
+      navRow('notify'),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('cmd:automod:notify')
+          .setPlaceholder('Prévenir le membre…')
+          .addOptions(Object.entries(NOTIFY_LABELS).map(([value, label]) => ({ value, label, default: (cfg.notify ?? 'none') === value }))),
+      ),
+      new ActionRowBuilder().addComponents(channelMenu),
+      new ActionRowBuilder().addComponents(roleMenu),
+    ],
+  };
+}
+
+async function nativeView(client, guild, notice) {
+  const rules = await native.ownRules(guild).catch(() => null);
+  const desired = native.desiredRules(cfgOf(client, guild.id));
+  return {
+    embeds: [
+      card({
+        tone: rules?.length ? 'success' : 'neutral',
+        section: 'automod',
+        icon: '🧱',
+        title: 'AutoMod natif de Discord',
+        description: [
+          notice ? `${notice}\n` : null,
+          'Les règles natives bloquent les messages **avant leur envoi**, même quand le bot est hors ligne. Elles reprennent vos filtres actifs : mots interdits (+ contenu offensant), anti-spam, mentions de masse.',
+        ],
+        fields: [
+          wide('📜', 'Règles en place', rules == null ? '⚠️ Lecture impossible : il me faut **Gérer le serveur**.' : rules.length ? rules.map((r) => `${r.enabled ? '🟢' : '🔴'} ${r.name}`).join('\n') : '*Aucune*'),
+          wide('🎯', 'Après synchronisation', desired.length ? desired.map((r) => `› ${r.name}`).join('\n') : '*Aucune : activez les mots interdits, l\'anti-spam ou les mentions de masse.*'),
+        ],
+        footer: 'Discord exempte d\'office « Gérer le serveur » et les administrateurs',
+      }),
+    ],
+    components: [
+      navRow('native'),
+      ...buttonRows(
+        actionButton({ command: 'automod', action: 'native', args: ['sync'], label: 'Synchroniser', emoji: ICONS.refresh, style: ButtonStyle.Primary }),
+        actionButton({ command: 'automod', action: 'native', args: ['remove'], label: 'Retirer les règles', emoji: ICONS.delete, style: ButtonStyle.Danger }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function presetsView(notice) {
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: 'automod',
+        icon: '🎚️',
+        title: 'Préréglages',
+        description: [notice ? `${ICONS.success} ${notice}\n` : null, 'Applique une configuration complète et active l\'AutoMod. **Vos listes** (mots, domaines, invitations), salons et rôles ignorés **sont conservés**.'],
+        fields: Object.values(PRESETS).map((p) => wide(p.emoji, p.label, p.description)),
+      }),
+    ],
+    components: [
+      navRow('presets'),
+      ...buttonRows(
+        ...Object.entries(PRESETS).map(([key, p]) => actionButton({ command: 'automod', action: 'preset', args: [key], label: p.label, emoji: p.emoji, style: key === 'equilibre' ? ButtonStyle.Primary : ButtonStyle.Secondary })),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function statsView(client, guild, days) {
+  const repo = client.repositories?.automodEvents;
+  const s = repo ? repo.stats(guild.id, Date.now() - days * 86_400_000) : null;
+  const max = s?.byFilter?.[0]?.n ?? 1;
+  const label = (f) => FILTER_LABELS[f] ?? (f === 'newMembers' ? 'Nouveaux venus' : f);
+  const embed = !s || !s.total
+    ? card({ tone: 'info', section: 'automod', icon: ICONS.stats, title: `Statistiques · ${days} jour(s)`, description: s ? 'Aucune infraction sur cette période. ✨' : 'Statistiques indisponibles.' })
+    : card({
+      tone: 'info',
+      section: 'automod',
+      icon: ICONS.stats,
+      title: `Statistiques · ${days} jour(s)`,
+      description: s.byFilter.slice(0, 10).map((r) => `\`${progressBar(r.n / max, 10)}\` **${r.n}** · ${label(r.filter)}`),
+      fields: [
+        field(ICONS.count, 'Infractions', `**${s.total}**`),
+        field(ICONS.members, 'Membres concernés', `**${s.users}**`),
+        field(ICONS.shield, 'Sanctions', s.byAction.map((a) => `${ACTION_LABELS[a.action] ?? a.action} : **${a.n}**`).join('\n')),
+        wide('🏴', 'Membres les plus filtrés', s.topUsers.map((u, i) => `${i + 1}. <@${u.user_id}> — **${u.n}**`).join('\n')),
+      ],
+    });
+  return {
+    embeds: [embed],
+    components: [
+      navRow(`stats:${days}`),
+      ...buttonRows(
+        ...[1, 7, 30].map((d) => actionButton({ command: 'automod', action: 'go', args: [`stats.${d}`], label: d === 1 ? '24 h' : `${d} jours`, style: d === days ? ButtonStyle.Primary : ButtonStyle.Secondary })),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+/** Rend une vue à partir de son identifiant (« grp:spam », « filter:antiLink », « stats:7 »…). */
+async function render(client, guild, view = 'home', notice) {
+  // « grp:spam » (menu) ou « grp.spam » (bouton : « : » est réservé au routeur).
+  const [name, arg] = String(view).split(/[:.]/);
+  switch (name) {
+    case 'grp':
+      return groupView(client, guild.id, GROUPS[arg] ? arg : 'security', notice);
+    case 'filter':
+      return filterView(client, guild.id, arg, notice);
+    case 'lists':
+      return listsView(client, guild.id, notice);
+    case 'escalation':
+      return escalationView(client, guild.id, notice);
+    case 'newmembers':
+      return newMembersView(client, guild.id, notice);
+    case 'notify':
+      return notifyView(client, guild.id, notice);
+    case 'native':
+      return nativeView(client, guild, notice);
+    case 'presets':
+      return presetsView(notice);
+    case 'stats':
+      return statsView(client, guild, [1, 7, 30].includes(Number(arg)) ? Number(arg) : 7);
+    default:
+      return homeView(client, guild.id, notice);
+  }
+}
+
+// ---------------------------------------------------------------- test à blanc
+
 function analyse(client, guild, text) {
-  const cfg = client.services.config.get(guild.id).automod;
+  const cfg = cfgOf(client, guild.id);
   // Tous les filtres de contenu sont testés, même désactivés, pour montrer ce qu'ils feraient.
   const allOn = Object.fromEntries(Object.entries(cfg.filters ?? {}).map(([k, v]) => [k, { ...v, enabled: true }]));
   const fake = { guild, author: { id: '0', createdTimestamp: 0 }, content: text, mentions: null, channel: null };
@@ -126,7 +620,7 @@ function analyse(client, guild, text) {
     const hit = client.services.automod.inspect(fake, { [key]: allOn[key] }, { temporal: false });
     if (hit) results.push({ key, hit, enabled: Boolean(cfg.filters?.[key]?.enabled) });
   }
-  const scan = phishingScore(text);
+  const scan = phishingScore(text, { allowedDomains: cfg.filters?.antiLink?.allowedDomains });
   return { results, scan, normalized: variants(text).at(-1), cfg };
 }
 
@@ -153,357 +647,333 @@ function analysisCard(client, guild, text) {
       scan.links.length ? field('🎣', 'Score d\'arnaque', `**${scan.score}** / seuil ${cfg.filters?.antiPhishing?.threshold ?? 3}`) : null,
       scan.reasons.length ? wide(ICONS.search, 'Indices', truncate(scan.reasons.join('\n'), 1024)) : null,
     ],
-    footer: 'Test à blanc : aucune sanction, le spam et les doublons ne sont pas évalués.',
+    footer: 'Test à blanc : aucune sanction ; le spam et les doublons ne sont pas évalués',
   });
 }
 
-function statsCard(client, guild, days) {
-  const repo = client.repositories?.automodEvents;
-  if (!repo) return status.note('Les statistiques ne sont pas disponibles.');
-  const s = repo.stats(guild.id, Date.now() - days * 86_400_000);
-  if (!s.total) return status.note(`Aucune infraction ces **${days}** derniers jours. ✨`, 'Statistiques AutoMod');
-  const max = s.byFilter[0]?.n ?? 1;
-  return card({
-    tone: 'info',
-    section: 'automod',
-    icon: ICONS.stats,
-    title: `AutoMod · ${days} derniers jours`,
-    description: s.byFilter.slice(0, 10).map((r) => `\`${progressBar(r.n / max, 10)}\` **${r.n}** · ${FILTER_LABELS[r.filter] ?? (r.filter === 'newMembers' ? 'Nouveaux venus' : r.filter)}`),
-    fields: [
-      field(ICONS.count, 'Infractions', `**${s.total}**`),
-      field(ICONS.members, 'Membres concernés', `**${s.users}**`),
-      field(ICONS.shield, 'Actions', s.byAction.map((a) => `${ACTION_LABELS[a.action] ?? a.action} : **${a.n}**`).join('\n')),
-      wide('🏴', 'Membres les plus filtrés', s.topUsers.map((u, i) => `${i + 1}. <@${u.user_id}> — **${u.n}**`).join('\n')),
-    ],
-  });
-}
-
-function listCard(cfg, notice) {
-  const words = cfg.filters?.badWords?.words ?? [];
-  const domains = cfg.filters?.antiLink?.allowedDomains ?? [];
-  const codes = cfg.filters?.antiInvite?.allowedCodes ?? [];
-  return card({
-    tone: 'info',
-    section: 'automod',
-    icon: ICONS.list,
-    title: 'Listes de l\'AutoMod',
-    description: notice ? `${ICONS.success} ${notice}` : null,
-    fields: [
-      wide('🚫', `Mots interdits (${words.length})`, words.length ? truncate(words.map(code).join(' · '), 1024) : '*Aucun*'),
-      wide('🌐', `Domaines autorisés (${domains.length})`, domains.length ? truncate(domains.map(code).join(' · '), 1024) : '*Aucun : tous les liens sont bloqués quand l\'anti-liens est actif.*'),
-      wide('✉️', `Invitations autorisées (${codes.length})`, codes.length ? truncate(codes.map((c) => code(`discord.gg/${c}`)).join(' · '), 1024) : '*Aucune* (l\'invitation personnalisée du serveur reste autorisée)'),
-    ],
-    footer: 'Astuce : « mot* » bloque aussi les mots qui commencent par « mot ».',
-  });
-}
+// ---------------------------------------------------------------- formulaires
 
 function testModal() {
   return new ModalBuilder()
     .setCustomId('cmd:automod:testsubmit')
     .setTitle('Tester l\'AutoMod')
+    .addComponents(input('text', 'Message à tester', { style: TextInputStyle.Paragraph, max: 1500, required: true }));
+}
+
+function filterModal(cfg, key) {
+  const fc = cfg.filters?.[key] ?? {};
+  const t = THRESHOLDS[key];
+  const rows = [input('duration', 'Durée du timeout (ex : 10m, 1h, 1d)', { value: fc.duration ?? '5m', max: 10 })];
+  if (t) rows.push(input('threshold', `Seuil : ${t[2]} à ${t[3]} ${t[1]}`, { value: fc[t[0]], max: 3 }));
+  if (WINDOWS[key]) rows.push(input('window', `Fenêtre : ${WINDOWS[key][0]} à ${WINDOWS[key][1]} secondes`, { value: fc.windowSeconds, max: 3 }));
+  if (key === 'antiCrossChannel') rows.push(input('minLength', 'Longueur minimale du message (5 à 200)', { value: fc.minLength ?? 20, max: 3 }));
+  if (key === 'antiWall') rows.push(input('maxLength', 'Caractères maximum (200 à 4000)', { value: fc.maxLength ?? 1500, max: 4 }));
+  return new ModalBuilder().setCustomId(`cmd:automod:fsetsubmit:${key}`).setTitle(truncate(`Réglages · ${FILTER_LABELS[key]}`, 45)).addComponents(...rows);
+}
+
+const LIST_META = {
+  words: { title: 'Mots interdits', example: 'con, arnaque*, insulte' },
+  domains: { title: 'Domaines autorisés', example: 'youtube.com, twitch.tv' },
+  invites: { title: 'Invitations autorisées', example: 'discord.gg/partenaire' },
+};
+
+function listModal(kind) {
+  const meta = LIST_META[kind];
+  return new ModalBuilder()
+    .setCustomId(`cmd:automod:listsubmit:${kind}`)
+    .setTitle(meta.title)
     .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('text').setLabel('Message à tester').setStyle(TextInputStyle.Paragraph).setMaxLength(1500).setRequired(true),
-      ),
+      input('add', 'À ajouter (virgules ou retours à la ligne)', { style: TextInputStyle.Paragraph, max: 2000, placeholder: meta.example }),
+      input('remove', 'À retirer', { style: TextInputStyle.Paragraph, max: 2000 }),
     );
 }
 
-/** Normalise un domaine saisi (« https://www.Site.com/x » → « site.com »). */
-function cleanDomain(input) {
-  const d = String(input ?? '').trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/[/?#].*$/, '');
-  if (!/^[a-z0-9.-]+\.[a-z]{2,24}$/.test(d)) throw new UserError('Domaine invalide. Exemple : `youtube.com`.');
-  return d;
+function escalationModal(esc = {}) {
+  return new ModalBuilder()
+    .setCustomId('cmd:automod:escsubmit')
+    .setTitle('Sanctions progressives')
+    .addComponents(
+      input('window', 'Fenêtre de récidive (minutes, 5 à 1440)', { value: esc.windowMinutes ?? 30, max: 4, required: true }),
+      input('steps', 'Paliers (ex : 3=timeout 10m, 8=kick)', {
+        value: stepsToText(esc.steps),
+        placeholder: '3=timeout 10m, 5=timeout 1h, 8=kick',
+        style: TextInputStyle.Paragraph,
+        max: 300,
+        required: true,
+      }),
+    );
 }
 
-function cleanInvite(input) {
-  const c = String(input ?? '').trim().replace(/^(https?:\/\/)?(www\.)?(discord\.gg|discord(app)?\.com\/invite)\//i, '').toLowerCase();
-  if (!/^[a-z0-9-]{2,32}$/.test(c)) throw new UserError('Code d\'invitation invalide. Exemple : `discord.gg/monserveur` ou `monserveur`.');
-  return c;
+function newMembersModal(nm = {}) {
+  return new ModalBuilder()
+    .setCustomId('cmd:automod:nmsubmit')
+    .setTitle('Nouveaux venus')
+    .addComponents(
+      input('days', 'Âge minimal du compte (jours, 0 à 90)', { value: nm.accountAgeDays ?? 7, max: 2, required: true }),
+      input('minutes', 'Présence minimale (minutes, 0 à 10080)', { value: nm.joinedMinutes ?? 30, max: 5, required: true }),
+    );
 }
 
-const filterChoices = FILTERS.map((f) => ({ name: FILTER_LABELS[f], value: f }));
+/** Entier borné saisi dans un formulaire (vide = valeur actuelle). */
+function intField(interaction, id, min, max, label) {
+  let raw;
+  try {
+    raw = interaction.fields.getTextInputValue(id)?.trim();
+  } catch {
+    return undefined;
+  }
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) throw new UserError(`${label} : entrez un nombre entier entre ${min} et ${max}.`);
+  return n;
+}
+
+// ---------------------------------------------------------------- commande
+
+const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
 
 module.exports = {
   category: 'automod',
+  cooldown: 3_000,
   filterLine,
   analyse,
+  parseSteps,
+  render,
   data: new SlashCommandBuilder()
     .setName('automod')
-    .setDescription('Configuration de l\'AutoMod.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand((s) => s.setName('status').setDescription('Affiche le panneau de l\'AutoMod.'))
-    .addSubcommand((s) => s.setName('enable').setDescription('Active l\'AutoMod.'))
-    .addSubcommand((s) => s.setName('disable').setDescription('Désactive l\'AutoMod.'))
-    .addSubcommand((s) =>
-      s.setName('preset').setDescription('Applique un préréglage complet (conserve vos listes).')
-        .addStringOption((o) => o.setName('niveau').setDescription('Niveau de protection').setRequired(true).addChoices(
-          ...Object.entries(PRESETS).map(([value, p]) => ({ name: `${p.emoji} ${p.label} — ${p.description}`.slice(0, 100), value })),
-        )))
-    .addSubcommand((s) =>
-      s.setName('filter').setDescription('Règle un filtre : activation, sanction, seuil.')
-        .addStringOption((o) => o.setName('nom').setDescription('Filtre').setRequired(true).addChoices(...filterChoices))
-        .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?').setRequired(true))
-        .addStringOption((o) => o.setName('action').setDescription('Sanction').addChoices(
-          { name: 'Suppression', value: 'delete' }, { name: 'Avertissement (+1 strike)', value: 'warn' }, { name: 'Timeout', value: 'timeout' },
-        ))
-        .addStringOption((o) => o.setName('duree').setDescription('Durée du timeout (ex : 10m, 1h, 1d)').setMaxLength(10))
-        .addIntegerOption((o) => o.setName('seuil').setDescription('Seuil du filtre (messages, mentions, %, salons…)').setMinValue(1).setMaxValue(100)))
-    .addSubcommand((s) =>
-      s.setName('test').setDescription('Teste un message sans sanction : quels filtres le bloqueraient ?')
-        .addStringOption((o) => o.setName('texte').setDescription('Message à tester').setRequired(true).setMaxLength(1500)))
-    .addSubcommand((s) =>
-      s.setName('stats').setDescription('Statistiques des infractions.')
-        .addIntegerOption((o) => o.setName('jours').setDescription('Période (1 à 30 jours, défaut 7)').setMinValue(1).setMaxValue(30)))
-    .addSubcommand((s) =>
-      s.setName('escalade').setDescription('Sanctions progressives en cas de récidive.')
-        .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?').setRequired(true))
-        .addIntegerOption((o) => o.setName('fenetre').setDescription('Fenêtre de récidive en minutes (5 à 1440)').setMinValue(5).setMaxValue(1440)))
-    .addSubcommand((s) =>
-      s.setName('nouveaux').setDescription('Restrictions pour les nouveaux venus.')
-        .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?').setRequired(true))
-        .addIntegerOption((o) => o.setName('age_compte').setDescription('Âge minimal du compte en jours (0 à 90)').setMinValue(0).setMaxValue(90))
-        .addIntegerOption((o) => o.setName('anciennete').setDescription('Présence minimale sur le serveur en minutes (0 à 10080)').setMinValue(0).setMaxValue(10080))
-        .addBooleanOption((o) => o.setName('liens').setDescription('Bloquer leurs liens'))
-        .addBooleanOption((o) => o.setName('invitations').setDescription('Bloquer leurs invitations'))
-        .addBooleanOption((o) => o.setName('fichiers').setDescription('Bloquer leurs fichiers et stickers')))
-    .addSubcommand((s) =>
-      s.setName('notification').setDescription('Comment prévenir le membre dont le message est retiré.')
-        .addStringOption((o) => o.setName('mode').setDescription('Mode').setRequired(true).addChoices(
-          { name: 'Dans le salon (supprimé après 8 s)', value: 'channel' }, { name: 'En message privé', value: 'dm' }, { name: 'Aucune', value: 'none' },
-        )))
-    .addSubcommand((s) =>
-      s.setName('ignore').setDescription('Ajoute/retire un salon ou rôle ignoré.')
-        .addChannelOption((o) => o.setName('salon').setDescription('Salon à (dé)ignorer').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle à (dé)ignorer')))
-    .addSubcommand((s) =>
-      s.setName('discord').setDescription('Synchronise l\'AutoMod natif de Discord (actif même bot hors ligne).')
-        .addStringOption((o) => o.setName('action').setDescription('Action').setRequired(true).addChoices(
-          { name: 'Activer / mettre à jour', value: 'sync' }, { name: 'Retirer les règles', value: 'remove' }, { name: 'État', value: 'status' },
-        )))
-    .addSubcommandGroup((g) =>
-      g.setName('badword').setDescription('Mots interdits')
-        .addSubcommand((s) => s.setName('add').setDescription('Ajoute des mots interdits (séparés par des virgules ; « mot* » = préfixe).').addStringOption((o) => o.setName('mot').setDescription('Mot(s)').setRequired(true).setMaxLength(500)))
-        .addSubcommand((s) => s.setName('remove').setDescription('Retire un mot interdit.').addStringOption((o) => o.setName('mot').setDescription('Mot').setRequired(true).setMaxLength(100)))
-        .addSubcommand((s) => s.setName('list').setDescription('Affiche les listes de l\'AutoMod.')))
-    .addSubcommandGroup((g) =>
-      g.setName('autoriser').setDescription('Liste blanche des liens et invitations')
-        .addSubcommand((s) => s.setName('domaine').setDescription('Autorise/retire un domaine (ex : youtube.com).').addStringOption((o) => o.setName('domaine').setDescription('Domaine').setRequired(true).setMaxLength(200)))
-        .addSubcommand((s) => s.setName('invitation').setDescription('Autorise/retire une invitation Discord.').addStringOption((o) => o.setName('code').setDescription('Code ou lien d\'invitation').setRequired(true).setMaxLength(100)))),
+    .setDescription('Ouvre le tableau de bord de l\'AutoMod : tout se configure depuis ici.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction, client) {
-    const group = interaction.options.getSubcommandGroup(false);
-    const sub = interaction.options.getSubcommand();
-    const { config } = client.services;
-    const guildId = interaction.guild.id;
-    const cfg = () => config.get(guildId).automod;
-    const panel = (notice) => interaction.reply({ ...renderPanel(client, guildId, notice), ephemeral: true });
-
-    if (group === 'badword') {
-      const words = new Set(cfg().filters.badWords.words || []);
-      if (sub === 'list') return interaction.reply({ embeds: [listCard(cfg())], ephemeral: true });
-      if (sub === 'add') {
-        const added = interaction.options.getString('mot').split(',').map((w) => w.trim().toLowerCase()).filter((w) => w && w.length <= 60);
-        if (!added.length) throw new UserError('Aucun mot valide (60 caractères maximum par mot).');
-        if (words.size + added.length > 1000) throw new UserError('La liste est limitée à 1000 mots.');
-        added.forEach((w) => words.add(w));
-        // Seul l'ajout active le filtre : retirer un mot ne doit pas réactiver un filtre désactivé.
-        config.update(guildId, { automod: { filters: { badWords: { words: [...words], enabled: true } } } });
-        return interaction.reply({ embeds: [listCard(cfg(), `${added.length} mot(s) ajouté(s) : ${added.map(code).join(', ')}.`)], ephemeral: true });
-      }
-      const word = interaction.options.getString('mot').trim().toLowerCase();
-      if (!words.delete(word)) throw new UserError(`${code(word)} n'est pas dans la liste.`);
-      config.update(guildId, { automod: { filters: { badWords: { words: [...words] } } } });
-      return interaction.reply({ embeds: [listCard(cfg(), `Mot ${code(word)} retiré.`)], ephemeral: true });
-    }
-
-    if (group === 'autoriser') {
-      if (sub === 'domaine') {
-        const d = cleanDomain(interaction.options.getString('domaine'));
-        const set = new Set(cfg().filters.antiLink.allowedDomains ?? []);
-        const added = !set.has(d);
-        added ? set.add(d) : set.delete(d);
-        config.update(guildId, { automod: { filters: { antiLink: { allowedDomains: [...set] } } } });
-        return interaction.reply({ embeds: [listCard(cfg(), `Domaine ${code(d)} ${added ? 'autorisé' : 'retiré de la liste blanche'}.`)], ephemeral: true });
-      }
-      const c = cleanInvite(interaction.options.getString('code'));
-      const set = new Set(cfg().filters.antiInvite.allowedCodes ?? []);
-      const added = !set.has(c);
-      added ? set.add(c) : set.delete(c);
-      config.update(guildId, { automod: { filters: { antiInvite: { allowedCodes: [...set] } } } });
-      return interaction.reply({ embeds: [listCard(cfg(), `Invitation ${code(`discord.gg/${c}`)} ${added ? 'autorisée' : 'retirée de la liste blanche'}.`)], ephemeral: true });
-    }
-
-    switch (sub) {
-      case 'status':
-        return panel();
-      case 'enable':
-      case 'disable':
-        config.update(guildId, { automod: { enabled: sub === 'enable' } });
-        return panel(`AutoMod **${sub === 'enable' ? 'activé' : 'désactivé'}**.`);
-      case 'preset': {
-        const key = interaction.options.getString('niveau');
-        const preset = PRESETS[key];
-        if (!preset) throw new UserError('Préréglage inconnu.');
-        config.update(guildId, { automod: preset.patch });
-        return panel(`Préréglage ${preset.emoji} **${preset.label}** appliqué. Vos listes (mots, domaines) sont conservées.`);
-      }
-      case 'filter': {
-        const name = interaction.options.getString('nom');
-        const enabled = interaction.options.getBoolean('actif');
-        const action = interaction.options.getString('action');
-        const duration = interaction.options.getString('duree');
-        const threshold = interaction.options.getInteger('seuil');
-        const patch = { enabled };
-        if (action) patch.action = action;
-        if (duration) {
-          const ms = parseDuration(duration);
-          if (!ms || ms > 28 * 86_400_000) throw new UserError('Durée invalide (ex : `10m`, `1h`, `1d`, 28 jours maximum).');
-          patch.duration = duration;
-        }
-        if (threshold != null) {
-          const spec = THRESHOLDS[name];
-          if (!spec) throw new UserError(`Le filtre **${FILTER_LABELS[name]}** n'a pas de seuil réglable.`);
-          const [key, label, min, max] = spec;
-          if (threshold < min || threshold > max) throw new UserError(`Seuil hors limites : entre ${min} et ${max} ${label}.`);
-          patch[key] = threshold;
-        }
-        config.update(guildId, { automod: { filters: { [name]: patch } } });
-        return panel(`Filtre **${FILTER_LABELS[name] ?? name}** ${enabled ? 'activé' : 'désactivé'}.`);
-      }
-      case 'test':
-        return interaction.reply({ embeds: [analysisCard(client, interaction.guild, interaction.options.getString('texte'))], ephemeral: true });
-      case 'stats':
-        return interaction.reply({ embeds: [statsCard(client, interaction.guild, interaction.options.getInteger('jours') ?? 7)], ephemeral: true });
-      case 'escalade': {
-        const patch = { enabled: interaction.options.getBoolean('actif') };
-        const win = interaction.options.getInteger('fenetre');
-        if (win != null) patch.windowMinutes = win;
-        config.update(guildId, { automod: { escalation: patch } });
-        return panel(`Sanctions progressives ${patch.enabled ? 'activées' : 'désactivées'}.`);
-      }
-      case 'nouveaux': {
-        const o = interaction.options;
-        const patch = { enabled: o.getBoolean('actif') };
-        for (const [opt, key, getter] of [
-          ['age_compte', 'accountAgeDays', 'getInteger'],
-          ['anciennete', 'joinedMinutes', 'getInteger'],
-          ['liens', 'blockLinks', 'getBoolean'],
-          ['invitations', 'blockInvites', 'getBoolean'],
-          ['fichiers', 'blockMedia', 'getBoolean'],
-        ]) {
-          const v = o[getter](opt);
-          if (v != null) patch[key] = v;
-        }
-        config.update(guildId, { automod: { newMembers: patch } });
-        return panel(`Protection des nouveaux venus ${patch.enabled ? 'activée' : 'désactivée'}.`);
-      }
-      case 'notification': {
-        const mode = interaction.options.getString('mode');
-        config.update(guildId, { automod: { notify: mode } });
-        return panel(`Notification : **${NOTIFY_LABELS[mode]}**.`);
-      }
-      case 'ignore': {
-        const channel = interaction.options.getChannel('salon');
-        const role = interaction.options.getRole('role');
-        if (!channel && !role) throw new UserError('Indiquez un salon ou un rôle.');
-        const msgs = [];
-        if (channel) {
-          const set = new Set(cfg().ignoredChannels);
-          set.has(channel.id) ? set.delete(channel.id) : set.add(channel.id);
-          config.update(guildId, { automod: { ignoredChannels: [...set] } });
-          msgs.push(`${channel} ${set.has(channel.id) ? 'est désormais ignoré' : 'n\'est plus ignoré'}.`);
-        }
-        if (role) {
-          const set = new Set(cfg().ignoredRoles);
-          set.has(role.id) ? set.delete(role.id) : set.add(role.id);
-          config.update(guildId, { automod: { ignoredRoles: [...set] } });
-          msgs.push(`${role} ${set.has(role.id) ? 'est désormais ignoré' : 'n\'est plus ignoré'}.`);
-        }
-        return panel(msgs.join(' '));
-      }
-      case 'discord':
-        return handleNative(interaction, client);
-      default:
-        throw new UserError('Sous-commande inconnue.');
-    }
+    guard(interaction);
+    await interaction.reply({ ...(await render(client, interaction.guild, 'home')), ephemeral: true });
   },
 
   buttons: {
-    /** cmd:automod:toggle:<on|off> — « Gérer le serveur » revérifiée. */
+    /** Menu de navigation. */
+    async nav(interaction, client) {
+      guard(interaction);
+      await interaction.update(await render(client, interaction.guild, interaction.values?.[0] ?? 'home'));
+    },
+    /** cmd:automod:go:<vue> — boutons Accueil / Retour / périodes de stats. */
+    async go(interaction, client, [view]) {
+      guard(interaction);
+      if (String(view).startsWith('native')) await interaction.deferUpdate();
+      const payload = await render(client, interaction.guild, view ?? 'home');
+      await (interaction.deferred ? interaction.editReply(payload) : interaction.update(payload));
+    },
+    /** cmd:automod:toggle:<on|off> — interrupteur global. */
     async toggle(interaction, client, [state]) {
-      requirePermission(interaction, 'ManageGuild');
+      guard(interaction);
       const enabled = state === 'on';
       client.services.config.update(interaction.guildId, { automod: { enabled } });
-      await interaction.update(renderPanel(client, interaction.guildId, `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`));
+      await interaction.update(await render(client, interaction.guild, 'home', `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`));
+    },
+    /** cmd:automod:fpick:<groupe> — menu « Régler un filtre ». */
+    async fpick(interaction, client) {
+      guard(interaction);
+      const key = interaction.values?.[0];
+      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      await interaction.update(filterView(client, interaction.guildId, key));
+    },
+    /** cmd:automod:ftoggle:<filtre> */
+    async ftoggle(interaction, client, [key]) {
+      guard(interaction);
+      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      const enabled = !cfgOf(client, interaction.guildId).filters?.[key]?.enabled;
+      client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { enabled } } } });
+      await interaction.update(filterView(client, interaction.guildId, key, `${FILTER_LABELS[key]} ${enabled ? 'activé' : 'désactivé'}.`));
+    },
+    /** cmd:automod:faction:<filtre> — menu de sanction. */
+    async faction(interaction, client, [key]) {
+      guard(interaction);
+      const action = interaction.values?.[0];
+      if (!FILTER_LABELS[key] || !['delete', 'warn', 'timeout'].includes(action)) throw new UserError('Sanction invalide.');
+      const patch = { action };
+      if (action === 'timeout' && !cfgOf(client, interaction.guildId).filters?.[key]?.duration) patch.duration = '5m';
+      client.services.config.update(interaction.guildId, { automod: { filters: { [key]: patch } } });
+      await interaction.update(filterView(client, interaction.guildId, key, `Sanction : **${ACTION_LABELS[action]}**.`));
+    },
+    /** cmd:automod:fset:<filtre> — ouvre le formulaire de réglages. */
+    async fset(interaction, client, [key]) {
+      guard(interaction);
+      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      await interaction.showModal(filterModal(cfgOf(client, interaction.guildId), key));
+    },
+    async fsetsubmit(interaction, client, [key]) {
+      guard(interaction);
+      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      const patch = {};
+      const duration = interaction.fields.getTextInputValue('duration')?.trim();
+      if (duration) {
+        const ms = parseDuration(duration);
+        if (!ms || ms > 28 * 86_400_000) throw new UserError('Durée invalide (ex : `10m`, `1h`, `1d` ; 28 jours maximum).');
+        patch.duration = duration;
+      }
+      const t = THRESHOLDS[key];
+      if (t) {
+        const v = intField(interaction, 'threshold', t[2], t[3], 'Seuil');
+        if (v !== undefined) patch[t[0]] = v;
+      }
+      if (WINDOWS[key]) {
+        const v = intField(interaction, 'window', WINDOWS[key][0], WINDOWS[key][1], 'Fenêtre');
+        if (v !== undefined) patch.windowSeconds = v;
+      }
+      if (key === 'antiCrossChannel') {
+        const v = intField(interaction, 'minLength', 5, 200, 'Longueur minimale');
+        if (v !== undefined) patch.minLength = v;
+      }
+      if (key === 'antiWall') {
+        const v = intField(interaction, 'maxLength', 200, 4000, 'Caractères maximum');
+        if (v !== undefined) patch.maxLength = v;
+      }
+      client.services.config.update(interaction.guildId, { automod: { filters: { [key]: patch } } });
+      await interaction.update(filterView(client, interaction.guildId, key, 'Réglages enregistrés.'));
+    },
+    /** cmd:automod:list:<words|domains|invites> — ouvre le formulaire de la liste. */
+    async list(interaction, client, [kind]) {
+      guard(interaction);
+      if (!LIST_META[kind]) throw new UserError('Liste inconnue.');
+      await interaction.showModal(listModal(kind));
+    },
+    async listsubmit(interaction, client, [kind]) {
+      guard(interaction);
+      if (!LIST_META[kind]) throw new UserError('Liste inconnue.');
+      const cfg = cfgOf(client, interaction.guildId);
+      const add = splitItems(interaction.fields.getTextInputValue('add'));
+      const remove = splitItems(interaction.fields.getTextInputValue('remove'));
+      const rejected = [];
+      const clean = (v) => {
+        try {
+          if (kind === 'domains') return cleanDomain(v);
+          if (kind === 'invites') return cleanInvite(v);
+          const w = v.toLowerCase();
+          if (w.length > 60) throw new UserError('trop long');
+          return w;
+        } catch {
+          rejected.push(v);
+          return null;
+        }
+      };
+      const current = kind === 'words' ? cfg.filters.badWords.words : kind === 'domains' ? cfg.filters.antiLink.allowedDomains : cfg.filters.antiInvite.allowedCodes;
+      const set = new Set(current ?? []);
+      let added = 0;
+      let removed = 0;
+      for (const v of add.map(clean).filter(Boolean)) {
+        if (!set.has(v)) {
+          set.add(v);
+          added += 1;
+        }
+      }
+      for (const v of remove.map(clean).filter(Boolean)) {
+        if (set.delete(v)) removed += 1;
+      }
+      if (kind === 'words' && set.size > 1000) throw new UserError('La liste est limitée à 1000 mots.');
+      const list = [...set];
+      const patch = kind === 'words'
+        ? { badWords: added ? { words: list, enabled: true } : { words: list } } // un ajout active le filtre
+        : kind === 'domains' ? { antiLink: { allowedDomains: list } } : { antiInvite: { allowedCodes: list } };
+      client.services.config.update(interaction.guildId, { automod: { filters: patch } });
+      const notice = [
+        `${ICONS.success} **${LIST_META[kind].title}** : ${added} ajout(s), ${removed} retrait(s).`,
+        rejected.length ? `${ICONS.warning} Ignoré(s), format invalide : ${truncate(rejected.map(code).join(', '), 500)}` : null,
+      ].filter(Boolean).join('\n');
+      await interaction.update(listsView(client, interaction.guildId, notice));
+    },
+    /** cmd:automod:esc:<toggle|set> */
+    async esc(interaction, client, [what]) {
+      guard(interaction);
+      const esc = cfgOf(client, interaction.guildId).escalation ?? {};
+      if (what === 'set') return interaction.showModal(escalationModal(esc));
+      client.services.config.update(interaction.guildId, { automod: { escalation: { enabled: !esc.enabled } } });
+      await interaction.update(escalationView(client, interaction.guildId, `Sanctions progressives ${esc.enabled ? 'désactivées' : 'activées'}.`));
+    },
+    async escsubmit(interaction, client) {
+      guard(interaction);
+      const windowMinutes = intField(interaction, 'window', 5, 1440, 'Fenêtre');
+      const steps = parseSteps(interaction.fields.getTextInputValue('steps'));
+      // Les paliers sont un tableau : ConfigService le remplace en entier (pas de fusion).
+      client.services.config.update(interaction.guildId, { automod: { escalation: { ...(windowMinutes ? { windowMinutes } : {}), steps } } });
+      await interaction.update(escalationView(client, interaction.guildId, 'Fenêtre et paliers enregistrés.'));
+    },
+    /** cmd:automod:nm:<enabled|blockLinks|blockInvites|blockMedia|set> */
+    async nm(interaction, client, [what]) {
+      guard(interaction);
+      const nm = cfgOf(client, interaction.guildId).newMembers ?? {};
+      if (what === 'set') return interaction.showModal(newMembersModal(nm));
+      if (!['enabled', 'blockLinks', 'blockInvites', 'blockMedia'].includes(what)) throw new UserError('Réglage inconnu.');
+      client.services.config.update(interaction.guildId, { automod: { newMembers: { [what]: !nm[what] } } });
+      await interaction.update(newMembersView(client, interaction.guildId, 'Réglage mis à jour.'));
+    },
+    async nmsubmit(interaction, client) {
+      guard(interaction);
+      const accountAgeDays = intField(interaction, 'days', 0, 90, 'Âge du compte');
+      const joinedMinutes = intField(interaction, 'minutes', 0, 10080, 'Présence minimale');
+      client.services.config.update(interaction.guildId, {
+        automod: { newMembers: { ...(accountAgeDays !== undefined ? { accountAgeDays } : {}), ...(joinedMinutes !== undefined ? { joinedMinutes } : {}) } },
+      });
+      await interaction.update(newMembersView(client, interaction.guildId, 'Durées enregistrées.'));
+    },
+    /** Menu « Prévenir le membre ». */
+    async notify(interaction, client) {
+      guard(interaction);
+      const mode = interaction.values?.[0];
+      if (!NOTIFY_LABELS[mode]) throw new UserError('Mode inconnu.');
+      client.services.config.update(interaction.guildId, { automod: { notify: mode } });
+      await interaction.update(notifyView(client, interaction.guildId, `Notification : **${NOTIFY_LABELS[mode]}**.`));
+    },
+    /** Sélecteur de salons ignorés (remplace la liste). */
+    async ignch(interaction, client) {
+      guard(interaction);
+      const ids = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id)).slice(0, MAX_IGNORED);
+      client.services.config.update(interaction.guildId, { automod: { ignoredChannels: ids } });
+      await interaction.update(notifyView(client, interaction.guildId, `${ids.length} salon(s) ignoré(s).`));
+    },
+    /** Sélecteur de rôles ignorés (remplace la liste). */
+    async ignrole(interaction, client) {
+      guard(interaction);
+      const ids = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId).slice(0, MAX_IGNORED);
+      client.services.config.update(interaction.guildId, { automod: { ignoredRoles: ids } });
+      await interaction.update(notifyView(client, interaction.guildId, `${ids.length} rôle(s) ignoré(s).`));
+    },
+    /** cmd:automod:native:<sync|remove> */
+    async native(interaction, client, [what]) {
+      guard(interaction);
+      if (!['sync', 'remove'].includes(what)) throw new UserError('Action inconnue.');
+      await interaction.deferUpdate();
+      let notice;
+      if (what === 'remove') {
+        notice = `${ICONS.success} ${await native.remove(interaction.guild)} règle(s) native(s) retirée(s).`;
+      } else {
+        const cfg = client.services.config.get(interaction.guildId);
+        const r = await native.sync(interaction.guild, cfg.automod, cfg.logChannels?.automod);
+        notice = [
+          ...r.created.map((n) => `🆕 ${n}`),
+          ...r.updated.map((n) => `🔄 ${n}`),
+          ...r.removed.map((n) => `🗑️ ${n} (filtre désactivé)`),
+          ...r.failed.map((f) => `${ICONS.error} ${f.name} — ${f.reason}`),
+        ].join('\n') || `${ICONS.info} Aucun filtre compatible actif.`;
+      }
+      await interaction.editReply(await nativeView(client, interaction.guild, notice));
+    },
+    /** cmd:automod:preset:<faible|equilibre|strict> */
+    async preset(interaction, client, [key]) {
+      guard(interaction);
+      const preset = PRESETS[key];
+      if (!preset) throw new UserError('Préréglage inconnu.');
+      client.services.config.update(interaction.guildId, { automod: preset.patch });
+      await interaction.update(await render(client, interaction.guild, 'home', `Préréglage ${preset.emoji} **${preset.label}** appliqué. Vos listes sont conservées.`));
     },
     /** cmd:automod:test — ouvre le formulaire de test. */
     async test(interaction) {
-      requirePermission(interaction, 'ManageGuild');
+      guard(interaction);
       await interaction.showModal(testModal());
     },
-    /** cmd:automod:testsubmit — soumission du formulaire de test. */
+    /** Résultat du test : nouveau message éphémère (le tableau de bord reste en place). */
     async testsubmit(interaction, client) {
-      requirePermission(interaction, 'ManageGuild');
+      guard(interaction);
       const text = interaction.fields.getTextInputValue('text');
       await interaction.reply({ embeds: [analysisCard(client, interaction.guild, text)], ephemeral: true });
     },
-    /** cmd:automod:stats:<jours> */
-    async stats(interaction, client, [days]) {
-      requirePermission(interaction, 'ManageGuild');
-      const n = Math.min(30, Math.max(1, Number.parseInt(days, 10) || 7));
-      await interaction.reply({ embeds: [statsCard(client, interaction.guild, n)], ephemeral: true });
-    },
   },
 };
-
-async function handleNative(interaction, client) {
-  const action = interaction.options.getString('action');
-  const guild = interaction.guild;
-  await interaction.deferReply({ ephemeral: true });
-  if (action === 'status') {
-    const rules = await native.ownRules(guild).catch(() => null);
-    if (!rules) throw new UserError('Impossible de lire les règles AutoMod de Discord (permission **Gérer le serveur** requise).');
-    return interaction.editReply({
-      embeds: [
-        card({
-          tone: rules.length ? 'success' : 'neutral',
-          section: 'automod',
-          icon: '🛡️',
-          title: 'AutoMod natif de Discord',
-          description: [
-            rules.length ? `${rules.length} règle(s) gérée(s) par le bot :` : 'Aucune règle native gérée par le bot.',
-            ...rules.map((r) => `${r.enabled ? '🟢' : '🔴'} **${r.name}**`),
-            '',
-            subtext('Ces règles bloquent les messages avant leur envoi, même quand le bot est hors ligne.'),
-          ],
-        }),
-      ],
-    });
-  }
-  if (action === 'remove') {
-    const n = await native.remove(guild);
-    return interaction.editReply({ embeds: [status.ok(`${n} règle(s) native(s) retirée(s).`, 'AutoMod natif')] });
-  }
-  const cfg = client.services.config.get(guild.id);
-  const result = await native.sync(guild, cfg.automod, cfg.logChannels?.automod);
-  const ok = result.created.length + result.updated.length;
-  return interaction.editReply({
-    embeds: [
-      card({
-        tone: result.failed.length ? (ok ? 'warning' : 'danger') : ok ? 'success' : 'neutral',
-        section: 'automod',
-        icon: '🛡️',
-        title: 'AutoMod natif synchronisé',
-        description: [
-          ...result.created.map((n) => `🆕 ${n}`),
-          ...result.updated.map((n) => `🔄 ${n}`),
-          ...(result.removed ?? []).map((n) => `🗑️ ${n} (filtre désactivé)`),
-          ...result.failed.map((f) => `${ICONS.error} ${f.name} — ${f.reason}`),
-          '',
-          ok ? null : 'Aucun filtre compatible n\'est actif (mots interdits, anti-spam, mentions de masse).',
-          subtext('Bloque avant l\'envoi, même bot hors ligne. Discord exempte d\'office « Gérer le serveur » et les administrateurs. Relancez après avoir modifié vos filtres.'),
-        ],
-      }),
-    ],
-  });
-}

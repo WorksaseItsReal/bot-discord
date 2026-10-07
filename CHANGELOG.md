@@ -16,8 +16,10 @@ Ce projet suit un versionnage sémantique.
   - liens sans protocole et invitations masquées détectés, listes blanches ;
   - messages transférés analysés ;
   - sanctions progressives persistantes, protection des nouveaux venus, notification du membre ;
-  - `/automod preset`, `test`, `stats`, `escalade`, `nouveaux`, `notification`, `autoriser`, `discord`
-    (synchronisation avec l'AutoMod natif de Discord).
+  - **`/automod` devient un tableau de bord interactif unique** (plus de sous-commandes) : navigation par
+    menu, réglage de chaque filtre (activation, sanction, durée, seuil, fenêtre), listes par formulaire,
+    sanctions progressives, nouveaux venus, notifications, salons/rôles ignorés par sélecteurs natifs,
+    préréglages, test d'un message, statistiques, synchronisation avec l'AutoMod natif de Discord.
 - Migrations #4 (décisions de suggestions) et #5 (journal AutoMod, gagnants de giveaways).
 
 ### Fixed

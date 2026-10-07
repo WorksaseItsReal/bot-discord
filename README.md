@@ -9,7 +9,7 @@
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-embarqu%C3%A9-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-242%20verts-57F287)
+![Tests](https://img.shields.io/badge/tests-252%20verts-57F287)
 ![Licence](https://img.shields.io/badge/licence-MIT-lightgrey)
 
 </div>
@@ -42,7 +42,7 @@
 | 📋 **Logs** | Modération, membres, messages, rôles, salons, vocaux, bans, automod, sécurité. |
 | 💾 **Backups** | Sauvegarde et restauration de la structure du serveur, permissions comprises. |
 | 🎨 **Design soigné** | Chaque réponse est un embed cohérent, avec des boutons utiles et un bouton 🗑️ sur les réponses publiques. |
-| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, 242 tests automatiques. |
+| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, 252 tests automatiques. |
 
 ---
 
@@ -111,14 +111,21 @@ Un AutoMod pensé pour les vraies attaques, pas seulement les gros mots.
 - **Prévenir le membre** : message dans le salon supprimé après 8 secondes, ou message privé.
 - **Logs détaillés** : règle déclenchée, indices, sanction, boutons « Retirer le timeout » et « Sanctions ».
 
-**Outils pour les administrateurs**
+**Un seul tableau de bord : `/automod`**
 
-| Commande | Utilité |
+Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, avec des boutons, des menus et des formulaires.
+
+| Section | Ce qu'on y fait |
 | --- | --- |
-| `/automod preset` | Faible, Équilibré ou Strict en un clic, sans toucher à vos listes. |
-| `/automod test` | Montre quels filtres bloqueraient un message, sans sanction. |
-| `/automod stats` | Infractions par filtre, par action et membres les plus filtrés. |
-| `/automod discord` | Crée les règles de l'**AutoMod natif de Discord** : elles bloquent avant l'envoi, même quand le bot est hors ligne. |
+| 🏠 Accueil | Vue d'ensemble, activer/désactiver, tester un message, préréglages. |
+| 🛡️ 💬 ✍️ Filtres | Choisir un filtre, l'activer, choisir sa sanction, régler durée, seuil et fenêtre. |
+| 📋 Listes | Ajouter ou retirer des mots interdits, des domaines et des invitations autorisés. |
+| 📈 Sanctions progressives | Activer, régler la fenêtre et les paliers (`3=timeout 10m, 8=kick`). |
+| 🐣 Nouveaux venus | Âge du compte, ancienneté, blocage des liens, invitations et fichiers. |
+| 🔔 Notifications & exemptions | Prévenir le membre, choisir les salons et rôles ignorés dans de vrais sélecteurs. |
+| 🧱 AutoMod de Discord | Synchroniser les règles natives, qui bloquent avant l'envoi même bot hors ligne. |
+| 🎚️ Préréglages | Faible, Équilibré ou Strict en un clic, sans toucher à vos listes. |
+| 📊 Statistiques | Infractions sur 24 h, 7 ou 30 jours, par filtre et par membre. |
 
 ---
 
@@ -167,7 +174,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 
 | Commande | Description |
 | --- | --- |
-| `/automod` | Panneau, préréglages, 14 filtres, testeur, statistiques, sanctions progressives, nouveaux venus, listes blanches, AutoMod natif. |
+| `/automod` | Tableau de bord interactif : tout l'AutoMod se configure avec des boutons, menus et formulaires. |
 | `/antiraid` | Vagues d'arrivées, âge minimum des comptes, anti-bot, suppressions en masse. |
 | `/whitelist` | Membres et rôles de confiance, ignorés par l'AntiRaid. |
 | `/lockdown` | Verrouillage d'urgence de tout le serveur, puis restauration. |
@@ -305,7 +312,7 @@ Placez ensuite le rôle du bot **au-dessus** des rôles qu'il doit gérer : Disc
 
 1. **`/diagnostics`** vérifie les permissions et la position du rôle du bot.
 2. **`/settings logs`** choisit un salon pour chaque catégorie de logs.
-3. **`/automod preset niveau:Équilibré`** puis **`/automod discord action:Activer`** et **`/antiraid enable`** activent la protection automatique.
+3. **`/automod`** : choisissez le préréglage **Équilibré**, puis synchronisez l'**AutoMod de Discord** ; ensuite **`/antiraid enable`**.
 4. **`/ticket setup`** puis **`/ticket panel`** installent le support par tickets.
 5. **`/projet config`** règle le module projets, puis **`/projet creer`** crée votre premier projet.
 
@@ -322,7 +329,7 @@ Chaque interaction passe par une couche de sûreté commune, avant même d'attei
 - **Résistance aux pannes** : bans temporaires et giveaways repris après un redémarrage, reconnexion automatique, arrêt propre.
 
 ```bash
-npm test        # 242 tests, dont la validation des 67 commandes contre les limites de Discord
+npm test        # 252 tests, dont la validation des 67 commandes contre les limites de Discord
 npm run check   # healthcheck : base, commandes, événements, sans connexion
 ```
 
