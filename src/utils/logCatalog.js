@@ -24,8 +24,8 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '👥',
     label: 'Membres',
     channel: 'membres',
-    description: 'Arrivées, départs, rôles, pseudos (avec l\'auteur) et boosts.',
-    events: { memberJoin: 'Arrivées', memberLeave: 'Départs', memberRoles: 'Rôles ajoutés / retirés', memberNickname: 'Changements de pseudo', memberBoost: 'Boosts' },
+    description: 'Arrivées, départs, vérifications, rôles, pseudos (avec l\'auteur) et boosts.',
+    events: { memberJoin: 'Arrivées', memberLeave: 'Départs', memberRoles: 'Rôles ajoutés / retirés', memberNickname: 'Changements de pseudo', memberBoost: 'Boosts', memberVerify: 'Vérifications réussies' },
   },
   roles: {
     emoji: '🎭',
