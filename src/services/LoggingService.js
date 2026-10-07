@@ -142,9 +142,9 @@ class LoggingService {
    * @param {keyof LOG_SECTIONS} category
    * @param {import('discord.js').EmbedBuilder} embed
    * @param {import('discord.js').ActionRowBuilder[]} [components] boutons optionnels (ex : « Aller au message »)
-   * @param {{ event?: string, channelId?: string|null, parentId?: string|null, categoryId?: string|null, bot?: boolean, files?: object[] }} [ctx]
+   * @param {{ event?: string, channelId?: string|null, parentId?: string|null, categoryId?: string|null, bot?: boolean, files?: object[], onSent?: (message: import('discord.js').Message) => void }} [ctx]
    *   event : clé du catalogue (désactivable dans /logs) ; channelId/parentId/categoryId : origine
-   *   (exemptions) ; files : pièces jointes (ex : transcription d'une purge).
+   *   (exemptions) ; files : pièces jointes (ex : transcription d'une purge) ; onSent : reçoit le message envoyé.
    */
   async send(guildId, category, embed, components, ctx = {}) {
     try {
@@ -160,7 +160,15 @@ class LoggingService {
       const payload = { embeds: [embed] };
       if (components?.length) payload.components = components;
       if (ctx.files?.length) payload.files = ctx.files;
-      await channel.send(payload);
+      const message = await channel.send(payload);
+      // Optionnel : l'appelant peut mémoriser le message (ex : fiche de sanction mise à jour plus tard).
+      if (typeof ctx.onSent === 'function') {
+        try {
+          ctx.onSent(message);
+        } catch (err) {
+          logger.debug('onSent a échoué :', err?.message);
+        }
+      }
       return true;
     } catch (err) {
       logger.debug(`Impossible d'envoyer un log (${category}) pour ${guildId}:`, err?.message);

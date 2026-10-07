@@ -27,6 +27,7 @@ const { TempVoiceRepository } = require('../database/repositories/TempVoiceRepos
 const { LockRepository } = require('../database/repositories/LockRepository');
 const { ProjectRepository } = require('../database/repositories/ProjectRepository');
 const { AutomodEventRepository } = require('../database/repositories/AutomodEventRepository');
+const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -94,6 +95,7 @@ class GadgetClient extends Client {
       locks: new LockRepository(db),
       projects: new ProjectRepository(db),
       automodEvents: new AutomodEventRepository(db),
+      modNotes: new ModNoteRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);

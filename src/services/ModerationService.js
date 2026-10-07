@@ -9,6 +9,7 @@ const { permissionLabel } = require('../utils/permissionNames');
 const { snowflake, SNOWFLAKE } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
 const { ESCALATION_PREFIX, parseEscalationLevel } = require('./StrikeService');
+const { sanctionState } = require('../database/repositories/SanctionRepository');
 
 /** Durée pendant laquelle une action du bot est reconnue dans les événements Discord (anti-doublon de logs). */
 const BOT_ACTION_TTL_MS = 15_000;
@@ -108,6 +109,23 @@ const SANCTIONS = {
 
 const REVOCATIONS = new Set(['unban', 'unmute', 'untimeout']);
 
+/**
+ * Levée de chaque type de sanction encore en vigueur : action de ModerationService,
+ * permission exigée du modérateur et libellé du bouton.
+ */
+const LIFTS = {
+  tempban: { type: 'unban', permission: 'BanMembers', label: 'Débannir' },
+  ban: { type: 'unban', permission: 'BanMembers', label: 'Débannir' },
+  mute: { type: 'unmute', permission: 'ModerateMembers', label: 'Démuter' },
+  timeout: { type: 'untimeout', permission: 'ModerateMembers', label: 'Retirer le timeout' },
+};
+
+/** Longueur maximale d'une raison de sanction. */
+const MAX_REASON = 512;
+/** Nom du champ « Raison » des cartes de sanction (repéré pour mettre à jour un log). */
+const REASON_FIELD = `${ICONS.reason} Raison`;
+const EDITED_FIELD = '✏️ Raison modifiée';
+
 /** Libellés français des types de sanctions (historique, listes…). */
 const TYPE_LABELS = Object.fromEntries(Object.entries(SANCTIONS).map(([k, v]) => [k, v.label]));
 
@@ -177,6 +195,14 @@ function sanctionCard(opts) {
     ],
     footer: id ? `Sanction #${id}` : undefined,
   });
+}
+
+/** Raison de sanction nettoyée (sur une ligne, 1 à 512 caractères). */
+function normalizeReason(raw) {
+  const reason = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (!reason) throw new UserError('La nouvelle raison ne peut pas être vide.');
+  if (reason.length > MAX_REASON) throw new UserError(`La raison est trop longue (${MAX_REASON} caractères maximum).`);
+  return reason;
 }
 
 /** UserError explicite quand le cliqueur n'a pas la permission requise. */
@@ -377,7 +403,7 @@ class ModerationService {
     await targetMember.roles.add(role, reason || undefined);
     // Un nouveau mute remplace tout mute encore actif (rôle retiré à la main…) :
     // le scheduler ne doit pas lever le nouveau mute à l'échéance de l'ancien.
-    this.#deactivateActive(guild.id, targetMember.id, 'mute');
+    this.#deactivateActive(guild.id, targetMember.id, 'mute', { by: moderator.id, reason: 'Remplacé par un nouveau mute' });
     return this.record(guild, targetMember.user, moderator, { type: 'mute', reason, durationMs });
   }
 
@@ -386,7 +412,7 @@ class ModerationService {
     const role = this.mutedRole(guild);
     if (!role || !targetMember.roles.cache.has(role.id)) throw new UserError('Ce membre n\'est pas mute.');
     await targetMember.roles.remove(role, reason || undefined);
-    this.#deactivateActive(guild.id, targetMember.id, 'mute');
+    this.#deactivateActive(guild.id, targetMember.id, 'mute', { by: moderator.id, reason });
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true };
   }
@@ -423,7 +449,11 @@ class ModerationService {
       expiresAt,
     });
 
-    await this.logging.send(guild.id, 'moderation', sanctionCard({ id, type, user: targetUser, moderator, reason, durationMs, expiresAt }), undefined, { event: 'sanction' });
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ id, type, user: targetUser, moderator, reason, durationMs, expiresAt }), undefined, {
+      event: 'sanction',
+      // Message de log mémorisé : /sanctions raison pourra le mettre à jour.
+      onSent: (message) => message?.id && this.sanctions.setLogMessage?.(guild.id, id, message.channelId ?? message.channel?.id, message.id),
+    });
     return { id, expiresAt };
   }
 
@@ -449,7 +479,7 @@ class ModerationService {
       throw new UserError('Je ne peux pas retirer le timeout de ce membre (rôle trop élevé ou permission manquante).');
     }
     await targetMember.timeout(null, reason || undefined);
-    this.#deactivateActive(guild.id, targetMember.id, 'timeout');
+    this.#deactivateActive(guild.id, targetMember.id, 'timeout', { by: moderator.id, reason });
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'untimeout', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true };
   }
@@ -476,13 +506,13 @@ class ModerationService {
       );
       // Un nouveau ban (permanent ou temporaire) remplace tout ban temporaire en cours :
       // le scheduler ne doit pas débannir l'utilisateur à l'expiration de l'ancien.
-      this.#deactivateActive(guild.id, targetUser.id, 'tempban');
+      this.#deactivateActive(guild.id, targetUser.id, 'tempban', { by: moderator.id, reason: 'Remplacé par un nouveau bannissement' });
     });
   }
 
-  /** Désactive les sanctions actives d'un type donné pour un membre. */
-  #deactivateActive(guildId, userId, type) {
-    this.sanctions.deactivateActive(guildId, userId, type);
+  /** Désactive (lève) les sanctions actives d'un type donné pour un membre, en gardant la trace. */
+  #deactivateActive(guildId, userId, type, revoke) {
+    this.sanctions.deactivateActive(guildId, userId, type, revoke);
   }
 
   /** Plus haut palier d'escalade déjà appliqué à ce membre (0 si aucun), d'après l'historique. */
@@ -492,9 +522,17 @@ class ModerationService {
       .reduce((max, r) => Math.max(max, parseEscalationLevel(r)), 0);
   }
 
-  /** Appelé quand un utilisateur est débanni (commande ou manuellement). */
+  /**
+   * Appelé quand un utilisateur est débanni (événement guildBanRemove) : plus aucun
+   * bannissement (temporaire ou définitif) n'est en vigueur. Si le bot vient lui-même
+   * de débannir (commande, bouton, scheduler), c'est cette action qui enregistre la
+   * levée avec son auteur : on ne l'écrase pas ici.
+   */
   clearTempbans(guildId, userId) {
-    this.#deactivateActive(guildId, userId, 'tempban');
+    if (this.isRecentBotAction('unban', guildId, userId)) return;
+    const revoke = { by: null, reason: 'Débanni hors du bot' };
+    this.#deactivateActive(guildId, userId, 'tempban', revoke);
+    this.#deactivateActive(guildId, userId, 'ban', revoke);
   }
 
   /**
@@ -509,10 +547,114 @@ class ModerationService {
     const user = existing?.user;
     if (!user?.id || user.id !== userId) throw new UserError('Cet utilisateur n\'est pas banni.');
     await this.#asBot('unban', guild.id, user.id, () => guild.bans.remove(user.id, reason || undefined));
-    // Désactive les bans temporaires actifs correspondants
-    this.#deactivateActive(guild.id, user.id, 'tempban');
+    // Lève les bannissements (temporaires et définitifs) encore actifs, avec leur auteur.
+    const revoke = { by: moderator?.id ?? null, reason: reason ?? null };
+    this.#deactivateActive(guild.id, user.id, 'tempban', revoke);
+    this.#deactivateActive(guild.id, user.id, 'ban', revoke);
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId: user.id, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true, user };
+  }
+
+  /**
+   * Modifie la raison d'une sanction. L'ancienne raison est conservée (sanction_edits),
+   * le message de log d'origine est mis à jour si possible et la modification est journalisée.
+   * Les PERMISSIONS (auteur ou « Gérer le serveur ») sont vérifiées par l'appelant.
+   * @returns {Promise<{ sanction: object, oldReason: string|null, logUpdated: boolean }>}
+   */
+  async editReason(guild, sanctionId, editor, rawReason) {
+    const reason = normalizeReason(rawReason);
+    const current = this.sanctions.get(guild.id, sanctionId);
+    if (!current) throw new UserError(`Aucune sanction \`#${sanctionId}\` trouvée sur ce serveur.`);
+    if ((current.reason ?? '') === reason) throw new UserError('La nouvelle raison est identique à l\'actuelle.');
+    const result = this.sanctions.editReason(guild.id, sanctionId, editor.id, reason);
+    if (!result) throw new UserError(`Aucune sanction \`#${sanctionId}\` trouvée sur ce serveur.`);
+    const logUpdated = await this.#updateLogReason(guild, result.sanction, editor, reason);
+    await this.logging.send(
+      guild.id,
+      'moderation',
+      card({
+        tone: 'info',
+        section: 'moderation',
+        icon: '✏️',
+        title: 'Raison modifiée',
+        description: `La raison de la sanction \`#${sanctionId}\` a été modifiée.`,
+        fields: [
+          field(ICONS.user, 'Membre', `<@${current.user_id}>`),
+          field(sanctionIcon(current.type), 'Type', TYPE_LABELS[current.type] ?? current.type),
+          field(ICONS.moderator, 'Modifiée par', `<@${editor.id}>`),
+          wide('🗒️', 'Ancienne raison', truncate(result.oldReason || '*Aucune raison fournie*', 1024)),
+          wide(ICONS.reason, 'Nouvelle raison', truncate(reason, 1024)),
+        ],
+        footer: `Sanction #${sanctionId}`,
+      }),
+      undefined,
+      { event: 'sanction' },
+    );
+    return { sanction: result.sanction, oldReason: result.oldReason, logUpdated };
+  }
+
+  /** Remplace la raison sur le message de log d'origine (best-effort). @returns {Promise<boolean>} */
+  async #updateLogReason(guild, sanction, editor, reason) {
+    if (!sanction?.log_channel_id || !sanction?.log_message_id) return false;
+    try {
+      const channel = guild.channels?.cache?.get(sanction.log_channel_id);
+      if (!channel?.messages?.fetch) return false;
+      const message = await channel.messages.fetch(sanction.log_message_id);
+      const me = guild.members?.me?.id;
+      if (!message?.embeds?.length || (me && message.author?.id && message.author.id !== me)) return false;
+      const [first, ...rest] = message.embeds.map((e) => (typeof e?.toJSON === 'function' ? e.toJSON() : { ...(e?.data ?? e) }));
+      const fields = (first.fields ?? []).filter((f) => f.name !== EDITED_FIELD);
+      const value = truncate(reason, 1024);
+      const at = fields.findIndex((f) => f.name === REASON_FIELD);
+      if (at >= 0) fields[at] = { ...fields[at], value };
+      else fields.push({ name: REASON_FIELD, value, inline: false });
+      fields.push({ name: EDITED_FIELD, value: `Par <@${editor.id}> ${discordTimestamp(Date.now(), 'R')}`, inline: false });
+      await message.edit({ embeds: [{ ...first, fields: fields.slice(0, 25) }, ...rest] });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Lève une sanction encore en vigueur en passant par l'action dédiée (unban, unmute,
+   * untimeout) et ses garde-fous (hiérarchie, permissions du bot). La permission du
+   * MODÉRATEUR (`LIFTS[type].permission`) est vérifiée par l'appelant.
+   * @param {import('discord.js').GuildMember} moderator
+   * @returns {Promise<{ type: 'unban'|'unmute'|'untimeout', user: object }>}
+   */
+  async lift(guild, sanction, moderator, reason) {
+    const lift = LIFTS[sanction?.type];
+    if (!lift || sanctionState(sanction) !== 'active') throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
+    const userId = sanction.user_id;
+    if (lift.type === 'unban') {
+      if (!guild.members?.me?.permissions?.has(PermissionFlagsBits.BanMembers)) {
+        throw new UserError('Il me manque la permission **Bannir des membres** pour débannir.');
+      }
+      const { user } = await this.unban(guild, userId, moderator, reason);
+      return { type: 'unban', user };
+    }
+    if (!SNOWFLAKE.test(String(userId))) throw new UserError('Identifiant de membre invalide.');
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (lift.type === 'untimeout') {
+      if (!member) throw new UserError('Ce membre n\'est plus sur le serveur.');
+      if (!member.isCommunicationDisabled?.()) throw new UserError('Ce membre n\'est plus en timeout.');
+      await this.removeTimeout(guild, member, moderator, reason);
+      return { type: 'untimeout', user: member.user };
+    }
+    // Mute : rôle encore présent → unmute classique (hiérarchie + rôle vérifiés).
+    const role = this.mutedRole(guild);
+    if (member && role && member.roles?.cache?.has(role.id)) {
+      await this.unmute(guild, member, moderator, reason);
+      return { type: 'unmute', user: member.user };
+    }
+    // Membre parti (le mute serait réappliqué à son retour) ou rôle déjà retiré à la main :
+    // seule la sanction en base est levée.
+    if (member) assertCanModerate(moderator, member, guild.members.me, { action: 'retirer le mute de' });
+    const user = member?.user ?? userFromId(userId);
+    this.#deactivateActive(guild.id, userId, 'mute', { by: moderator.id, reason });
+    await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user, userId, moderator, reason }), undefined, { event: 'revocation' });
+    return { type: 'unmute', user };
   }
 
   async #notifyUser(guild, user, { type, reason, durationMs }) {
@@ -525,6 +667,9 @@ module.exports = {
   ModerationService,
   TYPE_LABELS,
   SANCTIONS,
+  LIFTS,
+  MAX_REASON,
+  normalizeReason,
   BOT_ACTION_TTL_MS,
   sanctionCard,
   sanctionIcon,

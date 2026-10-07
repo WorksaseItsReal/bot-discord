@@ -24,6 +24,7 @@ function sanctionsSetup() {
   const client = { repositories: { sanctions: repo }, services: { strikes: { reset: (...a) => resets.push(a), getCount: () => 0 } } };
   const interaction = (sub, { id, user } = {}) => ({
     guild: { id: 'g1' },
+    memberPermissions: { has: (flag) => flag === PermissionFlagsBits.ModerateMembers },
     options: { getSubcommand: () => sub, getInteger: () => id, getUser: () => user },
     replies: [],
     async reply(p) { this.replies.push(p); },

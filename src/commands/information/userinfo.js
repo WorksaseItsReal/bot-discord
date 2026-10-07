@@ -4,10 +4,7 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { truncate } = require('../../utils/embeds');
 const { discordTimestamp } = require('../../utils/time');
 const { permissionLabel } = require('../../utils/permissionNames');
-const { card, field, wide, ICONS, code, linkButton, actionButton, buttonRows, status } = require('../../utils/ui');
-const { UserError } = require('../../core/errors');
-
-const SANCTION_ICONS = { warn: ICONS.warn, mute: ICONS.mute, timeout: ICONS.mute, kick: ICONS.kick, ban: ICONS.ban, tempban: ICONS.ban };
+const { card, field, wide, ICONS, code, linkButton, actionButton, buttonRows } = require('../../utils/ui');
 
 const KEY_PERMISSIONS = ['Administrator', 'ManageGuild', 'ManageRoles', 'ManageChannels', 'ManageMessages', 'BanMembers', 'KickMembers', 'ModerateMembers', 'MentionEveryone'];
 
@@ -91,41 +88,19 @@ module.exports = {
       components: buttonRows(
         linkButton('Avatar', avatar, ICONS.image),
         banner ? linkButton('Bannière', banner, ICONS.color) : null,
-        member && isModerator ? actionButton({ command: 'user', action: 'sanctions', args: [user.id], label: 'Sanctions', emoji: ICONS.history }) : null,
+        // Visible des modérateurs uniquement, même si l'utilisateur n'est plus membre (banni, parti).
+        isModerator ? actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Historique de modération', emoji: ICONS.history }) : null,
       ),
     });
   },
 
   buttons: {
-    /** cmd:user:sanctions:<userId> — historique éphémère, réservé aux modérateurs. */
-    async sanctions(interaction, client, [userId]) {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
-        throw new UserError('Il faut la permission **Exclure temporairement des membres** pour voir les sanctions.');
-      }
-      const list = client.repositories.sanctions.listByUser(interaction.guildId, userId, 10);
-      const strikes = client.repositories.strikes.get(interaction.guildId, userId);
-      if (!list.length) {
-        return interaction.reply({ embeds: [status.note(`<@${userId}> n'a aucune sanction. ✨`, 'Casier vierge')], ephemeral: true });
-      }
-      const lines = list.map((s) => {
-        const icon = SANCTION_ICONS[s.type] ?? ICONS.history;
-        const reason = s.reason ? ` — ${truncate(s.reason, 80)}` : '';
-        return `${icon} **${s.type}** · ${discordTimestamp(s.created_at, 'd')} · par <@${s.moderator_id}>${reason}`;
-      });
-      await interaction.reply({
-        embeds: [
-          card({
-            tone: 'caution',
-            section: 'moderation',
-            icon: ICONS.history,
-            title: 'Dernières sanctions',
-            description: [`<@${userId}>`, '', ...lines],
-            fields: [field(ICONS.count, 'Strikes', `**${strikes}**`), field(ICONS.list, 'Affichées', `${list.length}`)],
-            footer: 'Historique complet : /sanctions list',
-          }),
-        ],
-        ephemeral: true,
-      });
+    /**
+     * cmd:user:sanctions:<userId> — ancien bouton (messages déjà publiés) : ouvre
+     * désormais la fiche historique de /sanctions (mêmes vérifications).
+     */
+    async sanctions(interaction, client, args) {
+      return require('../moderation/sanctions').buttons.history(interaction, client, args);
     },
   },
 };
