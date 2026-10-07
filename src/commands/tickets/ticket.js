@@ -1,23 +1,34 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { card, field, ICONS, status, linkButton, buttonRows, userLine, subtext } = require('../../utils/ui');
+const { SlashCommandBuilder } = require('discord.js');
+const { card, field, ICONS, status, actionButton, buttonRows, userLine, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+
+/** Sous-commandes de configuration déplacées vers le tableau de bord /tickets → vue cible. */
+const MOVED = { setup: 'setup', panel: 'panel' };
+
+/** Redirection vers /tickets (anciennes sous-commandes de configuration). */
+function movedReply(sub) {
+  return {
+    embeds: [
+      status.note(
+        `La configuration des tickets se fait désormais dans le tableau de bord **/tickets** : ${sub === 'panel' ? 'section **Panneau**, bouton « Publier le panneau »' : 'section **Salons & staff**'}.`,
+        'Commande déplacée',
+      ),
+    ],
+    components: buttonRows(actionButton({ command: 'tickets', action: 'go', args: [MOVED[sub]], label: 'Ouvrir /tickets', emoji: ICONS.ticket, style: ButtonStyle.Primary })),
+    ephemeral: true,
+  };
+}
 
 module.exports = {
   category: 'tickets',
+  movedReply,
   data: new SlashCommandBuilder()
     .setName('ticket')
-    .setDescription('Système de tickets.')
-    .addSubcommand((s) =>
-      s.setName('setup').setDescription('Configure le système de tickets.')
-        .addChannelOption((o) => o.setName('categorie').setDescription('Catégorie des tickets').addChannelTypes(ChannelType.GuildCategory))
-        .addRoleOption((o) => o.setName('role_support').setDescription('Rôle support'))
-        .addChannelOption((o) => o.setName('logs').setDescription('Salon de logs/transcripts').addChannelTypes(ChannelType.GuildText))
-        .addIntegerOption((o) => o.setName('max_par_membre').setDescription('Tickets max par membre').setMinValue(1).setMaxValue(10)))
-    .addSubcommand((s) =>
-      s.setName('panel').setDescription('Envoie le panneau d\'ouverture de ticket.')
-        .addChannelOption((o) => o.setName('salon').setDescription('Salon où poster le panneau').addChannelTypes(ChannelType.GuildText)))
+    .setDescription('Actions dans un ticket (fermer, ajouter, renommer…). Configuration : /tickets.')
+    .addSubcommand((s) => s.setName('setup').setDescription('Déplacé : la configuration se fait avec /tickets.'))
+    .addSubcommand((s) => s.setName('panel').setDescription('Déplacé : publiez le panneau depuis /tickets.'))
     .addSubcommand((s) => s.setName('close').setDescription('Ferme le ticket actuel.'))
     .addSubcommand((s) => s.setName('claim').setDescription('Prend en charge le ticket actuel.'))
     .addSubcommand((s) => s.setName('transcript').setDescription('Génère le transcript du ticket.'))
@@ -30,54 +41,10 @@ module.exports = {
 
   async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
-    const { tickets, config } = client.services;
+    const { tickets } = client.services;
 
-    if (sub === 'setup') {
-      requirePerm(interaction, PermissionFlagsBits.ManageGuild);
-      const patch = {};
-      const category = interaction.options.getChannel('categorie');
-      const role = interaction.options.getRole('role_support');
-      const logs = interaction.options.getChannel('logs');
-      const max = interaction.options.getInteger('max_par_membre');
-      // @everyone verrait tous les tickets ; un rôle d'intégration ne s'attribue pas.
-      if (role?.id === interaction.guild.id) throw new UserError('Le rôle @everyone ne peut pas être le rôle support : tout le monde verrait les tickets.');
-      if (role?.managed) throw new UserError(`Le rôle ${role.name} est géré par une intégration : choisissez un rôle support classique.`);
-      if (category) patch.categoryId = category.id;
-      if (role) patch.supportRoleId = role.id;
-      if (logs) patch.logChannel = logs.id;
-      if (max) patch.maxPerUser = max;
-      config.update(interaction.guild.id, { tickets: patch });
-      const cfg = config.get(interaction.guild.id).tickets ?? {};
-      return interaction.reply({
-        embeds: [
-          card({
-            tone: 'success',
-            section: 'tickets',
-            icon: ICONS.settings,
-            title: 'Tickets configurés',
-            description: ['La configuration des tickets est à jour.', subtext('Publiez le panneau avec /ticket panel.')],
-            fields: [
-              field(ICONS.category, 'Catégorie', cfg.categoryId ? `<#${cfg.categoryId}>` : '*Aucune*'),
-              field(ICONS.role, 'Support', cfg.supportRoleId ? `<@&${cfg.supportRoleId}>` : '*Gérer les salons*'),
-              field(ICONS.history, 'Logs', cfg.logChannel ? `<#${cfg.logChannel}>` : '*Désactivés*'),
-              field(ICONS.count, 'Max par membre', `**${cfg.maxPerUser || 1}**`),
-            ],
-          }),
-        ],
-        ephemeral: true,
-      });
-    }
-
-    if (sub === 'panel') {
-      requirePerm(interaction, PermissionFlagsBits.ManageGuild);
-      const channel = interaction.options.getChannel('salon') || interaction.channel;
-      const message = await channel.send(tickets.panel(interaction.guild));
-      return interaction.reply({
-        embeds: [status.ok(`Le panneau de tickets est en ligne dans ${channel}.`, 'Panneau publié')],
-        components: message?.url ? buttonRows(linkButton('Voir le panneau', message.url, ICONS.link)) : [],
-        ephemeral: true,
-      });
-    }
+    // Configuration déplacée vers le tableau de bord /tickets.
+    if (Object.hasOwn(MOVED, sub)) return interaction.reply(movedReply(sub));
 
     // Actions dans un ticket
     const record = client.repositories.tickets.getByChannel(interaction.channel.id);
@@ -146,7 +113,3 @@ module.exports = {
     }
   },
 };
-
-function requirePerm(interaction, flag) {
-  if (!interaction.member.permissions.has(flag)) throw new UserError('Vous n\'avez pas la permission requise.');
-}

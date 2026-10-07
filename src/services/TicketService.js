@@ -1,7 +1,7 @@
 'use strict';
 
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
-const { button, row, ButtonStyle } = require('../utils/components');
+const { button, row, selectMenu, ButtonStyle } = require('../utils/components');
 const { logSection } = require('./LoggingService');
 const { card, field, wide, ICONS, userLine, code, subtext, bullets, status } = require('../utils/ui');
 const { discordTimestamp, formatDuration } = require('../utils/time');
@@ -60,6 +60,24 @@ async function channelGone(guild, channelId) {
   }
 }
 
+/** Nombre maximal de motifs proposés à l'ouverture. */
+const MAX_REASONS = 15;
+
+/**
+ * Rôles staff configurés : `supportRoleIds` (tableau de bord) + l'ancien
+ * `supportRoleId`, sans doublon. Pur.
+ * @param {{ supportRoleIds?: string[], supportRoleId?: string|null }} [cfg] config `tickets`
+ */
+function supportRoles(cfg) {
+  return [...new Set([...(cfg?.supportRoleIds ?? []), cfg?.supportRoleId].filter(Boolean))];
+}
+
+/** Motif extrait du sujet d'un salon de ticket (« … · Motif : X »). Pur. */
+function reasonFromTopic(topic) {
+  const m = String(topic ?? '').match(/Motif : (.+)$/);
+  return m ? m[1].trim() : null;
+}
+
 /** Libellés de statut d'un ticket (pastille). */
 const STATUS_LABELS = {
   open: '🟢 Ouvert · en attente',
@@ -97,8 +115,8 @@ class TicketService {
   isStaff(member) {
     if (!member?.permissions) return false;
     if (member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
-    const roleId = this.config.get(member.guild.id).tickets?.supportRoleId;
-    return Boolean(roleId && member.roles.cache.has(roleId));
+    const roles = supportRoles(this.config.get(member.guild.id).tickets);
+    return roles.some((id) => member.roles?.cache?.has(id));
   }
 
   assertStaff(member) {
@@ -118,19 +136,22 @@ class TicketService {
   panel(guild) {
     const cfg = guild ? this.config.get(guild.id).tickets ?? {} : {};
     const max = cfg.maxPerUser || 1;
+    const reasons = cfg.reasons ?? [];
+    const custom = cfg.panel ?? {};
+    const label = custom.buttonLabel || 'Ouvrir un ticket';
     return {
       embeds: [
         card({
           tone: 'brand',
           section: 'tickets',
           icon: ICONS.ticket,
-          title: 'Besoin d\'aide ? Contactez le support',
-          description: [
+          title: custom.title || 'Besoin d\'aide ? Contactez le support',
+          description: custom.description || [
             'Une question, un problème, un signalement ? Ouvrez un ticket : un salon **privé** sera créé, visible uniquement par vous et l\'équipe.',
             '',
             '**Comment ça se passe ?**',
             bullets([
-              'Cliquez sur **Ouvrir un ticket** ci-dessous.',
+              reasons.length ? 'Choisissez le **motif** de votre demande dans le menu ci-dessous.' : `Cliquez sur **${label}** ci-dessous.`,
               'Décrivez votre demande dans le salon créé, captures à l\'appui.',
               'Un membre du support la prend en charge et vous répond.',
             ]),
@@ -145,8 +166,31 @@ class TicketService {
           timestamp: false,
         }),
       ],
-      components: [row(button({ id: 'ticket:create', label: 'Ouvrir un ticket', style: ButtonStyle.Primary, emoji: ICONS.ticket }))],
+      components: reasons.length
+        ? [this.reasonMenu(reasons, custom.buttonLabel)]
+        : [row(button({ id: 'ticket:create', label, style: ButtonStyle.Primary, emoji: ICONS.ticket }))],
     };
+  }
+
+  /** Menu des motifs d'ouverture (customId `ticket:open`). */
+  reasonMenu(reasons, placeholder) {
+    return row(
+      selectMenu({
+        id: 'ticket:open',
+        placeholder: String(placeholder || 'Choisissez le motif de votre demande…').slice(0, 150),
+        options: reasons.slice(0, MAX_REASONS).map((r) => ({ value: r.value, label: r.label, emoji: r.emoji || ICONS.ticket, description: r.description })),
+      }),
+    );
+  }
+
+  /** Incrémente un compteur de statistiques (`tickets.stats`), sans jamais faire échouer l'action. */
+  bumpStat(guildId, key) {
+    try {
+      const stats = this.config.get(guildId).tickets?.stats ?? {};
+      this.config.update?.(guildId, { tickets: { stats: { [key]: (stats[key] ?? 0) + 1 } } });
+    } catch {
+      /* statistique perdue : sans gravité */
+    }
   }
 
   /** Boutons du message d'accueil d'un ticket. */
@@ -165,9 +209,10 @@ class TicketService {
    * @param {object} ticket ligne `tickets`
    * @param {{ user?: import('discord.js').User, supportRoleId?: string|null }} [opts]
    */
-  welcome(ticket, { user, supportRoleId } = {}) {
+  welcome(ticket, { user, supportRoleId, supportRoleIds, reason } = {}) {
     const claimed = ticket.status === 'claimed' && ticket.claimed_by;
     const author = user ? userLine(user) : `<@${ticket.user_id}>`;
+    const team = supportRoleIds?.length ? supportRoleIds : supportRoleId ? [supportRoleId] : [];
     return {
       embeds: [
         card({
@@ -179,12 +224,13 @@ class TicketService {
             `Bienvenue ${user ?? `<@${ticket.user_id}>`} ! Décrivez votre demande le plus précisément possible : contexte, étapes, captures d'écran…`,
             claimed
               ? `Votre demande est suivie par <@${ticket.claimed_by}>.`
-              : `L'équipe${supportRoleId ? ` <@&${supportRoleId}>` : ''} a été prévenue et vous répondra dès que possible.`,
+              : `L'équipe${team.length ? ` ${team.map((id) => `<@&${id}>`).join(' ')}` : ''} a été prévenue et vous répondra dès que possible.`,
           ],
           fields: [
             field(ICONS.user, 'Auteur', author),
             field(ICONS.date, 'Ouvert', discordTimestamp(ticket.created_at ?? Date.now(), 'R')),
             field(ICONS.status, 'Statut', claimed ? `${STATUS_LABELS.claimed}\npar <@${ticket.claimed_by}>` : STATUS_LABELS.open),
+            reason ? field(ICONS.tag, 'Motif', reason) : null,
           ],
           thumbnail: user?.displayAvatarURL?.({ size: 128 }) ?? null,
           footer: `Ticket #${ticket.id}`,
@@ -194,18 +240,23 @@ class TicketService {
     };
   }
 
-  async create(guild, user) {
+  /**
+   * @param {import('discord.js').Guild} guild
+   * @param {import('discord.js').User} user
+   * @param {{ reason?: string|null }} [opts] motif choisi à l'ouverture
+   */
+  async create(guild, user, { reason = null } = {}) {
     const lockKey = `${guild.id}:${user.id}`;
     if (this.creating.has(lockKey)) throw new UserError('Votre ticket est déjà en cours de création…');
     this.creating.add(lockKey);
     try {
-      return await this.#create(guild, user);
+      return await this.#create(guild, user, reason);
     } finally {
       this.creating.delete(lockKey);
     }
   }
 
-  async #create(guild, user) {
+  async #create(guild, user, reason) {
     const cfg = this.config.get(guild.id).tickets;
     const max = cfg.maxPerUser || 1;
     const open = this.tickets.countOpenByUser(guild.id, user.id);
@@ -214,7 +265,8 @@ class TicketService {
     }
 
     // Catégorie / rôle supprimés depuis la configuration : on les ignore.
-    const supportRoleId = cfg.supportRoleId && guild.roles.cache.has(cfg.supportRoleId) ? cfg.supportRoleId : null;
+    const staffRoles = supportRoles(cfg).filter((id) => guild.roles.cache.has(id));
+    const supportRoleId = staffRoles[0] ?? null;
     const parent = cfg.categoryId && guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? cfg.categoryId : null;
 
     const overwrites = [
@@ -222,24 +274,26 @@ class TicketService {
       { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles] },
       { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] },
     ];
-    if (supportRoleId) {
-      overwrites.push({ id: supportRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
+    for (const id of staffRoles) {
+      overwrites.push({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
     }
 
     const channel = await guild.channels.create({
       name: `ticket-${user.username}`.slice(0, 90),
       type: ChannelType.GuildText,
       parent,
+      topic: `Ticket de ${user.username}${reason ? ` · Motif : ${reason}` : ''}`.slice(0, 1024),
       permissionOverwrites: overwrites,
     });
 
     const id = this.tickets.create({ guildId: guild.id, channelId: channel.id, userId: user.id });
     const ticket = this.tickets.getByChannel(channel.id) ?? { id, user_id: user.id, status: 'open', created_at: Date.now() };
+    this.bumpStat(guild.id, 'opened');
 
     // La mention (hors embed) notifie l'auteur et le support.
     await channel.send({
-      content: [`${user}`, supportRoleId ? `<@&${supportRoleId}>` : null].filter(Boolean).join(' '),
-      ...this.welcome(ticket, { user, supportRoleId }),
+      content: [`${user}`, ...staffRoles.map((r) => `<@&${r}>`)].join(' '),
+      ...this.welcome(ticket, { user, supportRoleId, supportRoleIds: staffRoles, reason }),
     });
     await this.logging.send(
       guild.id,
@@ -250,7 +304,7 @@ class TicketService {
         icon: ICONS.ticket,
         title: 'Ticket ouvert',
         description: `${userLine(user)} a ouvert un ticket : ${channel}.`,
-        fields: [field(ICONS.id, 'Ticket', code(`#${ticket.id}`)), field(ICONS.channel, 'Salon', `${channel}`)],
+        fields: [field(ICONS.id, 'Ticket', code(`#${ticket.id}`)), field(ICONS.channel, 'Salon', `${channel}`), reason ? field(ICONS.tag, 'Motif', reason) : null],
       }), undefined, { event: 'ticket' });
     return channel;
   }
@@ -275,8 +329,13 @@ class TicketService {
     const welcomeMessage = message ?? (await this.#findWelcome(channel));
     if (welcomeMessage?.edit) {
       const user = await channel.client?.users?.fetch(ticket.user_id).catch(() => null);
-      const supportRoleId = this.config.get(channel.guild.id).tickets?.supportRoleId ?? null;
-      const { embeds, components } = this.welcome(updated, { user: user ?? undefined, supportRoleId });
+      const cfg = this.config.get(channel.guild.id).tickets;
+      const { embeds, components } = this.welcome(updated, {
+        user: user ?? undefined,
+        supportRoleId: cfg?.supportRoleId ?? null,
+        supportRoleIds: supportRoles(cfg),
+        reason: reasonFromTopic(channel.topic),
+      });
       await welcomeMessage.edit({ embeds, components }).catch(() => {});
     }
 
@@ -395,6 +454,7 @@ class TicketService {
       const transcript = await this.generateTranscript(channel);
       const closedAt = Date.now();
       this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
+      this.bumpStat(channel.guild.id, 'closed');
 
       if (cfg.logChannel) {
         const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);
@@ -456,4 +516,4 @@ class TicketService {
   }
 }
 
-module.exports = { TicketService, STATUS_LABELS, TRANSCRIPT_MAX, fetchChannelHistory, channelGone };
+module.exports = { TicketService, STATUS_LABELS, TRANSCRIPT_MAX, MAX_REASONS, supportRoles, reasonFromTopic, fetchChannelHistory, channelGone };

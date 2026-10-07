@@ -278,32 +278,52 @@ test('AntiRaid : la sanction des comptes récents est indépendante de l\'action
   assert.deepEqual([b.kicked, b.banned], [[], ['young']]);
 });
 
-test('/antiraid set : chaque réglage affiché est modifiable', async () => {
-  const opts = antiraid.data.toJSON().options.find((o) => o.name === 'set').options.map((o) => o.name);
-  for (const name of ['seuil_salons', 'seuil_roles', 'seuil_bans', 'fenetre_destructive', 'sanction_auteur', 'nouveaux_comptes']) {
-    assert.ok(opts.includes(name), name);
-  }
+test('/antiraid (tableau de bord) : chaque réglage de l\'ancien /antiraid set est modifiable', async () => {
+  assert.equal((antiraid.data.toJSON().options ?? []).length, 0, 'plus de sous-commande');
   const patches = [];
-  const ints = { seuil_salons: 0, seuil_bans: 7, fenetre_destructive: 30 };
-  const strs = { sanction_auteur: 'ban', nouveaux_comptes: 'ban' };
-  const stored = { antiraid: { enabled: true, joinThreshold: 10, joinWindowSeconds: 10, channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, destructiveWindowSeconds: 10, punishExecutor: 'strip', action: 'kick' }, whitelist: {} };
-  const client = { services: { config: { get: () => stored, update: (gid, p) => { patches.push(p); Object.assign(stored.antiraid, p.antiraid); } } } };
-  let reply;
-  await antiraid.execute({
-    guild: { id: 'g1' },
-    options: {
-      getSubcommand: () => 'set',
-      getInteger: (n) => (n in ints ? ints[n] : null),
-      getString: (n) => strs[n] ?? null,
-      getBoolean: () => null,
-      getChannel: () => null,
-    },
-    reply: async (p) => { reply = p; },
-  }, client);
-  assert.deepEqual(patches[0].antiraid, { channelDeleteThreshold: 0, banThreshold: 7, destructiveWindowSeconds: 30, punishExecutor: 'ban', newAccountAction: 'ban' });
-  const json = JSON.stringify(reply.embeds[0].toJSON());
+  const stored = { antiraid: { enabled: true, joinThreshold: 10, joinWindowSeconds: 10, minAccountAgeDays: 0, antiBot: false, channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, destructiveWindowSeconds: 10, punishExecutor: 'strip', action: 'kick', alertChannel: null }, whitelist: {} };
+  const client = { services: { config: { get: () => stored, update: (gid, p) => { patches.push(p.antiraid); Object.assign(stored.antiraid, p.antiraid); } } } };
+  const ALERT = '200000000000000001';
+  const updates = [];
+  const i = (extra = {}) => ({
+    guildId: 'g1',
+    guild: { id: 'g1', channels: { cache: new Collection([[ALERT, { id: ALERT, type: 0 }]]) } },
+    memberPermissions: { has: (f) => f === PermissionFlagsBits.Administrator },
+    update: async (p) => updates.push(p),
+    showModal: async () => {},
+    ...extra,
+  });
+  const modal = (values) => i({ fields: { getTextInputValue: (id) => values[id] ?? '' } });
+
+  // seuil_salons / seuil_roles / seuil_bans / fenetre_destructive (0 = désactivé)
+  await antiraid.buttons.setsubmit(modal({ channelDeleteThreshold: '0', roleDeleteThreshold: '4', banThreshold: '7', destructiveWindowSeconds: '30' }), client, ['destructive']);
+  assert.deepEqual(patches.at(-1), { channelDeleteThreshold: 0, roleDeleteThreshold: 4, banThreshold: 7, destructiveWindowSeconds: 30 });
+  // join_seuil / join_fenetre
+  await antiraid.buttons.setsubmit(modal({ joinThreshold: '6', joinWindowSeconds: '15' }), client, ['joins']);
+  assert.deepEqual(patches.at(-1), { joinThreshold: 6, joinWindowSeconds: 15 });
+  // age_min_jours
+  await antiraid.buttons.setsubmit(modal({ minAccountAgeDays: '7' }), client, ['accounts']);
+  assert.deepEqual(patches.at(-1), { minAccountAgeDays: 7 });
+  // sanction_auteur / nouveaux_comptes / action
+  await antiraid.buttons.executor(i({ values: ['ban'] }), client);
+  await antiraid.buttons.newaccount(i({ values: ['ban'] }), client);
+  await antiraid.buttons.action(i({ values: ['lockdown'] }), client);
+  // anti_bot (valeur cible, jamais d'inversion à l'aveugle) / alertes
+  await antiraid.buttons.antibot(i(), client, ['on']);
+  await antiraid.buttons.antibot(i(), client, ['on']);
+  await antiraid.buttons.alertch(i({ values: [ALERT] }), client);
+  assert.deepEqual(patches.slice(3), [{ punishExecutor: 'ban' }, { newAccountAction: 'ban' }, { action: 'lockdown' }, { antiBot: true }, { antiBot: true }, { alertChannel: ALERT }]);
+
+  // Saisies hors bornes refusées, rien n'est écrit.
+  const before = patches.length;
+  await assert.rejects(antiraid.buttons.setsubmit(modal({ channelDeleteThreshold: '101' }), client, ['destructive']), { name: 'UserError' });
+  await assert.rejects(antiraid.buttons.setsubmit(modal({ joinThreshold: '1' }), client, ['joins']), { name: 'UserError' });
+  await assert.rejects(antiraid.buttons.action(i({ values: ['nuke'] }), client), { name: 'UserError' });
+  assert.equal(patches.length, before);
+
+  const json = JSON.stringify(antiraid.render(client, { id: 'g1' }, 'home').embeds[0].toJSON());
   assert.match(json, /Désactivé/);
   assert.match(json, /Comptes récents/);
-  assert.match(json, /\/antiraid set/);
+  assert.match(json, /Tableau de bord/);
   assert.equal(antiraid.data.toJSON().default_member_permissions, String(PermissionFlagsBits.Administrator));
 });

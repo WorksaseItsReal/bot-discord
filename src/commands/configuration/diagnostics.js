@@ -69,8 +69,9 @@ function analyze(guild, cfg) {
   modules.checks.push({ level: 'info', text: `Strikes ${cfg.strikes?.enabled ? 'activés' : 'désactivés'} · AutoMod ${cfg.automod?.enabled ? 'actif' : 'inactif'} · AntiRaid ${cfg.antiraid?.enabled ? 'actif' : 'inactif'}` });
   const refs = [
     [cfg.antiraid?.alertChannel, 'Alertes AntiRaid', '/antiraid'],
-    [cfg.tickets?.categoryId, 'Catégorie des tickets', '/ticket'],
-    [cfg.tickets?.logChannel, 'Logs des tickets', '/ticket'],
+    [cfg.tickets?.categoryId, 'Catégorie des tickets', '/tickets'],
+    [cfg.tickets?.logChannel, 'Transcripts des tickets', '/tickets'],
+    [cfg.tickets?.panelChannelId, 'Panneau des tickets', '/tickets'],
     [cfg.modmail?.categoryId, 'Catégorie du modmail', '/modmail'],
     [cfg.suggestions?.channelId, 'Salon des suggestions', '/suggestion'],
     [cfg.tempVoice?.enabled ? cfg.tempVoice.hubChannelId : null, 'Salon « Créer un vocal »', '/tempvoice'],
@@ -78,7 +79,7 @@ function analyze(guild, cfg) {
   ];
   for (const [id, label, cmd] of refs) if (id) modules.checks.push(channelCheck(guild, me, id, label, cmd));
   if (cfg.antiraid?.enabled && !cfg.antiraid.alertChannel) {
-    modules.checks.push({ level: 'warn', text: 'AntiRaid actif sans salon d\'alerte', tip: 'Définissez un salon d\'alerte AntiRaid pour être prévenu des raids.' });
+    modules.checks.push({ level: 'warn', text: 'AntiRaid actif sans salon d\'alerte', tip: 'Définissez un salon d\'alerte : `/antiraid` › **Alertes**.' });
   }
   groups.push(modules);
 

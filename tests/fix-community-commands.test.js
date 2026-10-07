@@ -10,6 +10,7 @@ const massrole = require('../src/commands/roles/massrole');
 const voice = require('../src/commands/voice/voice');
 const projet = require('../src/commands/projects/projet');
 const ticket = require('../src/commands/tickets/ticket');
+const tickets = require('../src/commands/tickets/tickets');
 const modmail = require('../src/commands/tickets/modmail');
 const health = require('../src/commands/configuration/health');
 const custom = require('../src/commands/configuration/custom');
@@ -165,7 +166,7 @@ test('projet : arguments du bouton de liste validés (statut connu, identifiant 
 
 // ---------------------------------------------------------------- rôles support / staff
 
-test('ticket / modmail setup : @everyone et rôles d\'intégration refusés', async () => {
+test('tickets (tableau de bord) / modmail setup : @everyone et rôles d\'intégration refusés', async () => {
   const guild = { id: 'g' };
   const setup = (role) => ({
     guild,
@@ -175,9 +176,24 @@ test('ticket / modmail setup : @everyone et rôles d\'intégration refusés', as
   });
   const client = { services: { tickets: {}, modmail: {}, config: { update: () => assert.fail('aucune écriture'), get: () => ({}) } } };
   for (const role of [{ id: 'g', name: '@everyone' }, { id: 'r', name: 'Bot', managed: true }]) {
-    await assert.rejects(ticket.execute(setup(role), client), /@everyone|intégration/);
     await assert.rejects(modmail.execute(setup(role), client), /@everyone|intégration/);
   }
+  // /tickets › Salons & staff : même garde-fou sur le sélecteur de rôles staff.
+  const GID = '100000000000000001';
+  const MANAGED = '300000000000000009';
+  const pick = (id) => ({
+    guildId: GID,
+    guild: { id: GID, roles: { cache: new Collection([[MANAGED, { id: MANAGED, name: 'Bot', managed: true }]]) } },
+    memberPermissions: perms([PermissionFlagsBits.ManageGuild]),
+    values: [id],
+    update: async () => assert.fail('aucune mise à jour'),
+  });
+  for (const id of [GID, MANAGED]) await assert.rejects(tickets.buttons.staff(pick(id), client), /@everyone|intégration/);
+  // L'ancienne sous-commande /ticket setup redirige vers /tickets, sans rien écrire.
+  let reply;
+  await ticket.execute({ ...setup(null), reply: async (p) => { reply = p; } }, client);
+  assert.match(JSON.stringify(reply.embeds[0].toJSON()), /\/tickets/);
+  assert.equal(reply.components[0].toJSON().components[0].custom_id, 'cmd:tickets:go:setup');
 });
 
 // ---------------------------------------------------------------- /health

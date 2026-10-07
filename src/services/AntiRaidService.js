@@ -59,6 +59,12 @@ class AntiRaidService {
     this.destructiveWindows = new Map();
     /** @type {Map<string, number>} dernier déclenchement d'alerte de vague par serveur */
     this.joinAlertAt = new Map();
+    /**
+     * Dernier déclenchement par serveur (mémoire, depuis le démarrage) : affiché
+     * par le tableau de bord /antiraid.
+     * @type {Map<string, { at: number, title: string, description?: string }>}
+     */
+    this.lastTrigger = new Map();
     this.lastWindowPrune = Date.now();
   }
 
@@ -307,6 +313,11 @@ class AntiRaidService {
     return lockdown.enable(guild, guild.members.me, 'AntiRaid automatique', { log: false }).catch(() => 0);
   }
 
+  /** Dernier déclenchement connu sur ce serveur (null si aucun depuis le démarrage). */
+  lastTriggerOf(guildId) {
+    return this.lastTrigger.get(guildId) ?? null;
+  }
+
   /**
    * Publie une alerte (carte danger/caution) dans le salon d'alertes et les logs sécurité.
    * @param {import('discord.js').Guild} guild
@@ -315,6 +326,7 @@ class AntiRaidService {
    */
   async alert(guild, alert) {
     const a = typeof alert === 'string' ? { description: alert } : alert;
+    this.lastTrigger.set(guild.id, { at: Date.now(), title: a.title ?? 'Alerte AntiRaid', description: a.description });
     const guildCfg = this.config.get(guild.id);
     const alertChannelId = guildCfg.antiraid?.alertChannel;
     const embed = card({

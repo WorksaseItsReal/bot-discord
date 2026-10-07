@@ -111,9 +111,15 @@ const defaultGuildConfig = Object.freeze({
   },
   tickets: {
     categoryId: null,
-    supportRoleId: null,
-    logChannel: null,
+    supportRoleId: null, // premier rôle staff (compatibilité)
+    supportRoleIds: [], // rôles staff (tableau de bord /tickets)
+    logChannel: null, // salon des transcripts
     maxPerUser: 1,
+    reasons: [], // motifs proposés à l'ouverture : { value, label, emoji?, description? }
+    panel: { title: null, description: null, buttonLabel: null }, // textes du panneau (null : texte par défaut)
+    panelChannelId: null,
+    panelMessageId: null,
+    stats: { opened: 0, closed: 0 },
   },
   modmail: {
     enabled: false,
