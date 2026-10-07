@@ -1,13 +1,21 @@
 'use strict';
 
 const { SlidingWindow } = require('../utils/rate');
-const { embeds, truncate } = require('../utils/embeds');
+const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('antiraid');
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Délai minimal entre deux alertes « vague d'arrivées » (et lockdowns auto) par serveur. */
 const JOIN_ALERT_COOLDOWN_MS = 60_000;
+
+const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements' };
+const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
+
+/** Bouton « Lever le lockdown » joint aux alertes qui ont déclenché un lockdown automatique. */
+function liftLockdownButton() {
+  return actionButton({ command: 'lockdown', action: 'disable', label: 'Lever le lockdown', emoji: ICONS.unlock, style: ButtonStyle.Success });
+}
 
 /**
  * Sécurité anti-raid : détection de vagues d'arrivées, comptes trop récents,
@@ -79,8 +87,19 @@ class AntiRaidService {
       const now = Date.now();
       if (now - (this.joinAlertAt.get(member.guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS) return;
       this.joinAlertAt.set(member.guild.id, now);
-      await this.alert(member.guild, `🚨 Vague d'arrivées détectée : **${count}** en ${cfg.joinWindowSeconds}s.`);
-      if (cfg.action === 'lockdown') await this.#tryLockdown(member.guild);
+      const locked = cfg.action === 'lockdown' ? await this.#tryLockdown(member.guild) : null;
+      await this.alert(member.guild, {
+        tone: 'danger',
+        icon: '🚨',
+        title: 'Vague d\'arrivées détectée',
+        description: `**${count}** membres ont rejoint le serveur en moins de **${cfg.joinWindowSeconds} s**.`,
+        fields: [
+          field(ICONS.members, 'Arrivées', `**${count}**`),
+          field(ICONS.warning, 'Seuil', `${cfg.joinThreshold} en ${cfg.joinWindowSeconds} s`),
+          field(ICONS.lock, 'Lockdown', locked == null ? 'Non configuré' : `🔒 ${locked} salon${locked > 1 ? 's' : ''} verrouillé${locked > 1 ? 's' : ''}`),
+        ],
+        buttons: locked ? [liftLockdownButton()] : [],
+      });
     }
   }
 
@@ -112,52 +131,101 @@ class AntiRaidService {
     if (count < limit) return;
 
     w.reset();
-    await this.alert(guild, `🚨 Activité destructrice anormale : <@${executorId}> — **${count}× ${type}** en ${cfg.destructiveWindowSeconds}s.`);
-    await this.#punishExecutor(guild, executorId, cfg, type);
+    const punished = await this.#punishExecutor(guild, executorId, cfg, type);
+    await this.alert(guild, {
+      tone: 'danger',
+      icon: '🚨',
+      title: 'Activité destructrice anormale',
+      description: `<@${executorId}> a effectué **${count}** actions destructrices en **${cfg.destructiveWindowSeconds} s**.`,
+      thumbnail: executor?.user?.displayAvatarURL?.(),
+      fields: [
+        field(ICONS.user, 'Auteur', executor ? userLine(executor.user) : `<@${executorId}>`),
+        field('💣', 'Type', `${DESTRUCTIVE_LABELS[type] ?? type} ×**${count}**`),
+        field(ICONS.shield, 'Sanction', punished ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)'),
+      ],
+      footer: `ID : ${executorId}`,
+    });
   }
 
   async #punishNewMember(member, reason, cfg) {
     try {
-      if (cfg.action === 'ban') await member.ban({ reason });
+      const ban = cfg.action === 'ban';
+      if (ban) await member.ban({ reason });
       else await member.kick(reason);
-      await this.alert(member.guild, `🛡️ ${member.user.tag} ${cfg.action === 'ban' ? 'banni' : 'expulsé'} — ${reason}.`);
+      await this.alert(member.guild, {
+        tone: 'caution',
+        icon: ICONS.shield,
+        title: ban ? 'Nouveau membre banni' : 'Nouveau membre expulsé',
+        description: `${member.user} a été ${ban ? 'banni' : 'expulsé'} automatiquement à son arrivée.`,
+        thumbnail: member.user.displayAvatarURL?.(),
+        fields: [
+          field(ICONS.user, 'Membre', userLine(member.user)),
+          field(ban ? ICONS.ban : ICONS.kick, 'Sanction', ban ? 'Bannissement' : 'Expulsion'),
+          wide(ICONS.reason, 'Motif', reason.replace(/^AntiRaid: /, '')),
+        ],
+        footer: `ID : ${member.id}`,
+      });
     } catch (e) {
       logger.debug('punishNewMember', e?.message);
     }
   }
 
+  /** @returns {Promise<boolean>} true si une sanction a été appliquée */
   async #punishExecutor(guild, executorId, cfg, type) {
     const member = await guild.members.fetch(executorId).catch(() => null);
-    if (!member) return;
+    if (!member) return false;
     try {
       if (cfg.punishExecutor === 'ban') {
         await member.ban({ reason: `AntiRaid: ${type} massif` });
-      } else if (cfg.punishExecutor === 'strip') {
+        return true;
+      }
+      if (cfg.punishExecutor === 'strip') {
         const removable = member.roles.cache.filter((r) => r.id !== guild.id && r.editable);
-        await member.roles.remove(removable, `AntiRaid: ${type} massif`).catch(() => {});
+        await member.roles.remove(removable, `AntiRaid: ${type} massif`);
+        return true;
       }
     } catch (e) {
       logger.debug('punishExecutor', e?.message);
     }
+    return false;
   }
 
+  /** @returns {Promise<number|null>} salons verrouillés (null si le service est indisponible) */
   async #tryLockdown(guild) {
     // Délègue au LockdownService s'il est disponible
     const lockdown = this.client.services?.lockdown;
-    if (lockdown) await lockdown.enable(guild, guild.members.me, 'AntiRaid automatique').catch(() => {});
+    if (!lockdown) return null;
+    return lockdown.enable(guild, guild.members.me, 'AntiRaid automatique').catch(() => 0);
   }
 
-  async alert(guild, text) {
+  /**
+   * Publie une alerte (carte danger/caution) dans le salon d'alertes et les logs sécurité.
+   * @param {import('discord.js').Guild} guild
+   * @param {string | { tone?: string, icon?: string, title: string, description?: string, fields?: object[],
+   *   thumbnail?: string, footer?: string, buttons?: import('discord.js').ButtonBuilder[] }} alert
+   */
+  async alert(guild, alert) {
+    const a = typeof alert === 'string' ? { description: alert } : alert;
     const guildCfg = this.config.get(guild.id);
     const alertChannelId = guildCfg.antiraid?.alertChannel;
-    const embed = embeds.security('AntiRaid').setDescription(truncate(text, 4096));
+    const embed = card({
+      tone: a.tone ?? 'danger',
+      section: 'security',
+      icon: a.icon ?? '🚨',
+      title: a.title ?? 'Alerte AntiRaid',
+      description: a.description,
+      thumbnail: a.thumbnail,
+      fields: a.fields ?? [],
+      footer: a.footer,
+    });
+    const components = buttonRows(...(a.buttons ?? []));
     // Salon d'alertes dédié uniquement s'il diffère du salon de logs sécurité,
     // sinon l'alerte serait postée deux fois au même endroit.
     if (alertChannelId && alertChannelId !== guildCfg.logChannels?.security) {
       const channel = await this.client.channels.fetch(alertChannelId).catch(() => null);
-      if (channel?.isTextBased()) await channel.send({ embeds: [embed] }).catch(() => {});
+      if (channel?.isTextBased()) await channel.send({ embeds: [embed], components }).catch(() => {});
     }
-    await this.logging.send(guild.id, 'security', embed);
+    await this.logging.send(guild.id, 'security', embed, components);
   }
 }
 

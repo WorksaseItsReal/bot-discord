@@ -1,7 +1,10 @@
 'use strict';
 
 const { createLogger } = require('../core/logger');
-const { embeds, truncate } = require('../utils/embeds');
+const { truncate } = require('../utils/embeds');
+const { discordTimestamp } = require('../utils/time');
+const { card, field, ICONS } = require('../utils/ui');
+const { sanctionCard } = require('./ModerationService');
 
 const logger = createLogger('scheduler');
 
@@ -100,6 +103,7 @@ class SchedulerService {
           await guild.bans.remove(s.user_id, 'Fin du bannissement temporaire');
           this.sanctions.deactivate(s.id);
           logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
+          await this.#logExpiry(guild, s, 'unban', `<@${s.user_id}> a purgé son bannissement temporaire et peut de nouveau rejoindre le serveur.`);
         } catch (e) {
           // 10026 Unknown Ban : déjà débanni manuellement → rien à faire.
           if (e?.code === 10026) this.sanctions.deactivate(s.id);
@@ -112,10 +116,41 @@ class SchedulerService {
         if (member && member.roles.cache.has(roleId)) {
           await member.roles.remove(roleId, 'Fin du mute temporaire').catch(() => {});
           logger.info(`Mute temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
+          await this.#logExpiry(guild, s, 'unmute', `${member} peut de nouveau écrire et parler : son mute temporaire est terminé.`, member.user);
         }
         this.sanctions.deactivate(s.id);
       }
     }
+  }
+
+  /** Log de modération d'une levée automatique (même carte que les levées manuelles). */
+  async #logExpiry(guild, sanction, type, description, user) {
+    const logging = this.client.services?.logging;
+    if (!logging) return;
+    await logging
+      .send(guild.id, 'moderation', sanctionCard({
+        type,
+        user,
+        userId: sanction.user_id,
+        moderator: this.client.user,
+        reason: 'Expiration automatique',
+        description,
+        id: sanction.id,
+      }))
+      .catch(() => {});
+  }
+
+  /** Carte de rappel (salon d'origine ou message privé). */
+  static reminderCard(reminder) {
+    return card({
+      tone: 'info',
+      section: 'utility',
+      icon: '⏰',
+      title: 'Rappel',
+      description: truncate(reminder.message, 4000),
+      fields: [reminder.created_at ? field(ICONS.date, 'Programmé', discordTimestamp(reminder.created_at, 'R')) : null],
+      footer: `Rappel #${reminder.id}`,
+    });
   }
 
   async #processDueReminders() {
@@ -124,7 +159,7 @@ class SchedulerService {
       this.reminders.deleteById(r.id);
       try {
         const user = await this.client.users.fetch(r.user_id);
-        const embed = embeds.info(truncate(r.message, 4000), '⏰ Rappel');
+        const embed = SchedulerService.reminderCard(r);
         const channel = r.channel_id ? await this.client.channels.fetch(r.channel_id).catch(() => null) : null;
         if (channel?.isTextBased()) await channel.send({ content: `${user}`, embeds: [embed] });
         else await user.send({ embeds: [embed] });

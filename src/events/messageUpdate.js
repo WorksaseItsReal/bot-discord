@@ -1,6 +1,8 @@
 'use strict';
 
-const { embeds, truncate } = require('../utils/embeds');
+const { truncate } = require('../utils/embeds');
+const { field, wide, ICONS, userLine, linkButton, buttonRows } = require('../utils/ui');
+const { logCard } = require('../services/LoggingService');
 
 module.exports = {
   name: 'messageUpdate',
@@ -15,12 +17,21 @@ module.exports = {
 
     // Ancien message hors cache : contenu « avant » inconnu, rien d'utile à journaliser.
     if (oldMessage.partial) return;
-    const embed = embeds.info('', '✏️ Message édité').addFields(
-      { name: 'Auteur', value: `${newMessage.author} (${newMessage.author.id})`, inline: true },
-      { name: 'Salon', value: `${newMessage.channel} • [aller au message](${newMessage.url})`, inline: true },
-      { name: 'Avant', value: truncate(oldMessage.content || '*vide*', 1024) },
-      { name: 'Après', value: truncate(newMessage.content || '*vide*', 1024) },
-    );
-    await client.services.logging.send(newMessage.guild.id, 'messages', embed);
+    const author = newMessage.author;
+    const embed = logCard({
+      category: 'messages',
+      tone: 'info',
+      icon: '✏️',
+      title: 'Message modifié',
+      description: `${author} a modifié un message dans ${newMessage.channel}.`,
+      user: author,
+      fields: [
+        field(ICONS.user, 'Auteur', userLine(author)),
+        field(ICONS.channel, 'Salon', `${newMessage.channel}`),
+        wide('⬅️', 'Avant', oldMessage.content ? truncate(oldMessage.content, 1024) : '*Vide*'),
+        wide('➡️', 'Après', newMessage.content ? truncate(newMessage.content, 1024) : '*Vide*'),
+      ],
+    });
+    await client.services.logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)));
   },
 };

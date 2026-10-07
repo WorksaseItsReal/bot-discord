@@ -49,6 +49,7 @@ function render(target, moderator, before, after, { restored = false } = {}) {
 
 module.exports = {
   category: 'moderation',
+  undoButton,
   botPermissions: [PermissionFlagsBits.ManageNicknames],
   data: new SlashCommandBuilder()
     .setName('pseudo')

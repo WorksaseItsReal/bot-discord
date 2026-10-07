@@ -1,17 +1,33 @@
 'use strict';
 
-const { embeds } = require('../utils/embeds');
+const { truncate } = require('../utils/embeds');
+const { discordTimestamp } = require('../utils/time');
+const { field, wide, ICONS, userLine } = require('../utils/ui');
+const { logCard } = require('../services/LoggingService');
 
 module.exports = {
   name: 'messageDelete',
   /** @param {import('../core/GadgetClient').GadgetClient} client */
   async execute(client, message) {
     if (!message.guild || message.author?.bot) return;
-    const embed = embeds.warning('', '🗑️ Message supprimé').addFields(
-      { name: 'Auteur', value: message.author ? `${message.author} (${message.author.id})` : 'Inconnu', inline: true },
-      { name: 'Salon', value: `${message.channel}`, inline: true },
-      { name: 'Contenu', value: (message.content || '*aucun contenu texte*').slice(0, 1024) },
-    );
+    const author = message.author;
+    const files = [...(message.attachments?.values?.() ?? [])].map((a) => a.name ?? 'fichier');
+    const embed = logCard({
+      category: 'messages',
+      tone: 'danger',
+      icon: ICONS.delete,
+      title: 'Message supprimé',
+      description: author ? `Un message de ${author} a été supprimé dans ${message.channel}.` : `Un message a été supprimé dans ${message.channel}.`,
+      user: author,
+      fields: [
+        field(ICONS.user, 'Auteur', author ? userLine(author) : '*Inconnu (hors cache)*'),
+        field(ICONS.channel, 'Salon', `${message.channel}`),
+        field(ICONS.date, 'Envoyé', message.createdTimestamp ? discordTimestamp(message.createdTimestamp, 'R') : '—'),
+        wide('📄', 'Contenu', message.content ? truncate(message.content, 1024) : '*Aucun contenu texte*'),
+        files.length ? wide('📎', `Pièces jointes (${files.length})`, truncate(files.join(' · '), 1024)) : null,
+      ],
+      id: author?.id ?? message.id,
+    });
     await client.services.logging.send(message.guild.id, 'messages', embed);
   },
 };

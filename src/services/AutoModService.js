@@ -2,8 +2,13 @@
 
 const checks = require('../utils/automodChecks');
 const { parseDuration } = require('../utils/time');
-const { embeds, truncate } = require('../utils/embeds');
+const { truncate } = require('../utils/embeds');
 const { PermissionFlagsBits } = require('discord.js');
+const { field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
+const { logCard } = require('./LoggingService');
+
+/** Libellés des actions AutoMod. */
+const ACTION_LABELS = { delete: 'Message supprimé', warn: 'Avertissement', timeout: 'Timeout' };
 
 /** Inactivité au-delà de laquelle l'état d'un membre est oublié (mémoire bornée). */
 const TRACKER_TTL_MS = 10 * 60 * 1000;
@@ -132,26 +137,41 @@ class AutoModService {
     const guild = message.guild;
     await message.delete().catch(() => {});
 
+    let timedOut = false;
+    let actionText = ACTION_LABELS.delete;
     if (violation.action === 'timeout') {
-      const ms = parseDuration(violation.duration || '5m') || 300_000;
-      await message.member.timeout(ms, `AutoMod: ${violation.reason}`).catch(() => {});
+      const duration = violation.duration || '5m';
+      const ms = parseDuration(duration) || 300_000;
+      timedOut = await message.member.timeout(ms, `AutoMod: ${violation.reason}`).then(() => true, () => false);
+      actionText = timedOut ? `${ACTION_LABELS.timeout} (${duration})` : `${ACTION_LABELS.delete} · timeout impossible`;
     } else if (violation.action === 'warn') {
-      await this.moderation
+      const warned = await this.moderation
         .record(guild, message.author, guild.members.me, { type: 'warn', reason: `AutoMod: ${violation.reason}` })
-        .catch(() => {});
+        .then((r) => r, () => null);
+      actionText = warned?.id ? `${ACTION_LABELS.warn} (sanction #${warned.id})` : ACTION_LABELS.warn;
     }
 
-    await this.logging.send(
-      guild.id,
-      'automod',
-      embeds.security('🤖 AutoMod').addFields(
-        { name: 'Membre', value: `${message.author} (${message.author.id})`, inline: true },
-        { name: 'Salon', value: `${message.channel}`, inline: true },
-        { name: 'Règle', value: violation.reason, inline: true },
-        { name: 'Action', value: violation.action, inline: true },
-        { name: 'Message', value: truncate(message.content || '—', 1024) },
-      ),
+    const embed = logCard({
+      category: 'automod',
+      tone: timedOut ? 'danger' : 'caution',
+      icon: ICONS.automod,
+      title: 'Message filtré',
+      description: `Un message de ${message.author} a été bloqué dans ${message.channel}.`,
+      user: message.author,
+      fields: [
+        field(ICONS.user, 'Membre', userLine(message.author)),
+        field(ICONS.warning, 'Règle', violation.reason),
+        field(ICONS.shield, 'Action', actionText),
+        wide(ICONS.channel, 'Message', message.content ? truncate(message.content, 1024) : '*Aucun contenu texte*'),
+      ],
+    });
+    const components = buttonRows(
+      timedOut
+        ? actionButton({ command: 'untimeout', action: 'revoke', args: [message.author.id], label: 'Retirer le timeout', emoji: ICONS.unmute, style: ButtonStyle.Success })
+        : null,
+      actionButton({ command: 'sanctions', action: 'history', args: [message.author.id], label: 'Sanctions', emoji: ICONS.history }),
     );
+    await this.logging.send(guild.id, 'automod', embed, components);
   }
 }
 
