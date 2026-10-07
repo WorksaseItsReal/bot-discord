@@ -6,6 +6,7 @@ const {
   AutoModerationActionType: ActionType,
   AutoModerationRuleKeywordPresetType: Preset,
   PermissionFlagsBits,
+  ChannelType,
 } = require('discord.js');
 const { UserError } = require('../core/errors');
 
@@ -34,32 +35,28 @@ function actions(logChannelId) {
   return list;
 }
 
-/** Règles souhaitées pour une configuration AutoMod. Pur. */
+/**
+ * Règles souhaitées pour une configuration AutoMod. Pur.
+ * Seuls les filtres ACTIFS du bot ont leur équivalent natif.
+ */
 function desiredRules(cfg, logChannelId) {
+  const f = cfg.filters ?? {};
   const exempt = {
     exemptRoles: (cfg.ignoredRoles ?? []).slice(0, 20),
     exemptChannels: (cfg.ignoredChannels ?? []).slice(0, 50),
   };
   const rules = [];
-  const keywords = toKeywords(cfg.filters?.badWords?.words);
-  if (cfg.filters?.badWords?.enabled && keywords.length) {
-    rules.push({ key: 'keywords', name: NAMES.keywords, triggerType: Trigger.Keyword, triggerMetadata: { keywordFilter: keywords }, ...exempt });
+  if (f.badWords?.enabled) {
+    const keywords = toKeywords(f.badWords.words);
+    if (keywords.length) rules.push({ name: NAMES.keywords, triggerType: Trigger.Keyword, triggerMetadata: { keywordFilter: keywords }, ...exempt });
+    rules.push({ name: NAMES.preset, triggerType: Trigger.KeywordPreset, triggerMetadata: { presets: [Preset.Slurs, Preset.SexualContent] }, ...exempt });
   }
-  rules.push({
-    key: 'preset',
-    name: NAMES.preset,
-    triggerType: Trigger.KeywordPreset,
-    triggerMetadata: { presets: [Preset.Slurs, Preset.SexualContent] },
-    ...exempt,
-  });
-  rules.push({
-    key: 'mentions',
-    name: NAMES.mentions,
-    triggerType: Trigger.MentionSpam,
-    triggerMetadata: { mentionTotalLimit: Math.min(50, Math.max(2, cfg.filters?.antiMassMention?.limit ?? 5)), mentionRaidProtectionEnabled: true },
-    ...exempt,
-  });
-  rules.push({ key: 'spam', name: NAMES.spam, triggerType: Trigger.Spam, ...exempt });
+  if (f.antiMassMention?.enabled) {
+    // Le bot sanctionne à partir de `limit` mentions ; Discord bloque AU-DELÀ de la limite.
+    const limit = Math.min(50, Math.max(1, (f.antiMassMention.limit ?? 5) - 1));
+    rules.push({ name: NAMES.mentions, triggerType: Trigger.MentionSpam, triggerMetadata: { mentionTotalLimit: limit, mentionRaidProtectionEnabled: true }, ...exempt });
+  }
+  if (f.antiSpam?.enabled) rules.push({ name: NAMES.spam, triggerType: Trigger.Spam, ...exempt });
   return rules.map((r) => ({ ...r, eventType: EventType.MessageSend, actions: actions(logChannelId), enabled: true }));
 }
 
@@ -82,29 +79,35 @@ async function ownRules(guild) {
  */
 async function sync(guild, cfg, logChannelId) {
   assertCanManage(guild);
+  // Le salon d'alerte doit être un salon textuel visible par le bot, sinon toutes les règles échouent.
+  const logChannel = logChannelId ? guild.channels?.cache?.get(logChannelId) : null;
+  const alertChannelId = logChannel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(logChannel.type) ? logChannelId : null;
+  const desired = desiredRules(cfg, alertChannelId);
   const existing = await ownRules(guild);
-  const result = { created: [], updated: [], failed: [] };
-  for (const rule of desiredRules(cfg, logChannelId)) {
-    const { key, ...data } = rule;
-    void key;
+  const result = { created: [], updated: [], removed: [], failed: [] };
+  for (const rule of desired) {
     const current = existing.find((r) => r.name === rule.name);
     try {
       if (current) {
-        const { triggerType, ...editable } = data; // le type d'une règle ne peut pas changer
+        const { triggerType, ...editable } = rule; // le type d'une règle ne peut pas changer
         void triggerType;
         await current.edit(editable);
         result.updated.push(rule.name);
       } else {
-        await guild.autoModerationRules.create(data);
+        await guild.autoModerationRules.create(rule);
         result.created.push(rule.name);
       }
     } catch (err) {
-      result.failed.push({ name: rule.name, reason: err?.code === 30035 || /maximum/i.test(err?.message ?? '') ? 'une règle de ce type existe déjà sur le serveur' : err?.message ?? 'erreur inconnue' });
+      const limitReached = /maximum|max.*rules|limit/i.test(err?.message ?? '');
+      result.failed.push({ name: rule.name, reason: limitReached ? 'une règle de ce type existe déjà sur le serveur' : err?.message ?? 'erreur inconnue' });
     }
   }
-  // Mots interdits vidés ou filtre coupé : on retire la règle de mots-clés devenue obsolète.
-  const stale = existing.find((r) => r.name === NAMES.keywords);
-  if (stale && !desiredRules(cfg, logChannelId).some((r) => r.name === NAMES.keywords)) await stale.delete().catch(() => {});
+  // Règles du bot devenues inutiles (filtre coupé, liste vidée) : retirées.
+  for (const r of existing) {
+    if (!desired.some((d) => d.name === r.name)) {
+      if (await r.delete().then(() => true, () => false)) result.removed.push(r.name);
+    }
+  }
   return result;
 }
 

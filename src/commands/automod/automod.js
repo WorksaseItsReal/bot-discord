@@ -490,16 +490,18 @@ async function handleNative(interaction, client) {
   return interaction.editReply({
     embeds: [
       card({
-        tone: result.failed.length ? (ok ? 'warning' : 'danger') : 'success',
+        tone: result.failed.length ? (ok ? 'warning' : 'danger') : ok ? 'success' : 'neutral',
         section: 'automod',
         icon: '🛡️',
         title: 'AutoMod natif synchronisé',
         description: [
           ...result.created.map((n) => `🆕 ${n}`),
           ...result.updated.map((n) => `🔄 ${n}`),
+          ...(result.removed ?? []).map((n) => `🗑️ ${n} (filtre désactivé)`),
           ...result.failed.map((f) => `${ICONS.error} ${f.name} — ${f.reason}`),
           '',
-          subtext('Bloque avant l\'envoi : contenu offensant, spam suspect, mentions massives et vos mots interdits. Relancez après avoir modifié vos mots interdits.'),
+          ok ? null : 'Aucun filtre compatible n\'est actif (mots interdits, anti-spam, mentions de masse).',
+          subtext('Bloque avant l\'envoi, même bot hors ligne. Discord exempte d\'office « Gérer le serveur » et les administrateurs. Relancez après avoir modifié vos filtres.'),
         ],
       }),
     ],

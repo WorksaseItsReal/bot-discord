@@ -65,7 +65,7 @@ const defaultGuildConfig = Object.freeze({
       antiLink: { enabled: false, action: 'delete', allowedDomains: [] },
       antiInvite: { enabled: false, action: 'delete', allowedCodes: [], allowOwnServer: true },
       antiPhishing: { enabled: false, threshold: 3, action: 'timeout', duration: '1d' },
-      antiCrossChannel: { enabled: false, channels: 3, windowSeconds: 60, minLength: 12, action: 'timeout', duration: '1h' },
+      antiCrossChannel: { enabled: false, channels: 3, windowSeconds: 60, minLength: 20, action: 'timeout', duration: '1h' },
       antiMassMention: { enabled: false, limit: 5, action: 'timeout', duration: '10m' },
       antiCaps: { enabled: false, percent: 70, minLength: 10, action: 'delete' },
       badWords: { enabled: false, words: [], action: 'delete' },

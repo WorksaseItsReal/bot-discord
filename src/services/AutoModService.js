@@ -30,6 +30,22 @@ const NOTICE_TTL_MS = 8 * 1000;
 /** Au-delà, l'analyse lourde (normalisation, liens) ne porte que sur le début du message. */
 const MAX_SCAN_LENGTH = 4000;
 
+/** Hôtes toujours tolérés par l'anti-liens (GIF du sélecteur, liens de messages Discord…). */
+const BUILTIN_ALLOWED_HOSTS = ['discord.gg', 'discord.com', 'discordapp.com', 'discordapp.net', 'discord.gift', 'tenor.com'];
+
+/** Liens non autorisés (hors liste blanche du serveur et hôtes Discord/Tenor). Pur. */
+function blockedLinks(links, antiLink = {}) {
+  const allowed = [...BUILTIN_ALLOWED_HOSTS, ...(antiLink.allowedDomains ?? [])];
+  return links.filter((l) => !hostMatches(l.host, allowed));
+}
+
+/** Invitations non autorisées (hors liste blanche et invitation personnalisée du serveur). Pur. */
+function blockedInvites(invites, antiInvite = {}, guild = null) {
+  const allowed = new Set((antiInvite.allowedCodes ?? []).map((c) => String(c).toLowerCase()));
+  const vanity = antiInvite.allowOwnServer !== false ? guild?.vanityURLCode?.toLowerCase() : null;
+  return invites.filter((c) => !allowed.has(c) && c !== vanity);
+}
+
 /** Sévérité des actions : la violation la plus sévère l'emporte. */
 const SEVERITY = { delete: 1, warn: 2, timeout: 3, kick: 4 };
 
@@ -133,7 +149,9 @@ class AutoModService {
    * @param {{ edited?: boolean }} [opts] message édité : seuls les filtres de contenu s'appliquent.
    */
   async handleMessage(message, { edited = false } = {}) {
-    if (!message.guild || message.author?.bot || message.webhookId) return;
+    // Bots, webhooks et messages système (dont les alertes de l'AutoMod natif, attribuées
+    // au membre fautif) : jamais analysés, sinon on supprimerait la preuve.
+    if (!message.guild || message.author?.bot || message.webhookId || message.system) return;
     const cfg = this.config.get(message.guild.id).automod;
     if (!cfg?.enabled) return;
     // Message édité d'un membre hors cache : on le récupère au lieu d'abandonner.
@@ -164,19 +182,15 @@ class AutoModService {
     const invites = text ? extractInvites(text) : [];
 
     if (f.antiInvite?.enabled && invites.length) {
-      const allowed = new Set((f.antiInvite.allowedCodes ?? []).map((c) => String(c).toLowerCase()));
-      const vanity = f.antiInvite.allowOwnServer !== false ? message.guild?.vanityURLCode?.toLowerCase() : null;
-      const bad = invites.filter((c) => !allowed.has(c) && c !== vanity);
+      const bad = blockedInvites(invites, f.antiInvite, message.guild);
       if (bad.length) hit('antiInvite', 'Invitation Discord interdite', bad.map((c) => `discord.gg/${c}`).join(', '));
     }
     if (f.antiPhishing?.enabled && links.length) {
-      const scan = phishingScore(text, { mentionsEveryone: message.mentions?.everyone });
+      const scan = phishingScore(text, { mentionsEveryone: message.mentions?.everyone, allowedDomains: f.antiLink?.allowedDomains });
       if (scan.score >= (f.antiPhishing.threshold ?? 3)) hit('antiPhishing', 'Lien d\'arnaque probable', scan.reasons.join(' · '));
     }
     if (f.antiLink?.enabled && links.length) {
-      const allowed = f.antiLink.allowedDomains ?? [];
-      // Les invitations relèvent de l'anti-invitations ; les GIF Discord/Tenor sont tolérés.
-      const bad = links.filter((l) => !hostMatches(l.host, allowed) && !/^(discord\.gg|discord\.com|discordapp\.com|tenor\.com|media\.discordapp\.net|cdn\.discordapp\.com)$/.test(l.host));
+      const bad = blockedLinks(links, f.antiLink);
       if (bad.length) hit('antiLink', 'Lien interdit', bad.map((l) => l.host).slice(0, 5).join(', '));
     }
     if (f.badWords?.enabled && text) {
@@ -195,9 +209,12 @@ class AutoModService {
     if (f.antiWall?.enabled && shape.isWall(message.content, f.antiWall)) hit('antiWall', 'Message trop long', 'pavé de texte');
     if (f.antiZalgo?.enabled && shape.isZalgo(text)) hit('antiZalgo', 'Texte zalgo', 'caractères empilés');
 
-    if (newMembers?.enabled) this.#inspectNewMember(message, newMembers, links, invites, hits);
+    if (newMembers?.enabled) this.#inspectNewMember(message, newMembers, blockedLinks(links, f.antiLink), blockedInvites(invites, f.antiInvite, message.guild), hits);
     if (temporal) this.#inspectTemporal(message, text, links, f, hit);
-    return mostSevere(hits);
+    const best = mostSevere(hits);
+    // Les copies d'un spam multi-salons sont supprimées même si un autre filtre l'emporte.
+    const related = hits.flatMap((h) => h.related ?? []);
+    return best && related.length ? { ...best, related } : best;
   }
 
   /** Nouveaux venus : liens, invitations et médias bloqués pendant la période de probation. */
@@ -301,11 +318,10 @@ class AutoModService {
     let escalated = null;
     if (this.events) {
       try {
-        this.events.add({ guildId: guild.id, userId: message.author.id, filter: violation.filter ?? 'autre', action, channelId: message.channel?.id });
         const esc = cfg.escalation;
         if (esc?.enabled) {
           const since = Date.now() - (esc.windowMinutes ?? 30) * 60_000;
-          const count = this.events.countRecent(guild.id, message.author.id, since);
+          const count = this.events.countRecent(guild.id, message.author.id, since) + 1; // + l'infraction en cours
           const step = escalationStep(esc.steps, count);
           if (step && severity(step) > severity({ action, duration })) {
             escalated = { count, step };
@@ -313,13 +329,18 @@ class AutoModService {
             duration = step.duration ?? null;
           }
         }
+        // Journalisé avec l'action FINALE (les statistiques montrent les sanctions réelles).
+        this.events.add({ guildId: guild.id, userId: message.author.id, filter: violation.filter ?? 'autre', action, channelId: message.channel?.id });
       } catch (err) {
         logger.warn('Journal AutoMod indisponible :', err?.message);
       }
     }
 
-    const outcome = await this.#sanction(message, { action, duration, reason: escalated ? `${reason} (récidive : ${escalated.count} infractions)` : reason });
-    await this.#notify(message, violation, outcome, cfg).catch(() => {});
+    const finalReason = escalated ? `${reason} (récidive : ${escalated.count} infractions)` : reason;
+    // Une expulsion empêche tout MP ensuite : on prévient le membre AVANT.
+    if (action === 'kick') await this.#notify(message, violation, { text: ACTION_LABELS.kick }, cfg, deleted).catch(() => {});
+    const outcome = await this.#sanction(message, { action, duration, reason: finalReason });
+    if (action !== 'kick') await this.#notify(message, violation, outcome, cfg, deleted).catch(() => {});
 
     const details = [violation.detail, escalated ? `Sanction progressive : ${escalated.count} infractions récentes` : null].filter(Boolean);
     const embed = logCard({
@@ -383,7 +404,7 @@ class AutoModService {
   }
 
   /** Prévient le membre (salon, éphémère et auto-supprimé, ou MP), au plus toutes les 10 s. */
-  async #notify(message, violation, outcome, cfg) {
+  async #notify(message, violation, outcome, cfg, deleted = true) {
     const mode = cfg.notify ?? 'none';
     if (mode === 'none') return;
     const key = this.#key(message.guild.id, message.author.id);
@@ -393,7 +414,7 @@ class AutoModService {
     const embed = card({
       tone: 'warning',
       icon: ICONS.automod,
-      title: 'Message retiré par l\'AutoMod',
+      title: deleted ? 'Message retiré par l\'AutoMod' : 'Message signalé par l\'AutoMod',
       description: [`${ICONS.warning} **${violation.reason}**`, outcome.text !== ACTION_LABELS.delete ? `Sanction : ${outcome.text}` : null, subtext('Merci de respecter les règles du serveur.')],
       timestamp: false,
     });
@@ -408,4 +429,4 @@ class AutoModService {
   }
 }
 
-module.exports = { AutoModService, mostSevere, escalationStep, messageText, severity, DUPLICATE_WINDOW_MS };
+module.exports = { AutoModService, mostSevere, escalationStep, messageText, severity, blockedLinks, blockedInvites, DUPLICATE_WINDOW_MS };

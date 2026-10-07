@@ -26,12 +26,13 @@ function countEmojis(text) {
   return custom + unicode;
 }
 
-/** Zalgo : beaucoup de diacritiques empilés. */
-function isZalgo(text, { minMarks = 10, ratio = 0.5 } = {}) {
-  const str = String(text ?? '').normalize('NFD');
-  const marks = (str.match(/\p{M}/gu) || []).length;
-  const letters = (str.match(/\p{L}/gu) || []).length;
-  return marks >= minMarks && letters > 0 && marks / letters >= ratio;
+/**
+ * Zalgo : diacritiques EMPILÉS (au moins 3 sur une même lettre). L'hindi, l'arabe
+ * vocalisé ou le vietnamien (1 à 2 signes par lettre) ne sont pas concernés.
+ */
+function isZalgo(text, { minMarks = 10 } = {}) {
+  const runs = String(text ?? '').normalize('NFD').match(/\p{M}{3,}/gu) || [];
+  return runs.reduce((n, r) => n + r.length, 0) >= minMarks;
 }
 
 /** Pavé : trop de lignes ou trop de caractères. */

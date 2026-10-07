@@ -1,14 +1,20 @@
 'use strict';
 
+const { canonical } = require('./normalize');
+
 /**
  * Extraction de liens et d'invitations, y compris sans « https:// » et masqués.
  */
 
-/** TLD reconnus pour les domaines écrits sans protocole (évite « fichier.txt », « ex.gr »…). */
+/**
+ * TLD reconnus pour les domaines écrits sans protocole (évite « fichier.txt », « ex.gr »…).
+ * Volontairement sans sh, cc, so, pt, pl, am, ml, js… : extensions de fichiers trop courantes
+ * (install.sh, main.cc, model.pt…). Avec « https:// », tous les TLD restent détectés.
+ */
 const TLDS = new Set(
   ('com net org io gg fr be ch ca de uk us me co xyz ru info biz app dev site online store shop link click top live tv gift ' +
-    'ly to cc win club pro space fun icu buzz vip lol one tk ml ga cf gq pw su ws eu es it nl pl pt br in jp cn au nz mx ' +
-    'ai so sh am fm im is la ma my ph sg tw vn za art blog cloud codes digital email events games host life media news ' +
+    'ly to win club pro space fun icu buzz vip lol one tk ga cf gq pw su ws eu es it nl br in jp cn au nz mx ' +
+    'ai fm im is la ma my ph sg tw vn za art blog cloud codes digital email events games host life media news ' +
     'page world zone rest bar wtf gay porn sex xxx cam download stream promo deal sale free money claim')
     .split(/\s+/),
 );
@@ -50,9 +56,14 @@ const INVITE_RE = /(?:discord(?:app)?\.com\/invite|discord\.(?:gg|io|me|li|link)
  * @returns {string[]} codes d'invitation trouvés (minuscules)
  */
 function extractInvites(text) {
-  // Recolle « discord . gg / abc » → « discord.gg/abc » avant l'analyse.
-  const compact = String(text ?? '').replace(/\s*([./])\s*/g, '$1').replace(/\(dot\)|\[dot\]/gi, '.');
-  return [...compact.matchAll(INVITE_RE)].map((m) => m[1].toLowerCase());
+  // Normalisé d'abord (invisibles, homoglyphes, pleine chasse…).
+  const plain = canonical(text);
+  const direct = [...plain.matchAll(INVITE_RE)].map((m) => m[1].toLowerCase());
+  // Puis version recollée (« discord . gg / abc »). Pour limiter les faux positifs
+  // (« discord. Gg/wp à tous »), un code ainsi reconstitué doit faire au moins 3 caractères.
+  const compact = plain.replace(/\s*([./])\s*/g, '$1').replace(/\(dot\)|\[dot\]/gi, '.');
+  const rebuilt = [...compact.matchAll(INVITE_RE)].map((m) => m[1].toLowerCase()).filter((c) => c.length >= 3);
+  return [...new Set([...direct, ...rebuilt])];
 }
 
 module.exports = { extractLinks, extractInvites, hostMatches, TLDS };

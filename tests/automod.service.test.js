@@ -116,6 +116,8 @@ test('sanctions progressives : la 3e infraction monte en timeout (journal persis
   const detail = logs[2][2].toJSON().fields.find((f) => f.name.includes('Détail')).value;
   assert.match(detail, /Sanction progressive : 3 infractions/);
   assert.equal(events.stats('g1', 0).byFilter[0].filter, 'antiLink');
+  // L'action FINALE (timeout d'escalade) est celle enregistrée pour les statistiques.
+  assert.ok(events.stats('g1', 0).byAction.some((a) => a.action === 'timeout'));
 });
 
 test('suppression impossible signalée dans le log', async () => {
@@ -143,12 +145,14 @@ test('préréglages : uniquement des clés connues de la configuration', () => {
 });
 
 test('AutoMod natif : règles conformes aux limites Discord', () => {
-  const rules = native.desiredRules({ filters: { badWords: { enabled: true, words: ['Con', 'x'.repeat(61), 'arnaque*'] }, antiMassMention: { limit: 99 } }, ignoredRoles: Array(30).fill('1') }, '42');
+  const rules = native.desiredRules({ filters: { badWords: { enabled: true, words: ['Con', 'x'.repeat(61), 'arnaque*'] }, antiMassMention: { enabled: true, limit: 99 }, antiSpam: { enabled: true } }, ignoredRoles: Array(30).fill('1') }, '42');
   const kw = rules.find((r) => r.name === native.NAMES.keywords);
   assert.deepEqual(kw.triggerMetadata.keywordFilter, ['con', 'arnaque*']);
   assert.equal(rules.find((r) => r.name === native.NAMES.mentions).triggerMetadata.mentionTotalLimit, 50);
   assert.ok(rules.every((r) => r.exemptRoles.length <= 20 && r.actions.length === 2));
-  assert.equal(native.desiredRules({ filters: {} }).some((r) => r.name === native.NAMES.keywords), false);
+  assert.equal(native.desiredRules({ filters: {} }).length, 0, 'aucune règle sans filtre actif');
+  const m = native.desiredRules({ filters: { antiMassMention: { enabled: true, limit: 5 } } });
+  assert.equal(m[0].triggerMetadata.mentionTotalLimit, 4, 'aligné : le bot sanctionne à 5, Discord bloque au-delà de 4');
 });
 
 test('giveaways : les gagnants sont mémorisés pour exclure tous les anciens lors d\'une relance', () => {
@@ -159,4 +163,35 @@ test('giveaways : les gagnants sont mémorisés pour exclure tous les anciens lo
   repo.addWinners(id, ['a']);
   repo.addWinners(id, ['b', 'a']);
   assert.deepEqual(repo.winners(id).sort(), ['a', 'b']);
+});
+
+test('revue : GIF Tenor et liste blanche respectés pour les nouveaux venus ; messages système ignorés', async () => {
+  const s = svc();
+  const rules = { enabled: true, accountAgeDays: 7, joinedMinutes: 30, blockLinks: true, blockInvites: true };
+  const fresh = (content) => msg(content, { extra: { author: { id: 'n1', createdTimestamp: Date.now() } } });
+  assert.equal(s.inspect(fresh('https://tenor.com/view/chat-123'), { antiLink: { allowedDomains: [] } }, { temporal: false, newMembers: rules }), null);
+  assert.equal(s.inspect(fresh('https://youtube.com/x'), { antiLink: { allowedDomains: ['youtube.com'] } }, { temporal: false, newMembers: rules }), null);
+  assert.equal(s.inspect(fresh('https://evil.ru/x'), { antiLink: {} }, { temporal: false, newMembers: rules })?.filter, 'newMembers');
+  const config = { get: () => { throw new Error('ne doit pas être lu'); } };
+  await new AutoModService({ config, logging: {}, moderation: {} }).handleMessage({ guild: { id: 'g' }, author: { bot: false }, system: true });
+});
+
+test('revue : sous-domaines Discord/Tenor tolérés par l\'anti-liens', () => {
+  const s = svc();
+  const filters = { antiLink: { enabled: true, allowedDomains: [] } };
+  for (const t of ['https://ptb.discord.com/channels/1/2/3', 'https://media.tenor.com/x.gif', 'https://cdn.discordapp.com/a.png']) {
+    assert.equal(s.inspect(msg(t), filters, { temporal: false }), null, t);
+  }
+});
+
+test('revue : copies multi-salons conservées même si un filtre plus sévère l\'emporte', () => {
+  const s = svc();
+  const filters = {
+    antiCrossChannel: { enabled: true, channels: 2, windowSeconds: 60, minLength: 5, action: 'delete' },
+    antiInvite: { enabled: true, action: 'timeout', duration: '1h' },
+  };
+  s.inspect(msg('rejoins discord.gg/arnaque vite', { channelId: 'a', userId: 'x9' }), filters);
+  const hit = s.inspect(msg('rejoins discord.gg/arnaque vite', { channelId: 'b', userId: 'x9' }), filters);
+  assert.equal(hit.filter, 'antiInvite');
+  assert.equal(hit.related.length, 1);
 });
