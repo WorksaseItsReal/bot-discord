@@ -19,6 +19,11 @@ const OFFICIAL = [
   'twitch.tv', 'twitchtracker.com', 'youtube.com', 'youtu.be', 'epicgames.com', 'roblox.com', 'robloxdev.com', 'github.com',
 ];
 
+/** Sites légitimes contenant une marque et un mot d'appât (« steamgifts ») : jamais signalés. */
+const KNOWN_LEGIT = ['steamgifts.com', 'steamtrades.com', 'steamrep.com', 'steamid.io', 'steamid.uk', 'discordextremelist.xyz',
+  'discordservers.com', 'discordapp.io', 'discord.bots.gg', 'twitchapps.com', 'twitchemotes.com', 'twitchmetrics.net',
+  'streamelements.com', 'streamlabs.com', 'epicgames.dev', 'unrealengine.com', 'rbxcdn.com', 'robloxlabs.com'];
+
 /** Marques usurpées. */
 const BRANDS = ['discord', 'discordapp', 'steamcommunity', 'steampowered', 'steam', 'nitro', 'roblox', 'epicgames', 'twitch'];
 
@@ -34,7 +39,8 @@ const SUSPICIOUS_TLDS = new Set(['xyz', 'ru', 'tk', 'ml', 'ga', 'cf', 'gq', 'top
 /** Vrais mots proches d'une marque (« stream », « switch »…) : jamais pris pour une imitation. */
 const DICTIONARY = new Set(['stream', 'streams', 'steak', 'steal', 'steady', 'steamy', 'stamp', 'scream', 'switch', 'witch',
   'twitchy', 'discard', 'discards', 'disco', 'record', 'accord', 'nitric', 'nitrous', 'robin', 'robot', 'epic', 'steamed',
-  'steamer', 'steams', 'nitrogen', 'nitrate', 'stream', 'dream', 'cream', 'team', 'teams', 'steel', 'steep']);
+  'steamer', 'steams', 'nitrogen', 'nitrate', 'stream', 'dream', 'cream', 'team', 'teams', 'steel', 'steep', 'stead',
+  'steady', 'stewm', 'epicgamer', 'epicgamers', 'robots', 'roblex', 'discos', 'discover', 'discovery', 'disord', 'twitter']);
 
 const SHORTENERS = ['bit.ly', 'tinyurl.com', 'cutt.ly', 'is.gd', 'rb.gy', 'shorturl.at', 't.ly', 'goo.su', 'clck.ru', 'v.gd', 'tiny.cc', 'ow.ly', 'grabify.link', 'iplogger.org', 'iplogger.com', '2no.co', 'blasze.com', 'yip.su'];
 
@@ -42,21 +48,30 @@ const BAIT = /\b(?:free\s*nitro|nitro\s*(?:free|gratuit|gift|for\s*free)|gratuit
 const URGENCY = /\b(?:first\s+\d+|premiers?\s+\d+|limited|limit[ée]e?|hurry|d[ée]p[êe]che[sz]?-?(?:toi|vous)|only\s*today|aujourd'?hui\s*seulement|expire[sd]?|before\s*it'?s\s*gone)\b/i;
 
 function isOfficial(host, extraAllowed = []) {
-  return [...OFFICIAL, ...extraAllowed].some((d) => host === d || host.endsWith(`.${d}`));
+  return [...OFFICIAL, ...KNOWN_LEGIT, ...extraAllowed].some((d) => host === d || host.endsWith(`.${d}`));
 }
 
-/** Distance de Levenshtein bornée (rapide pour de courtes chaînes). */
+/** Ramène une partie de domaine à sa forme « lue » : homoglyphes, leet, rn→m, cl→d, vv→w. */
+const readAs = (label) => leet(canonical(label)).replace(/rn/g, 'm').replace(/cl/g, 'd').replace(/vv/g, 'w');
+
+/** Noms des domaines officiels imitables (« discord », « steamcommunity »…). */
+const OFFICIAL_NAMES = new Set(BRANDS.filter((b) => b.length >= 6));
+
+/** Distance de Damerau-Levenshtein bornée (une inversion « dicsord » compte pour 1). */
 function distance(a, b, max = 3) {
   if (Math.abs(a.length - b.length) > max) return max + 1;
+  let before = null;
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
     const cur = [i];
     let best = i;
     for (let j = 1; j <= b.length; j++) {
       cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (before && i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) cur[j] = Math.min(cur[j], before[j - 2] + 1);
       best = Math.min(best, cur[j]);
     }
     if (best > max) return max + 1;
+    before = prev;
     prev = cur;
   }
   return prev[b.length];
@@ -72,17 +87,31 @@ function imitatesBrand(host, extraAllowed = []) {
   if (isOfficial(host, extraAllowed)) return null;
   const labels = host.split('.');
   const tld = labels.at(-1);
-  const name = leet(canonical(labels.slice(0, -1).join('.'))).replace(/rn/g, 'm');
-  const tokens = name.split(/[.-]/).filter(Boolean);
+  const rawTokens = labels.slice(0, -1).join('.').split(/[.-]/).filter(Boolean);
+  const tokens = rawTokens.map(readAs);
   const flat = tokens.join('');
-  const hasLure = tokens.some((t) => LURES.includes(t)) || LURES.some((l) => l.length >= 4 && flat.includes(l) && BRANDS.some((b) => flat.includes(b) && !b.includes(l)));
+  const hyphenLure = tokens.some((t) => LURES.includes(t));
+  const glued = LURES.some((l) => l.length >= 4 && flat.includes(l) && BRANDS.some((b) => flat.includes(b) && !b.includes(l)));
+  // Nom du domaine sans tirets (« steam-community » → « steamcommunity ») : même nom
+  // qu'un domaine officiel, mais autre extension (« steamcommunity.co », « discordapp.co »).
+  const sld = readAs(labels.at(-2) ?? '').replace(/-/g, '');
+  if (OFFICIAL_NAMES.has(sld)) return { brand: sld, kind: 'typosquat' };
   for (const brand of BRANDS) {
-    // Typosquat : même première lettre, distance 1 (2 pour les noms longs), pas un vrai mot.
-    for (const t of tokens) {
-      if (t === brand || t.length < 5 || DICTIONARY.has(t) || t[0] !== brand[0]) continue;
+    for (const [i, t] of tokens.entries()) {
+      // Homoglyphe ou « rn » pour « m » : se LIT comme la marque sans l'être (« dіscord », « stearn »).
+      if (t === brand) {
+        if (rawTokens[i] !== brand && brand.length >= 5) return { brand, kind: 'typosquat' };
+        continue;
+      }
+      // Typosquat : même première lettre, distance 1 (2 pour les noms longs), pas un vrai mot.
+      if (t.length < 5 || DICTIONARY.has(t) || t[0] !== brand[0]) continue;
       if (distance(t, brand, 2) <= (brand.length >= 8 ? 2 : 1)) return { brand, kind: 'typosquat' };
     }
-    if (flat.includes(brand) && (hasLure || SUSPICIOUS_TLDS.has(tld))) return { brand, kind: 'lure' };
+    if (flat.includes(brand) && (hyphenLure || glued || SUSPICIOUS_TLDS.has(tld))) {
+      // Marque collée à un appât sans tiret ni extension douteuse (« steamtrades.com ») :
+      // indice plus faible, il faut un autre signal pour atteindre le seuil.
+      return { brand, kind: 'lure', weak: !hyphenLure && !SUSPICIOUS_TLDS.has(tld) };
+    }
   }
   return null;
 }
@@ -104,8 +133,13 @@ function phishingScore(text, ctx = {}) {
     if (isOfficial(l.host, allowed)) continue;
     const imitation = imitatesBrand(l.host, allowed);
     if (imitation) {
-      linkScore += 3;
+      linkScore += imitation.weak ? 2 : 3;
       reasons.push(`domaine imitant « ${imitation.brand} » (${l.host})`);
+    }
+    if (l.disguised) {
+      // « https://discord.com@evil.ru » : se fait passer pour un autre site → arnaque à lui seul.
+      linkScore += l.disguised === 'domain' ? 3 : 2;
+      reasons.push(`lien déguisé (« …@ » devant le vrai site ${l.host})`);
     }
     if (l.host.split('.').some((p) => p.startsWith('xn--'))) {
       linkScore += 2;
@@ -137,4 +171,4 @@ function phishingScore(text, ctx = {}) {
   return { score, reasons: [...new Set(reasons)], links };
 }
 
-module.exports = { phishingScore, imitatesBrand, isOfficial, distance, OFFICIAL, SHORTENERS };
+module.exports = { phishingScore, imitatesBrand, isOfficial, distance, OFFICIAL, KNOWN_LEGIT, SHORTENERS };

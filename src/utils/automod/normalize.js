@@ -35,7 +35,9 @@ const ENCLOSED = [
   [0x1f1e6, 0x1f1ff],
 ];
 function enclosedToLatin(text) {
-  return text.replace(/[\u{1F130}-\u{1F189}\u{1F1E6}-\u{1F1FF}]/gu, (c) => {
+  // Deux indicateurs régionaux collés forment un drapeau (🇫🇷) : c'est un emoji, pas « fr ».
+  return text.replace(/[\u{1F1E6}-\u{1F1FF}]{2}|[\u{1F130}-\u{1F189}\u{1F1E6}-\u{1F1FF}]/gu, (c) => {
+    if ([...c].length === 2) return '🏳';
     const cp = c.codePointAt(0);
     const range = ENCLOSED.find(([a, b]) => cp >= a && cp <= b);
     return range ? String.fromCharCode(97 + cp - range[0]) : c;
@@ -82,8 +84,11 @@ function leet(text) {
   });
 }
 
-/** Séparateurs tolérés entre lettres isolées (dont emojis et « / »). */
-const SEP = "(?:[\\s.\\-_*~,'`/\\\\]|\\p{Extended_Pictographic}|\\uFE0F|\\u200D){1,3}";
+/**
+ * Séparateurs tolérés entre lettres isolées : espaces, ponctuation et symboles (« · • — : = | »),
+ * emojis (avec teinte de peau, variantes, ZWJ). Les symboles de leetspeak ($ € £ @) restent des lettres.
+ */
+const SEP = "(?:(?![@$€£])[\\s\\p{P}\\p{S}]|\\p{Extended_Pictographic}|[\\u{1F3FB}-\\u{1F3FF}]|\\uFE0F|\\u200D){1,6}";
 /** Unité isolée : une lettre, ou un caractère de leetspeak (« c.0.n »). */
 const UNIT = '[\\p{L}\\d@$€£]';
 const SPACED_RE = new RegExp(`(?<![\\p{L}\\p{N}])${UNIT}(?:${SEP}${UNIT}(?![\\p{L}\\p{N}])){2,}`, 'gu');

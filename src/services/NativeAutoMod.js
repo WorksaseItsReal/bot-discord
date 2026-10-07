@@ -26,7 +26,7 @@ const BLOCK_MESSAGE = 'Message bloqué par l\'AutoMod du serveur.';
 
 /** Mots du bot → mots-clés Discord (≤ 60 caractères, 1000 max, joker « * » conservé). Pur. */
 function toKeywords(words = []) {
-  return [...new Set(words.map((w) => String(w).trim().toLowerCase()).filter((w) => w && w.length <= 60))].slice(0, 1000);
+  return [...new Set(words.map((w) => String(w).trim().toLowerCase()).filter((w) => w && w.length <= 60 && /[\p{L}\p{N}]/u.test(w)))].slice(0, 1000);
 }
 
 function actions(logChannelId) {
@@ -39,11 +39,13 @@ function actions(logChannelId) {
  * Règles souhaitées pour une configuration AutoMod. Pur.
  * Seuls les filtres ACTIFS du bot ont leur équivalent natif.
  */
-function desiredRules(cfg, logChannelId) {
+function desiredRules(cfg, logChannelId, guild = null) {
   const f = cfg.filters ?? {};
+  // Un rôle ou salon supprimé dans les exemptions ferait refuser TOUTES les règles par Discord.
+  const exists = (cache) => (id) => !cache || cache.has(id);
   const exempt = {
-    exemptRoles: (cfg.ignoredRoles ?? []).slice(0, 20),
-    exemptChannels: (cfg.ignoredChannels ?? []).slice(0, 50),
+    exemptRoles: (cfg.ignoredRoles ?? []).filter(exists(guild?.roles?.cache)).slice(0, 20),
+    exemptChannels: (cfg.ignoredChannels ?? []).filter(exists(guild?.channels?.cache)).slice(0, 50),
   };
   const rules = [];
   if (f.badWords?.enabled) {
@@ -82,7 +84,7 @@ async function sync(guild, cfg, logChannelId) {
   // Le salon d'alerte doit être un salon textuel visible par le bot, sinon toutes les règles échouent.
   const logChannel = logChannelId ? guild.channels?.cache?.get(logChannelId) : null;
   const alertChannelId = logChannel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(logChannel.type) ? logChannelId : null;
-  const desired = desiredRules(cfg, alertChannelId);
+  const desired = desiredRules(cfg, alertChannelId, guild);
   const existing = await ownRules(guild);
   const result = { created: [], updated: [], removed: [], failed: [] };
   for (const rule of desired) {

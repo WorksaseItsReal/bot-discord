@@ -195,3 +195,67 @@ test('revue : copies multi-salons conservées même si un filtre plus sévère l
   assert.equal(hit.filter, 'antiInvite');
   assert.equal(hit.related.length, 1);
 });
+
+test('rafale : un compte piraté qui poste 10 fois n\'est sanctionné qu\'une fois ; un timeout plus long n\'est jamais raccourci', async () => {
+  const { db } = memoryDb();
+  const events = new AutomodEventRepository(db);
+  const calls = [];
+  const moderation = { timeout: async (...a) => { calls.push(a[4]); return { id: 1 }; } };
+  const config = {
+    get: () => ({
+      moderation: { dmOnSanction: true },
+      automod: {
+        enabled: true, ignoredChannels: [], ignoredRoles: [], notify: 'none',
+        escalation: { enabled: true, windowMinutes: 30, steps: [{ count: 3, action: 'kick' }] },
+        filters: {
+          antiPhishing: { enabled: true, threshold: 3, action: 'timeout', duration: '1d' },
+          antiZalgo: { enabled: true, action: 'timeout', duration: '5m' },
+        },
+      },
+    }),
+  };
+  const s = new AutoModService({ config, logging: { send: async () => {} }, moderation, events });
+  const make = (content, member = {}) => ({
+    ...msg(content),
+    guild: { id: 'g1', members: { me: { id: 'bot' } }, channels: { cache: new Map() } },
+    author: { id: 'u7', bot: false, createdTimestamp: 0, toString: () => '<@u7>' },
+    member: { permissions: { has: () => false }, roles: { cache: { some: () => false } }, ...member },
+    channel: { id: 'c1', toString: () => '<#c1>' },
+    delete: async () => {},
+  });
+  await Promise.all(Array.from({ length: 10 }, () => s.handleMessage(make('Free nitro https://discord-gift.com/claim'))));
+  assert.deepEqual(calls, [86_400_000], 'une seule sanction, pas d\'escalade jusqu\'au kick');
+  assert.equal(events.countRecent('g1', 'u7', 0), 1);
+
+  // Plus tard, un message zalgo (timeout 5 min) pendant un timeout d'1 jour : rien n'est raccourci.
+  s.lastSanction.clear();
+  const until = Date.now() + 86_000_000;
+  await s.handleMessage(make('h̸̢̛̛̙͎e̶̢̧̛l̴̡̛̛l̸̨̧̛o̸̢̧̢', { communicationDisabledUntilTimestamp: until }));
+  assert.deepEqual(calls, [86_400_000]);
+});
+
+test('anti-arnaques : ruse « site@ », homoglyphes, autres extensions ; sites légitimes épargnés', () => {
+  const { phishingScore } = require('../src/utils/automod/phishing');
+  const { extractLinks } = require('../src/utils/automod/links');
+  for (const u of ['https://tenor.com@evil.ru/x', 'https://dіscord.com/gift', 'https://stearncommunity.com/x', 'https://steamcommunity.co/x',
+    'https://steam-community.com/x', 'https://discorcl.gift', 'https://dicsord.com/x', 'https://discord-gift.com']) {
+    assert.ok(phishingScore(u).score >= 3, u);
+  }
+  for (const u of ['https://www.steamgifts.com/giveaway/abc', 'https://steamtrades.com', 'https://stead.com', 'https://epicgamer.com',
+    'https://discord.js.org', 'https://steamdb.info', 'https://discover.com']) {
+    assert.equal(phishingScore(u).score, 0, u);
+  }
+  assert.deepEqual(extractLinks('https://discord.com@evil.ru/x').map((l) => l.host), ['evil.ru']);
+  for (const t of ['Bonjour.Ca va', 'merci.De rien', 'Voir.Io']) assert.deepEqual(extractLinks(t), [], t);
+  assert.deepEqual(extractLinks('va sur evil.ru').map((l) => l.host), ['evil.ru']);
+});
+
+test('mots interdits : séparateurs exotiques, emojis, mots composés ; entrées sans lettre refusées', () => {
+  const { findBadWord, isValidWord } = require('../src/utils/automod/words');
+  const W = ['con', 'fils de pute'];
+  for (const t of ['C·O·N', 'c•o•n', 'c—o—n', 'c:o:n', 'c|o|n', 'c👍🏽o👍🏽n', 'c 😀 😀 o 😀 n', 'c🇫🇷o🇫🇷n', 'fils-de-pute', 'filsdepute']) assert.ok(findBadWord(t, W), t);
+  for (const t of ['le P.D.G. arrive', 'con_fig.json', 'consigne', 'a + b = c', 'fils de la voisine', 'prix : 5 $ ou 3 €']) assert.equal(findBadWord(t, W), null, t);
+  assert.equal(isValidWord('...'), false);
+  assert.equal(isValidWord('!'), false);
+  assert.equal(findBadWord('Bonjour... ça va !', ['...', '!']), null);
+});

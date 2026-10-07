@@ -28,13 +28,16 @@ function escape(c) {
 /** Motif d'un mot : chaque lettre peut se répéter et être suivie d'une ponctuation isolée. */
 function wordPattern(word) {
   const prefix = word.endsWith('*');
-  const clean = leet(canonical(prefix ? word.slice(0, -1) : word)).replace(/\s+/g, ' ').trim();
-  if (!clean) return null;
+  // Les mots composés tolèrent n'importe quel séparateur, ou aucun : « fils de pute »
+  // attrape aussi « fils-de-pute » et « filsdepute ».
+  const clean = leet(canonical(prefix ? word.slice(0, -1) : word)).replace(/[\s\-_.']+/g, ' ').trim();
+  // Une entrée sans lettre ni chiffre (« ... », « ! ») bloquerait presque tous les messages.
+  if (!/[\p{L}\p{N}]/u.test(clean)) return null;
   // Fusionne les lettres identiques consécutives : « loool » → l, o, l.
   const chars = [...clean].filter((c, i, all) => c === ' ' || c !== all[i - 1]);
   const body = chars
     .map((c, i) => {
-      if (c === ' ') return '\\s+';
+      if (c === ' ') return "[\\s\\p{P}]*";
       const sep = i < chars.length - 1 && chars[i + 1] !== ' ' ? `${SEP}?` : '';
       return `${escape(c)}+${sep}`;
     })
@@ -78,4 +81,7 @@ function findBadWord(text, words) {
   return null;
 }
 
-module.exports = { compileWords, findBadWord, wordPattern };
+/** Une entrée de liste est-elle utilisable (au moins une lettre ou un chiffre) ? */
+const isValidWord = (word) => wordPattern(String(word ?? '')) !== null;
+
+module.exports = { compileWords, findBadWord, wordPattern, isValidWord };

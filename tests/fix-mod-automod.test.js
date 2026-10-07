@@ -37,11 +37,14 @@ test('M6 doublon : seulement dans une fenêtre de 30 s', (t) => {
   const filters = { antiDuplicate: { enabled: true, action: 'delete' } };
   let now = 1_000_000;
   t.mock.method(Date, 'now', () => now);
-  assert.equal(s.inspect(msg('salut'), filters), null);
+  assert.equal(s.inspect(msg('salut à tous'), filters), null);
   now += DUPLICATE_WINDOW_MS + 1;
-  assert.equal(s.inspect(msg('salut'), filters), null);
+  assert.equal(s.inspect(msg('salut à tous'), filters), null);
   now += 1000;
-  assert.equal(s.inspect(msg('salut'), filters)?.reason, 'Message dupliqué');
+  assert.equal(s.inspect(msg('salut à tous'), filters)?.reason, 'Message dupliqué');
+  // Réponses courtes répétées (« ok », « oui ») : conversation normale.
+  assert.equal(s.inspect(msg('ok'), filters), null);
+  assert.equal(s.inspect(msg('ok'), filters), null);
 });
 
 test('M6 spam compté avant les doublons ; la violation la plus sévère l\'emporte', () => {
@@ -50,9 +53,10 @@ test('M6 spam compté avant les doublons ; la violation la plus sévère l\'empo
     antiDuplicate: { enabled: true, action: 'delete' },
     antiSpam: { enabled: true, limit: 3, windowSeconds: 60, action: 'timeout', duration: '5m' },
   };
-  assert.equal(s.inspect(msg('x'), filters), null);
-  assert.equal(s.inspect(msg('x'), filters)?.action, 'delete'); // doublon, mais spam compté (2)
-  const hit = s.inspect(msg('x'), filters); // doublon + spam : timeout plus sévère
+  const text = 'rejoignez mon serveur';
+  assert.equal(s.inspect(msg(text), filters), null);
+  assert.equal(s.inspect(msg(text), filters)?.action, 'delete'); // doublon, mais spam compté (2)
+  const hit = s.inspect(msg(text), filters); // doublon + spam : timeout plus sévère
   assert.equal(hit.action, 'timeout');
   assert.equal(hit.reason, 'Spam détecté');
 });

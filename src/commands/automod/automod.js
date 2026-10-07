@@ -19,6 +19,7 @@ const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { variants } = require('../../utils/automod/normalize');
 const { phishingScore } = require('../../utils/automod/phishing');
+const { isValidWord } = require('../../utils/automod/words');
 const { PRESETS } = require('../../utils/automod/presets');
 const native = require('../../services/NativeAutoMod');
 const { UserError } = require('../../core/errors');
@@ -328,8 +329,8 @@ function filterView(client, guildId, key, notice) {
       ),
       ...buttonRows(
         fc.enabled
-          ? actionButton({ command: 'automod', action: 'ftoggle', args: [key], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
-          : actionButton({ command: 'automod', action: 'ftoggle', args: [key], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+          ? actionButton({ command: 'automod', action: 'ftoggle', args: [key, 'off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'automod', action: 'ftoggle', args: [key, 'on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
         hasSettings ? actionButton({ command: 'automod', action: 'fset', args: [key], label: 'Réglages', emoji: ICONS.settings, style: ButtonStyle.Primary }) : null,
         ['badWords', 'antiLink', 'antiInvite'].includes(key) ? actionButton({ command: 'automod', action: 'go', args: ['lists'], label: 'Listes', emoji: ICONS.list }) : null,
         actionButton({ command: 'automod', action: 'go', args: [`grp.${groupOf(key)}`], label: 'Retour', emoji: ICONS.back }),
@@ -395,7 +396,7 @@ function escalationView(client, guildId, notice) {
     components: [
       navRow('escalation'),
       ...buttonRows(
-        actionButton({ command: 'automod', action: 'esc', args: ['toggle'], label: esc.enabled ? 'Désactiver' : 'Activer', emoji: esc.enabled ? '🔴' : '🟢', style: esc.enabled ? ButtonStyle.Danger : ButtonStyle.Success }),
+        actionButton({ command: 'automod', action: 'esc', args: ['toggle', esc.enabled ? 'off' : 'on'], label: esc.enabled ? 'Désactiver' : 'Activer', emoji: esc.enabled ? '🔴' : '🟢', style: esc.enabled ? ButtonStyle.Danger : ButtonStyle.Success }),
         actionButton({ command: 'automod', action: 'esc', args: ['set'], label: 'Fenêtre et paliers', emoji: ICONS.settings, style: ButtonStyle.Primary }),
         backHome(),
       ),
@@ -431,10 +432,10 @@ function newMembersView(client, guildId, notice) {
     components: [
       navRow('newmembers'),
       ...buttonRows(
-        actionButton({ command: 'automod', action: 'nm', args: ['enabled'], label: nm.enabled ? 'Désactiver' : 'Activer', emoji: nm.enabled ? '🔴' : '🟢', style: nm.enabled ? ButtonStyle.Danger : ButtonStyle.Success }),
-        actionButton({ command: 'automod', action: 'nm', args: ['blockLinks'], label: `Liens ${flag(nm.blockLinks)}` }),
-        actionButton({ command: 'automod', action: 'nm', args: ['blockInvites'], label: `Invitations ${flag(nm.blockInvites)}` }),
-        actionButton({ command: 'automod', action: 'nm', args: ['blockMedia'], label: `Fichiers ${flag(nm.blockMedia)}` }),
+        actionButton({ command: 'automod', action: 'nm', args: ['enabled', nm.enabled ? 'off' : 'on'], label: nm.enabled ? 'Désactiver' : 'Activer', emoji: nm.enabled ? '🔴' : '🟢', style: nm.enabled ? ButtonStyle.Danger : ButtonStyle.Success }),
+        actionButton({ command: 'automod', action: 'nm', args: ['blockLinks', nm.blockLinks ? 'off' : 'on'], label: `Liens ${flag(nm.blockLinks)}` }),
+        actionButton({ command: 'automod', action: 'nm', args: ['blockInvites', nm.blockInvites ? 'off' : 'on'], label: `Invitations ${flag(nm.blockInvites)}` }),
+        actionButton({ command: 'automod', action: 'nm', args: ['blockMedia', nm.blockMedia ? 'off' : 'on'], label: `Fichiers ${flag(nm.blockMedia)}` }),
         actionButton({ command: 'automod', action: 'nm', args: ['set'], label: 'Durées', emoji: ICONS.settings, style: ButtonStyle.Primary }),
       ),
       ...buttonRows(backHome()),
@@ -442,15 +443,24 @@ function newMembersView(client, guildId, notice) {
   };
 }
 
-function notifyView(client, guildId, notice) {
+const IGNORABLE_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice];
+
+/** Salons présélectionnés dans le menu : existants, d'un type accepté, 25 au plus. */
+function notifyDefaults(client, guildId) {
   const cfg = cfgOf(client, guildId);
-  // Présélection : uniquement des salons existants et d'un type accepté par le menu.
-  const allowedTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice];
   const cache = client.guilds?.cache?.get(guildId)?.channels?.cache;
   const channels = (cfg.ignoredChannels ?? [])
-    .filter((id) => !cache || allowedTypes.includes(cache.get(id)?.type))
+    .filter((id) => !cache || IGNORABLE_TYPES.includes(cache.get(id)?.type))
     .slice(0, MAX_IGNORED);
-  const roles = (cfg.ignoredRoles ?? []).slice(0, MAX_IGNORED);
+  return { channels };
+}
+
+function notifyView(client, guildId, notice) {
+  const cfg = cfgOf(client, guildId);
+  const allowedTypes = IGNORABLE_TYPES;
+  const { channels } = notifyDefaults(client, guildId);
+  const roleCache = client.guilds?.cache?.get(guildId)?.roles?.cache;
+  const roles = (cfg.ignoredRoles ?? []).filter((id) => !roleCache || roleCache.has(id)).slice(0, MAX_IGNORED);
   const channelMenu = new ChannelSelectMenuBuilder()
     .setCustomId('cmd:automod:ignch')
     .setPlaceholder('Salons ignorés (aucun)')
@@ -607,6 +617,13 @@ async function render(client, guild, view = 'home', notice) {
   }
 }
 
+/** Valeur voulue par un bouton « on/off » ; anciens boutons sans valeur : inversion. */
+function target(state, current) {
+  if (state === 'on') return true;
+  if (state === 'off') return false;
+  return !current;
+}
+
 // ---------------------------------------------------------------- test à blanc
 
 function analyse(client, guild, text) {
@@ -617,7 +634,9 @@ function analyse(client, guild, text) {
   const results = [];
   for (const key of FILTERS) {
     if (['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiCrossChannel'].includes(key)) continue;
-    const hit = client.services.automod.inspect(fake, { [key]: allOn[key] }, { temporal: false });
+    // La liste blanche des liens sert aussi à l'anti-arnaques : transmise sans activer l'anti-liens.
+    const filters = { antiLink: { ...cfg.filters?.antiLink, enabled: false }, [key]: allOn[key] };
+    const hit = client.services.automod.inspect(fake, filters, { temporal: false });
     if (hit) results.push({ key, hit, enabled: Boolean(cfg.filters?.[key]?.enabled) });
   }
   const scan = phishingScore(text, { allowedDomains: cfg.filters?.antiLink?.allowedDomains });
@@ -753,7 +772,11 @@ module.exports = {
     /** Menu de navigation. */
     async nav(interaction, client) {
       guard(interaction);
-      await interaction.update(await render(client, interaction.guild, interaction.values?.[0] ?? 'home'));
+      const view = interaction.values?.[0] ?? 'home';
+      // La vue native interroge l'API Discord : on accuse réception d'abord (délai de 3 s).
+      if (view === 'native') await interaction.deferUpdate();
+      const payload = await render(client, interaction.guild, view);
+      await (interaction.deferred ? interaction.editReply(payload) : interaction.update(payload));
     },
     /** cmd:automod:go:<vue> — boutons Accueil / Retour / périodes de stats. */
     async go(interaction, client, [view]) {
@@ -776,11 +799,11 @@ module.exports = {
       if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
       await interaction.update(filterView(client, interaction.guildId, key));
     },
-    /** cmd:automod:ftoggle:<filtre> */
-    async ftoggle(interaction, client, [key]) {
+    /** cmd:automod:ftoggle:<filtre>:<on|off> — la valeur AFFICHÉE sur le bouton (jamais une inversion à l'aveugle). */
+    async ftoggle(interaction, client, [key, state]) {
       guard(interaction);
       if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
-      const enabled = !cfgOf(client, interaction.guildId).filters?.[key]?.enabled;
+      const enabled = target(state, cfgOf(client, interaction.guildId).filters?.[key]?.enabled);
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { enabled } } } });
       await interaction.update(filterView(client, interaction.guildId, key, `${FILTER_LABELS[key]} ${enabled ? 'activé' : 'désactivé'}.`));
     },
@@ -848,7 +871,7 @@ module.exports = {
           if (kind === 'domains') return cleanDomain(v);
           if (kind === 'invites') return cleanInvite(v);
           const w = v.toLowerCase();
-          if (w.length > 60) throw new UserError('trop long');
+          if (w.length > 60 || !isValidWord(w)) throw new UserError('invalide');
           return w;
         } catch {
           rejected.push(v);
@@ -881,12 +904,13 @@ module.exports = {
       await interaction.update(listsView(client, interaction.guildId, notice));
     },
     /** cmd:automod:esc:<toggle|set> */
-    async esc(interaction, client, [what]) {
+    async esc(interaction, client, [what, state]) {
       guard(interaction);
       const esc = cfgOf(client, interaction.guildId).escalation ?? {};
       if (what === 'set') return interaction.showModal(escalationModal(esc));
-      client.services.config.update(interaction.guildId, { automod: { escalation: { enabled: !esc.enabled } } });
-      await interaction.update(escalationView(client, interaction.guildId, `Sanctions progressives ${esc.enabled ? 'désactivées' : 'activées'}.`));
+      const enabled = target(state, esc.enabled);
+      client.services.config.update(interaction.guildId, { automod: { escalation: { enabled } } });
+      await interaction.update(escalationView(client, interaction.guildId, `Sanctions progressives ${enabled ? 'activées' : 'désactivées'}.`));
     },
     async escsubmit(interaction, client) {
       guard(interaction);
@@ -897,12 +921,12 @@ module.exports = {
       await interaction.update(escalationView(client, interaction.guildId, 'Fenêtre et paliers enregistrés.'));
     },
     /** cmd:automod:nm:<enabled|blockLinks|blockInvites|blockMedia|set> */
-    async nm(interaction, client, [what]) {
+    async nm(interaction, client, [what, state]) {
       guard(interaction);
       const nm = cfgOf(client, interaction.guildId).newMembers ?? {};
       if (what === 'set') return interaction.showModal(newMembersModal(nm));
       if (!['enabled', 'blockLinks', 'blockInvites', 'blockMedia'].includes(what)) throw new UserError('Réglage inconnu.');
-      client.services.config.update(interaction.guildId, { automod: { newMembers: { [what]: !nm[what] } } });
+      client.services.config.update(interaction.guildId, { automod: { newMembers: { [what]: target(state, nm[what]) } } });
       await interaction.update(newMembersView(client, interaction.guildId, 'Réglage mis à jour.'));
     },
     async nmsubmit(interaction, client) {
@@ -925,7 +949,13 @@ module.exports = {
     /** Sélecteur de salons ignorés (remplace la liste). */
     async ignch(interaction, client) {
       guard(interaction);
-      const ids = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id)).slice(0, MAX_IGNORED);
+      const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id));
+      // Salons enregistrés mais absents du menu (fils, catégories, au-delà de 25) : conservés.
+      // Les salons supprimés, eux, sont nettoyés.
+      const shown = new Set(notifyDefaults(client, interaction.guildId).channels);
+      const cache = interaction.guild?.channels?.cache;
+      const hidden = (cfgOf(client, interaction.guildId).ignoredChannels ?? []).filter((id) => !shown.has(id) && cache?.has(id));
+      const ids = [...new Set([...picked, ...hidden])].slice(0, 100);
       client.services.config.update(interaction.guildId, { automod: { ignoredChannels: ids } });
       await interaction.update(notifyView(client, interaction.guildId, `${ids.length} salon(s) ignoré(s).`));
     },

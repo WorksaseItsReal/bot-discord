@@ -23,20 +23,35 @@ const TLDS = new Set(
 const URL_RE = /(?<![\p{L}\p{N}@.])(?:(https?):\/\/)?((?:[a-z0-9¡-￿](?:[a-z0-9¡-￿-]{0,61}[a-z0-9¡-￿])?\.)+(xn--[a-z0-9-]{2,59}|[a-z¡-￿]{2,24}))(?::\d{2,5})?(\/[^\s<>()]*)?/giu;
 
 /**
- * @returns {Array<{ url: string, host: string, tld: string, hasProtocol: boolean }>}
+ * @returns {Array<{ url: string, host: string, tld: string, hasProtocol: boolean, disguised: 'domain'|'user'|null }>}
  */
 function extractLinks(text) {
   const out = [];
-  const src = String(text ?? '').replace(/<(https?:\/\/[^>\s]+)>/gi, '$1'); // <lien> sans aperçu
+  // « https://discord.com@evil.ru » ouvre evil.ru : la partie « utilisateur@ » est retirée
+  // (sinon le vrai domaine est ignoré) et signalée, c'est une ruse typique d'arnaque.
+  const disguised = new Map(); // hôte réel → 'domain' (« discord.com@ ») ou 'user' (« user:pass@ »)
+  const src = String(text ?? '')
+    .replace(/<(https?:\/\/[^>\s]+)>/gi, '$1') // <lien> sans aperçu
+    .replace(/(https?:\/\/)([^\s/@<>]+)@(?=[^\s/@<>])/gi, (m, protocol, userinfo, offset, all) => {
+      const host = /^[^\s/:?#<>]+/.exec(all.slice(offset + m.length))?.[0];
+      if (host) disguised.set(host.toLowerCase().replace(/^www\./, ''), userinfo.includes('.') ? 'domain' : 'user');
+      return protocol;
+    });
   for (const m of src.matchAll(URL_RE)) {
-    const [url, protocol, hostRaw, tldRaw] = m;
+    const [url, protocol, hostRaw, tldRaw, path] = m;
     const host = hostRaw.toLowerCase();
     const tld = tldRaw.toLowerCase();
     // Sans protocole, on exige un TLD connu (ou punycode) pour éviter les faux positifs.
     if (!protocol && !TLDS.has(tld) && !tld.startsWith('xn--')) continue;
+    // « Bonjour.Ca va », « merci.De rien » : espace oublié après un point, pas un domaine.
+    if (!protocol && !path && !/^www\./i.test(hostRaw) && /\p{Lu}/u.test(tldRaw)) {
+      const label = hostRaw.split('.').at(-2) ?? '';
+      if (label !== label.toUpperCase()) continue;
+    }
     // Les emojis personnalisés et mentions ne sont pas des domaines.
     if (/^\d+$/.test(host.replace(/\./g, ''))) continue;
-    out.push({ url, host: host.replace(/^www\./, ''), tld, hasProtocol: Boolean(protocol) });
+    const clean = host.replace(/^www\./, '');
+    out.push({ url, host: clean, tld, hasProtocol: Boolean(protocol), disguised: disguised.get(clean) ?? null });
   }
   return out;
 }

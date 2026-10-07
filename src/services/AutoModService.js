@@ -1,5 +1,6 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
 const { PermissionFlagsBits } = require('discord.js');
 const { parseDuration, formatDuration } = require('../utils/time');
 const { truncate } = require('../utils/embeds');
@@ -27,6 +28,10 @@ const DUPLICATE_WINDOW_MS = 30 * 1000;
 const NOTICE_COOLDOWN_MS = 10 * 1000;
 /** Durée d'affichage de l'avertissement dans le salon. */
 const NOTICE_TTL_MS = 8 * 1000;
+/** Un doublon court (« ok », « oui ») n'est pas du spam : longueur minimale du doublon. */
+const DUPLICATE_MIN_LENGTH = 8;
+/** Rafale (compte piraté qui poste partout) : une seule sanction sur cette fenêtre. */
+const BURST_WINDOW_MS = 15 * 1000;
 /** Au-delà, l'analyse lourde (normalisation, liens) ne porte que sur le début du message. */
 const MAX_SCAN_LENGTH = 4000;
 
@@ -104,6 +109,8 @@ class AutoModService {
     this.tracker = new Map();
     /** @type {Map<string, number>} dernier avertissement visible par membre */
     this.notices = new Map();
+    /** @type {Map<string, { at: number, severity: number }>} dernière sanction par membre (rafales) */
+    this.lastSanction = new Map();
     this.lastPrune = Date.now();
   }
 
@@ -126,6 +133,7 @@ class AutoModService {
     }
     for (const [key, state] of this.tracker) if (now - state.seen > TRACKER_TTL_MS) this.tracker.delete(key);
     for (const [key, at] of this.notices) if (now - at > NOTICE_COOLDOWN_MS) this.notices.delete(key);
+    for (const [key, s] of this.lastSanction) if (now - s.at > BURST_WINDOW_MS) this.lastSanction.delete(key);
   }
 
   #key(guildId, userId) {
@@ -261,19 +269,22 @@ class AutoModService {
     }
 
     const fp = fingerprint(text);
+    // Empreinte courte en mémoire (au lieu du texte complet, jusqu'à 4000 caractères × 30).
+    const digest = fp ? createHash('sha1').update(fp).digest('base64url').slice(0, 16) : '';
 
     // 2) Doublons / répétitions : même contenu (normalisé) que le précédent, dans les 30 s.
     if (f.antiDuplicate?.enabled || f.antiRepeat?.enabled) {
       const recent = now - state.lastAt < DUPLICATE_WINDOW_MS;
-      if (fp.length > 0 && recent && state.last === fp) {
+      if (fp.length > 0 && recent && state.last === digest) {
         state.lastCount += 1;
-        if (f.antiDuplicate?.enabled) hit('antiDuplicate', 'Message dupliqué');
+        // « ok » ou « oui » répété : conversation normale, pas un doublon à supprimer.
+        if (f.antiDuplicate?.enabled && (fp.length >= DUPLICATE_MIN_LENGTH || fp.includes(' '))) hit('antiDuplicate', 'Message dupliqué');
         if (f.antiRepeat?.enabled && state.lastCount >= 3) {
           state.lastCount = 0;
           hit('antiRepeat', 'Message répété', '3 fois de suite');
         }
       } else {
-        state.last = fp;
+        state.last = digest;
         state.lastCount = 1;
       }
       state.lastAt = now;
@@ -284,11 +295,11 @@ class AutoModService {
     if (cc?.enabled && message.channel?.id && (fp.length >= (cc.minLength ?? 12) || links.length)) {
       const win = (cc.windowSeconds || 60) * 1000;
       state.recent = state.recent.filter((r) => now - r.at < win).slice(-30);
-      state.recent.push({ fp, channelId: message.channel.id, messageId: message.id, at: now });
-      const same = state.recent.filter((r) => r.fp === fp);
+      state.recent.push({ fp: digest, channelId: message.channel.id, messageId: message.id, at: now });
+      const same = state.recent.filter((r) => r.fp === digest);
       const channels = new Set(same.map((r) => r.channelId));
       if (channels.size >= (cc.channels || 3)) {
-        state.recent = state.recent.filter((r) => r.fp !== fp);
+        state.recent = state.recent.filter((r) => r.fp !== digest);
         hit('antiCrossChannel', 'Spam multi-salons (compte piraté ?)', `même message dans ${channels.size} salons`, {
           related: same.filter((r) => r.messageId !== message.id),
         });
@@ -333,18 +344,41 @@ class AutoModService {
             duration = step.duration ?? null;
           }
         }
+      } catch (err) {
+        logger.warn('Journal AutoMod indisponible :', err?.message);
+      }
+    }
+
+    // Rafale : un membre déjà sanctionné il y a quelques secondes (aussi sévèrement) n'est pas
+    // re-sanctionné à chaque message (20 timeouts, 20 MP, escalade jusqu'au kick…) :
+    // les messages suivants sont seulement supprimés. Synchrone : pas de course entre messages.
+    const memberKey = this.#key(guild.id, message.author.id);
+    const previous = this.lastSanction.get(memberKey);
+    const merged = action !== 'delete' && previous && Date.now() - previous.at < BURST_WINDOW_MS && previous.severity >= severity({ action, duration });
+    if (merged) {
+      action = 'delete';
+      duration = null;
+      escalated = null;
+    } else {
+      if (action !== 'delete') this.lastSanction.set(memberKey, { at: Date.now(), severity: severity({ action, duration }) });
+      try {
         // Journalisé avec l'action FINALE (les statistiques montrent les sanctions réelles).
-        this.events.add({ guildId: guild.id, userId: message.author.id, filter: violation.filter ?? 'autre', action, channelId: message.channel?.id });
+        this.events?.add({ guildId: guild.id, userId: message.author.id, filter: violation.filter ?? 'autre', action, channelId: message.channel?.id });
       } catch (err) {
         logger.warn('Journal AutoMod indisponible :', err?.message);
       }
     }
 
     const finalReason = escalated ? `${reason} (récidive : ${escalated.count} infractions)` : reason;
-    // Une expulsion empêche tout MP ensuite : on prévient le membre AVANT.
-    if (action === 'kick') await this.#notify(message, violation, { text: ACTION_LABELS.kick }, cfg, deleted).catch(() => {});
+    // Timeout, expulsion et avertissement envoient déjà un MP via la modération (si activé) :
+    // pas de second MP de l'AutoMod.
+    const moderationDms = action !== 'delete' && this.config.get(guild.id).moderation?.dmOnSanction !== false;
+    const notifyCfg = moderationDms && cfg.notify === 'dm' ? { ...cfg, notify: 'none' } : cfg;
+    // Une expulsion empêche tout message ensuite : on prévient le membre AVANT (dans le salon).
+    if (action === 'kick') await this.#notify(message, violation, { text: ACTION_LABELS.kick }, notifyCfg, deleted).catch(() => {});
     const outcome = await this.#sanction(message, { action, duration, reason: finalReason });
-    if (action !== 'kick') await this.#notify(message, violation, outcome, cfg, deleted).catch(() => {});
+    if (merged) outcome.text = `${ACTION_LABELS.delete} · déjà sanctionné il y a quelques secondes`;
+    if (action !== 'kick' && !merged) await this.#notify(message, violation, outcome, notifyCfg, deleted).catch(() => {});
 
     const details = [violation.detail, escalated ? `Sanction progressive : ${escalated.count} infractions récentes` : null].filter(Boolean);
     const embed = logCard({
@@ -378,6 +412,11 @@ class AutoModService {
     const me = guild.members.me;
     if (action === 'timeout') {
       const ms = parseDuration(duration || '5m') || 300_000;
+      // Ne jamais raccourcir un timeout plus long déjà en cours (ex. 1 j pour arnaque, puis 5 min pour spam).
+      const until = message.member?.communicationDisabledUntilTimestamp ?? 0;
+      if (until >= Date.now() + ms) {
+        return { timedOut: true, kicked: false, text: `${ACTION_LABELS.delete} · déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:t>` };
+      }
       // Via ModerationService : garde-fous, sanction enregistrée (historique, scheduler), DM et log.
       const res = await this.moderation.timeout(guild, message.member, me, reason, ms).then((r) => r, () => null);
       return {
@@ -433,4 +472,4 @@ class AutoModService {
   }
 }
 
-module.exports = { AutoModService, mostSevere, escalationStep, messageText, severity, blockedLinks, blockedInvites, DUPLICATE_WINDOW_MS };
+module.exports = { AutoModService, mostSevere, escalationStep, messageText, severity, blockedLinks, blockedInvites, DUPLICATE_WINDOW_MS, BURST_WINDOW_MS };
