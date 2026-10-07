@@ -263,6 +263,25 @@ const migrations = [
     `,
   },
   {
+    id: 6,
+    name: 'levels',
+    up: `
+      -- Niveaux / XP : une ligne par membre et par serveur.
+      CREATE TABLE IF NOT EXISTS levels (
+        guild_id        TEXT NOT NULL,
+        user_id         TEXT NOT NULL,
+        xp              INTEGER NOT NULL DEFAULT 0,
+        level           INTEGER NOT NULL DEFAULT 0,
+        messages        INTEGER NOT NULL DEFAULT 0,
+        voice_minutes   INTEGER NOT NULL DEFAULT 0,
+        last_message_at INTEGER,
+        PRIMARY KEY (guild_id, user_id)
+      );
+      -- Classement et rang (COUNT des XP supérieures) par serveur.
+      CREATE INDEX IF NOT EXISTS idx_levels_guild_xp ON levels (guild_id, xp DESC);
+    `,
+  },
+  {
     id: 7,
     name: 'sanction_cases',
     up: `

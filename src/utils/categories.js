@@ -18,6 +18,7 @@ const CATEGORIES = {
   voice: { emoji: '🔊', label: 'Vocaux', description: 'Gestion des salons vocaux.' },
   fun: { emoji: '🎲', label: 'Fun', description: 'Jeux, sondages et divertissement.' },
   suggestions: { emoji: '💡', label: 'Suggestions', description: 'Idées et votes de la communauté.' },
+  levels: { emoji: '📈', label: 'Niveaux', description: 'XP, rangs, classement et récompenses.' },
 };
 
 function categoryMeta(key) {

@@ -186,6 +186,25 @@ const defaultGuildConfig = Object.freeze({
     intervalHours: 24,
     lastRun: 0,
   },
+  // Niveaux / XP (/niveaux, /rang, /classement). Désactivé par défaut.
+  levels: {
+    enabled: false,
+    xpMin: 15,              // XP par message : tirage aléatoire entre xpMin et xpMax
+    xpMax: 25,
+    cooldownSeconds: 60,    // délai minimal entre deux gains d'XP d'un même membre
+    minLength: 3,           // messages plus courts ignorés
+    voice: { enabled: false, xpPerMinute: 10 }, // par minute en vocal (non muet, pas seul, hors AFK)
+    announce: {
+      mode: 'same',         // off | same (salon du message) | channel (salon dédié) | dm
+      channelId: null,
+      message: null,        // null = message par défaut ; variables {membre}, {niveau}
+    },
+    rewards: [],            // [{ level, roleId }]
+    stackRewards: true,     // true : rôles cumulés ; false : seulement le plus haut
+    ignoredChannels: [],    // salons (et leurs fils) sans XP
+    ignoredRoles: [],       // rôles sans XP
+    multipliers: [],        // [{ roleId, multiplier }] : le plus élevé du membre s'applique
+  },
 });
 
 module.exports = { defaultGuildConfig };
