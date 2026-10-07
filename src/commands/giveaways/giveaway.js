@@ -1,9 +1,28 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply, truncate } = require('../../utils/embeds');
-const { parseDuration, discordTimestamp } = require('../../utils/time');
+const { truncate, listOrMore } = require('../../utils/embeds');
+const { parseDuration, discordTimestamp, formatDuration } = require('../../utils/time');
+const { card, field, wide, ICONS, status, subtext, linkButton, buttonRows } = require('../../utils/ui');
+const { paginate } = require('../../utils/pagination');
+const { giveawayUrl, conditions } = require('../../services/GiveawayService');
 const { UserError } = require('../../core/errors');
+
+const PER_PAGE = 6;
+
+function assertCanManage(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageEvents)) {
+    throw new UserError('Il faut la permission **Gérer les événements** pour gérer les giveaways.');
+  }
+}
+
+function winnersReply(winners, id) {
+  const list = winners.map((w) => `<@${w}>`);
+  return status.ok(
+    winners.length ? `Nouveau tirage : ${listOrMore(list, 20)}. L'annonce est publiée dans le salon du giveaway.` : 'Aucun participant à retirer.',
+    `Giveaway #${id} relancé`,
+  );
+}
 
 module.exports = {
   category: 'giveaways',
@@ -29,31 +48,101 @@ module.exports = {
     if (sub === 'create') {
       const prize = interaction.options.getString('recompense');
       const durationMs = parseDuration(interaction.options.getString('duree'));
-      if (!durationMs) throw new UserError('Durée invalide (ex: `1h`, `2d`).');
+      if (!durationMs) throw new UserError('Durée invalide : utilisez par exemple `30m`, `1h` ou `2d`.');
       const winners = interaction.options.getInteger('gagnants') || 1;
       const requiredRole = interaction.options.getRole('role_requis')?.id ?? null;
       const forbiddenRole = interaction.options.getRole('role_interdit')?.id ?? null;
-      const { id } = await giveaways.create(interaction.channel, interaction.user, { prize, winners, durationMs, requiredRole, forbiddenRole });
-      return interaction.reply(successReply(`Giveaway **#${id}** créé pour **${prize}** 🎉`, { ephemeral: true }));
+      const { id, message } = await giveaways.create(interaction.channel, interaction.user, { prize, winners, durationMs, requiredRole, forbiddenRole });
+      return interaction.reply({
+        embeds: [
+          card({
+            tone: 'celebrate',
+            section: 'giveaways',
+            icon: ICONS.success,
+            title: `Giveaway #${id} lancé`,
+            description: [`**${truncate(prize, 200)}** est en jeu dans ${interaction.channel}.`, subtext(`Terminez-le plus tôt avec /giveaway end id:${id}.`)],
+            fields: [
+              field('🏆', 'Gagnants', `**${winners}**`),
+              field(ICONS.duration, 'Durée', formatDuration(durationMs)),
+              field(ICONS.expires, 'Fin', discordTimestamp(Date.now() + durationMs, 'R')),
+            ],
+          }),
+        ],
+        components: message?.url ? buttonRows(linkButton('Voir le giveaway', message.url, ICONS.link)) : [],
+        ephemeral: true,
+      });
     }
 
     if (sub === 'end') {
       const id = interaction.options.getInteger('id');
-      await giveaways.end(id, { guildId: interaction.guild.id });
-      return interaction.reply(successReply(`Giveaway #${id} terminé.`, { ephemeral: true }));
+      await interaction.deferReply({ ephemeral: true });
+      const winners = await giveaways.end(id, { guildId: interaction.guild.id });
+      const url = giveawayUrl(giveaways.get(id));
+      return interaction.editReply({
+        embeds: [
+          status.ok(
+            winners.length ? `Gagnant(s) : ${listOrMore(winners.map((w) => `<@${w}>`), 20)}.` : 'Aucun participant éligible : pas de gagnant.',
+            `Giveaway #${id} terminé`,
+          ),
+        ],
+        components: url ? buttonRows(linkButton('Voir le giveaway', url, ICONS.link)) : [],
+      });
     }
     if (sub === 'reroll') {
       const id = interaction.options.getInteger('id');
+      await interaction.deferReply({ ephemeral: true });
       const winners = await giveaways.end(id, { reroll: true, guildId: interaction.guild.id });
-      return interaction.reply(successReply(winners.length ? `Nouveaux gagnants tirés.` : 'Aucun participant à retirer.', { ephemeral: true }));
+      return interaction.editReply({ embeds: [winnersReply(winners, id)] });
     }
     if (sub === 'list') {
       const active = giveaways.listActive(interaction.guild.id);
-      if (!active.length) return interaction.reply({ embeds: [embeds.info('Aucun giveaway en cours.')], ephemeral: true });
-      const embed = embeds.neutral('🎉 Giveaways en cours').setDescription(
-        truncate(active.map((g) => `**#${g.id}** — ${truncate(g.prize, 100)} · fin ${discordTimestamp(g.ends_at, 'R')} · ${g.winners} gagnant(s)`).join('\n'), 4000),
-      );
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      if (!active.length) {
+        return interaction.reply({ embeds: [status.note('Aucun giveaway en cours. Lancez-en un avec /giveaway create.', 'Giveaways')], ephemeral: true });
+      }
+      const pages = [];
+      for (let i = 0; i < active.length; i += PER_PAGE) {
+        const slice = active.slice(i, i + PER_PAGE);
+        pages.push(
+          card({
+            tone: 'celebrate',
+            section: 'giveaways',
+            icon: ICONS.gift,
+            title: `Giveaways en cours (${active.length})`,
+            fields: slice.map((g) => {
+              const url = giveawayUrl(g);
+              return wide(
+                ICONS.gift,
+                `#${g.id} · ${truncate(g.prize, 120)}`,
+                [
+                  `${ICONS.expires} Fin ${discordTimestamp(g.ends_at, 'R')} · 🏆 ${g.winners} gagnant(s) · ${ICONS.members} ${giveaways.countEntries(g.id)} participant(s)`,
+                  `${ICONS.owner} <@${g.host_id}> · <#${g.channel_id}>${url ? ` · [Voir](${url})` : ''}`,
+                  g.required_role || g.forbidden_role ? conditions(g) : null,
+                ].filter(Boolean).join('\n'),
+              );
+            }),
+          }),
+        );
+      }
+      if (pages.length === 1) {
+        const links = active.map((g) => [g, giveawayUrl(g)]).filter(([, url]) => url).slice(0, 5);
+        return interaction.reply({
+          embeds: pages,
+          components: buttonRows(links.map(([g, url]) => linkButton(`#${g.id}`, url, ICONS.link))),
+          ephemeral: true,
+        });
+      }
+      return paginate(interaction, pages, { ephemeral: true });
     }
+  },
+
+  buttons: {
+    /** cmd:giveaway:reroll:<id> — nouveau tirage depuis le message du giveaway terminé. */
+    async reroll(interaction, client, [idStr]) {
+      assertCanManage(interaction);
+      const id = Number(idStr);
+      await interaction.deferReply({ ephemeral: true });
+      const winners = await client.services.giveaways.end(id, { reroll: true, guildId: interaction.guildId });
+      return interaction.editReply({ embeds: [winnersReply(winners, id)] });
+    },
   },
 };

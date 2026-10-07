@@ -1,9 +1,10 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
 const { confirm } = require('../../utils/confirmation');
 const { parseDuration, formatDuration } = require('../../utils/time');
+const { field, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { sanctionCard } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -38,17 +39,36 @@ module.exports = {
         confirmLabel: 'Bannir',
       });
       if (!ok) return;
+    } else {
+      // DM + action + log : peut dépasser 3 s.
+      await interaction.deferReply();
     }
 
-    await client.services.moderation.ban(interaction.guild, user, interaction.member, reason, {
+    const { id, expiresAt } = await client.services.moderation.ban(interaction.guild, user, interaction.member, reason, {
       durationMs,
       deleteMessageSeconds: purgeDays * 86400,
       targetMember,
     });
 
-    const suffix = durationMs ? `pour **${formatDuration(durationMs)}**` : 'définitivement';
-    const payload = successReply(`${user.tag} a été banni ${suffix}.`);
-    if (cfg.moderation.confirmDangerous) await interaction.followUp({ ...payload, ephemeral: true });
-    else await interaction.reply(payload);
+    const payload = {
+      embeds: [
+        sanctionCard({
+          id,
+          type: durationMs ? 'tempban' : 'ban',
+          user,
+          moderator: interaction.user,
+          reason,
+          durationMs,
+          expiresAt,
+          fields: [purgeDays ? field(ICONS.delete, 'Messages purgés', `${purgeDays} dernier${purgeDays > 1 ? 's' : ''} jour${purgeDays > 1 ? 's' : ''}`) : null],
+        }),
+      ],
+      components: buttonRows(
+        actionButton({ command: 'unban', action: 'revoke', args: [user.id], label: 'Débannir', emoji: ICONS.unlock, style: ButtonStyle.Success }),
+        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+      ),
+    };
+    // Après confirmation, la carte remplace la demande de confirmation (éphémère).
+    await interaction.editReply(payload);
   },
 };

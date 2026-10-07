@@ -4,7 +4,7 @@ const {
   SlashCommandBuilder, PermissionFlagsBits, ChannelType,
   ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, EmbedBuilder,
 } = require('discord.js');
-const { successReply } = require('../../utils/embeds');
+const { status, TONES, ICONS, linkButton, buttonRows } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 
 /**
@@ -57,7 +57,7 @@ module.exports = {
       if (thumbnail && !isHttpUrl(thumbnail)) throw new UserError('L\'URL de la miniature doit commencer par `http://` ou `https://`.');
       if (title) embed.setTitle(title);
       if (description) embed.setDescription(description);
-      embed.setColor(parseColor(color) ?? 0x5865f2);
+      embed.setColor(parseColor(color) ?? TONES.brand);
       if (image) embed.setImage(image);
       if (thumbnail) embed.setThumbnail(thumbnail);
       if (footer) embed.setFooter({ text: footer });
@@ -68,8 +68,12 @@ module.exports = {
       if (!perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
         throw new UserError(`Vous n'avez pas la permission d'envoyer des embeds dans ${channel}.`);
       }
-      await channel.send({ embeds: [embed] });
-      return interaction.reply(successReply(`Embed envoyé dans ${channel}.`, { ephemeral: true }));
+      const sent = await channel.send({ embeds: [embed] });
+      return interaction.reply({
+        embeds: [status.ok(`Votre embed a été publié dans ${channel}.`, 'Embed envoyé')],
+        components: sent?.url ? buttonRows(linkButton('Voir le message', sent.url, ICONS.link)) : [],
+        ephemeral: true,
+      });
     }
   },
 };

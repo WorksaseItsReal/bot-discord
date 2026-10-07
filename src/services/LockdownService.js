@@ -1,8 +1,60 @@
 'use strict';
 
 const { PermissionFlagsBits, ChannelType } = require('discord.js');
-const { embeds } = require('../utils/embeds');
+const { card, field, wide, ICONS } = require('../utils/ui');
+const { truncate } = require('../utils/embeds');
 const { UserError } = require('../core/errors');
+
+/** Présentation des actions sur un salon (lock, unlock, hide, unhide). */
+const CHANNEL_ACTIONS = {
+  lock: { tone: 'caution', icon: ICONS.lock, title: 'Salon verrouillé', text: (c) => `${c} est désormais en lecture seule pour @everyone.` },
+  unlock: { tone: 'success', icon: ICONS.unlock, title: 'Salon déverrouillé', text: (c) => `Tout le monde peut de nouveau écrire dans ${c}.` },
+  hide: { tone: 'caution', icon: ICONS.hidden, title: 'Salon masqué', text: (c) => `${c} n'est plus visible par @everyone.` },
+  unhide: { tone: 'success', icon: ICONS.visible, title: 'Salon visible', text: (c) => `${c} est de nouveau visible par @everyone.` },
+};
+
+/**
+ * Carte de résultat d'une action sur un salon.
+ * @param {'lock'|'unlock'|'hide'|'unhide'} kind
+ */
+function channelCard(kind, channel, moderator) {
+  const meta = CHANNEL_ACTIONS[kind];
+  return card({
+    tone: meta.tone,
+    section: 'moderation',
+    icon: meta.icon,
+    title: meta.title,
+    description: meta.text(`${channel}`),
+    fields: [
+      field(ICONS.channel, 'Salon', `${channel}`),
+      field(ICONS.moderator, 'Modérateur', moderator?.id ? `<@${moderator.id}>` : '—'),
+    ],
+  });
+}
+
+/**
+ * Carte de verrouillage / déverrouillage de tout le serveur (lockall, lockdown, logs).
+ * @param {{ enabled: boolean, count: number, moderator?: {id:string}|null, reason?: string|null, section?: string }} opts
+ */
+function serverLockCard({ enabled, count, moderator, reason, section = 'security' }) {
+  const plural = count > 1 ? 's' : '';
+  return card({
+    tone: enabled ? 'danger' : 'success',
+    section,
+    icon: enabled ? '🚨' : ICONS.unlock,
+    title: enabled ? 'Lockdown activé' : 'Lockdown levé',
+    description: enabled
+      ? `**${count}** salon${plural} textuel${plural} ${count > 1 ? 'sont' : 'est'} désormais en lecture seule.`
+      : count
+        ? `**${count}** salon${plural} ${count > 1 ? 'ont' : 'a'} retrouvé ${count > 1 ? 'leurs' : 'ses'} permissions d'origine.`
+        : 'Aucun salon n\'était verrouillé : rien à restaurer.',
+    fields: [
+      field(ICONS.count, enabled ? 'Salons verrouillés' : 'Salons restaurés', `**${count}**`),
+      field(ICONS.moderator, 'Par', moderator?.id ? `<@${moderator.id}>` : '—'),
+      reason ? wide(ICONS.reason, 'Raison', truncate(reason, 1024)) : null,
+    ],
+  });
+}
 
 /**
  * Verrouillage de salons et lockdown d'urgence, avec sauvegarde de l'état
@@ -68,15 +120,7 @@ class LockdownService {
 
   async enable(guild, moderator, reason = 'Lockdown') {
     const n = await this.#eachTextChannel(guild, (c) => this.lockChannel(c, moderator, reason));
-    await this.logging.send(
-      guild.id,
-      'security',
-      embeds.security('🚨 Lockdown activé').addFields(
-        { name: 'Salons verrouillés', value: `${n}`, inline: true },
-        { name: 'Par', value: `${moderator}`, inline: true },
-        { name: 'Raison', value: reason },
-      ),
-    );
+    await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }));
     return n;
   }
 
@@ -96,11 +140,7 @@ class LockdownService {
         /* ignore un salon problématique */
       }
     }
-    await this.logging.send(
-      guild.id,
-      'security',
-      embeds.success(`Lockdown désactivé — ${n} salon(s) déverrouillé(s) par ${moderator}.`, '🔓 Lockdown levé'),
-    );
+    await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }));
     return n;
   }
 
@@ -124,4 +164,4 @@ function assertOverwritable(channel) {
   }
 }
 
-module.exports = { LockdownService, bitToState, assertOverwritable };
+module.exports = { LockdownService, bitToState, assertOverwritable, channelCard, serverLockCard, CHANNEL_ACTIONS };

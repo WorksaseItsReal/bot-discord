@@ -1,7 +1,8 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { successReply } = require('../../utils/embeds');
+const { listOrMore } = require('../../utils/embeds');
+const { card, field, wide, ICONS, userLine, status } = require('../../utils/ui');
 const { assertCanModerate } = require('../../utils/permissions');
 const { UserError } = require('../../core/errors');
 
@@ -21,8 +22,34 @@ module.exports = {
     if (!member) throw new UserError('Membre introuvable.');
     assertCanModerate(interaction.member, member, interaction.guild.members.me, { action: 'dérank' });
 
-    const removable = member.roles.cache.filter((r) => r.id !== interaction.guild.id && r.editable);
+    const roles = member.roles.cache.filter((r) => r.id !== interaction.guild.id);
+    const removable = roles.filter((r) => r.editable);
+    const kept = roles.filter((r) => !r.editable);
+    if (!removable.size) {
+      return interaction.reply({ embeds: [status.note(`${user} n'a aucun rôle que je puisse retirer.`, 'Rien à retirer')], ephemeral: true });
+    }
     await member.roles.remove(removable, reason || `Derank par ${interaction.user.tag}`);
-    await interaction.reply(successReply(`${removable.size} rôle(s) retiré(s) de ${user}.`));
+
+    const mentions = [...removable.sort((a, b) => b.position - a.position).values()].map((r) => `${r}`);
+    await interaction.reply({
+      embeds: [
+        card({
+          tone: 'caution',
+          section: 'roles',
+          icon: '📉',
+          title: 'Membre dérank',
+          description: `${user} a perdu **${removable.size}** rôle${removable.size > 1 ? 's' : ''}.`,
+          fields: [
+            field(ICONS.user, 'Membre', userLine(user)),
+            field(ICONS.moderator, 'Modérateur', `${interaction.user}`),
+            field(ICONS.count, 'Rôles retirés', `**${removable.size}**`),
+            wide(ICONS.role, 'Rôles retirés', listOrMore(mentions, 25, ' ')),
+            kept.size ? wide(ICONS.lock, 'Conservés (trop hauts ou gérés)', listOrMore([...kept.values()].map((r) => `${r}`), 15, ' ')) : null,
+            wide(ICONS.reason, 'Raison', reason ?? '*Aucune raison fournie*'),
+          ],
+          thumbnail: member.displayAvatarURL?.({ size: 128 }) ?? null,
+        }),
+      ],
+    });
   },
 };

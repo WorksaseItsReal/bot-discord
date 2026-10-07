@@ -1,8 +1,9 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { successReply } = require('../../utils/embeds');
-const { parseDuration, formatDuration } = require('../../utils/time');
+const { parseDuration } = require('../../utils/time');
+const { ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { sanctionCard } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -18,11 +19,17 @@ module.exports = {
   async execute(interaction, client) {
     const user = interaction.options.getUser('membre');
     const durationMs = parseDuration(interaction.options.getString('duree'));
-    if (!durationMs) throw new UserError('Durée invalide (ex: `7d`, `12h`).');
+    if (!durationMs) throw new UserError('Durée invalide. Exemples : `7d`, `12h`.');
     const reason = interaction.options.getString('raison');
     await interaction.deferReply();
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-    await client.services.moderation.ban(interaction.guild, user, interaction.member, reason, { durationMs, targetMember: member });
-    await interaction.reply(successReply(`${user.tag} est banni pour **${formatDuration(durationMs)}**.`));
+    const { id, expiresAt } = await client.services.moderation.ban(interaction.guild, user, interaction.member, reason, { durationMs, targetMember: member });
+    await interaction.editReply({
+      embeds: [sanctionCard({ id, type: 'tempban', user, moderator: interaction.user, reason, durationMs, expiresAt })],
+      components: buttonRows(
+        actionButton({ command: 'unban', action: 'revoke', args: [user.id], label: 'Débannir', emoji: ICONS.unlock, style: ButtonStyle.Success }),
+        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+      ),
+    });
   },
 };

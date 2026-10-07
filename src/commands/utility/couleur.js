@@ -1,8 +1,9 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
 const { parseColor, formatColor } = require('../../utils/projectFormat');
+const { card, field, ICONS, code, subtext, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { assertInvoker } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
 
 /** RGB → HSL (teinte en degrés, saturation et luminosité en %). Pur. */
@@ -21,30 +22,73 @@ function toHsl(r, g, b) {
   return [Math.round(h * 60), Math.round(s * 100), Math.round(l * 100)];
 }
 
+/** Texte lisible sur cette couleur (luminance relative WCAG). Pur. */
+function readableText(r, g, b) {
+  const lin = (c) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  return lum > 0.179 ? 'Noir' : 'Blanc';
+}
+
+/** Rendu d'une couleur ; `ownerId` non nul = couleur aléatoire (bouton « Autre couleur »). */
+function render(value, { random = false, ownerId = null } = {}) {
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  const [h, s, l] = toHsl(r, g, b);
+  const hex = formatColor(value);
+  return {
+    embeds: [
+      card({
+        tone: value,
+        section: 'utility',
+        icon: ICONS.color,
+        title: random ? `${hex} · aléatoire` : hex,
+        description: ['La bande à gauche de cette carte affiche la couleur.', subtext('Astuce : collez le code HEX dans /embed ou les paramètres d\'un rôle.')],
+        fields: [
+          field('#️⃣', 'HEX', code(hex)),
+          field('🔴', 'RGB', code(`rgb(${r}, ${g}, ${b})`)),
+          field('🌈', 'HSL', code(`hsl(${h}, ${s}%, ${l}%)`)),
+          field(ICONS.count, 'Entier', code(value)),
+          field('🔤', 'Texte lisible', readableText(r, g, b)),
+        ],
+      }),
+    ],
+    components:
+      random && ownerId
+        ? buttonRows(
+            actionButton({ command: 'couleur', action: 'random', args: [ownerId], label: 'Autre couleur', emoji: ICONS.dice, style: ButtonStyle.Primary }),
+            deleteButton(ownerId),
+          )
+        : [],
+  };
+}
+
+const randomColor = () => Math.floor(Math.random() * 0x1000000);
+
 module.exports = {
   guildOnly: false,
   toHsl,
+  readableText,
+  render,
   data: new SlashCommandBuilder()
     .setName('couleur')
     .setDescription('Affiche les informations d\'une couleur (ou une couleur aléatoire).')
     .addStringOption((o) => o.setName('hex').setDescription('Code hexadécimal, ex : #5865F2 (vide = aléatoire)').setMaxLength(9)),
   async execute(interaction) {
     const input = interaction.options.getString('hex');
-    const value = input ? parseColor(input) : Math.floor(Math.random() * 0x1000000);
+    if (!input) return interaction.reply(render(randomColor(), { random: true, ownerId: interaction.user.id }));
+    const value = parseColor(input);
     if (value == null) throw new UserError('Couleur invalide. Exemples : `#5865F2`, `ff0000`, `#0f0`.');
-    const r = (value >> 16) & 255;
-    const g = (value >> 8) & 255;
-    const b = value & 255;
-    const [h, s, l] = toHsl(r, g, b);
-    const embed = embeds
-      .custom(value, `🎨 ${formatColor(value)}${input ? '' : ' (aléatoire)'}`)
-      .setDescription(`L'embed a pris cette couleur : regardez la bande à gauche !`)
-      .addFields(
-        { name: 'HEX', value: `\`${formatColor(value)}\``, inline: true },
-        { name: 'RGB', value: `\`rgb(${r}, ${g}, ${b})\``, inline: true },
-        { name: 'HSL', value: `\`hsl(${h}, ${s}%, ${l}%)\``, inline: true },
-        { name: 'Entier (Discord)', value: `\`${value}\``, inline: true },
-      );
-    await interaction.reply({ embeds: [embed] });
+    await interaction.reply(render(value));
+  },
+  buttons: {
+    /** cmd:couleur:random:<ownerId> — tire une nouvelle couleur. */
+    async random(interaction, client, [ownerId]) {
+      assertInvoker(interaction, ownerId);
+      await interaction.update(render(randomColor(), { random: true, ownerId }));
+    },
   },
 };

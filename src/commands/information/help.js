@@ -1,10 +1,13 @@
 'use strict';
 
 const { SlashCommandBuilder, ApplicationCommandOptionType: T, PermissionsBitField } = require('discord.js');
-const { embeds, truncate, brandFooter } = require('../../utils/embeds');
+const { truncate } = require('../../utils/embeds');
 const { row, selectMenu } = require('../../utils/components');
 const { CATEGORIES, categoryMeta } = require('../../utils/categories');
 const { permissionLabel } = require('../../utils/permissionNames');
+const { card, field, wide, ICONS, subtext, buttonRows } = require('../../utils/ui');
+const { UserError } = require('../../core/errors');
+const { inviteButton } = require('../utility/invite');
 
 /**
  * /help interactif : accueil avec toutes les catégories, menu déroulant pour
@@ -23,7 +26,7 @@ module.exports = {
     const specific = interaction.options.getString('commande');
     if (specific) {
       const cmd = client.commands.get(specific.replace(/^\//, '').toLowerCase());
-      if (!cmd) return interaction.reply({ embeds: [embeds.error(`Commande inconnue : \`${truncate(specific, 32)}\`. Tapez \`/help\` pour la liste.`)], ephemeral: true });
+      if (!cmd) throw new UserError(`Commande inconnue : \`${truncate(specific, 32)}\`. Tapez \`/help\` pour la liste.`);
       return interaction.reply({ embeds: [commandDetailEmbed(cmd)], ephemeral: true });
     }
 
@@ -34,7 +37,7 @@ module.exports = {
         id: menuId,
         placeholder: 'Choisissez une catégorie…',
         options: [
-          { label: 'Accueil', value: '__home', description: 'Vue d\'ensemble', emoji: '🏠', default: selected === '__home' },
+          { label: 'Accueil', value: '__home', description: 'Vue d\'ensemble', emoji: ICONS.server, default: selected === '__home' },
           ...[...grouped.keys()].slice(0, 24).map((key) => ({
             label: categoryMeta(key).label,
             value: key,
@@ -44,10 +47,12 @@ module.exports = {
           })),
         ],
       });
+    const links = buttonRows(inviteButton(client));
+    const components = (selected) => [row(menu(selected)), ...links];
 
     const message = await interaction.reply({
       embeds: [homeEmbed(client, grouped)],
-      components: [row(menu('__home'))],
+      components: components('__home'),
       ephemeral: true,
       fetchReply: true,
     });
@@ -58,10 +63,11 @@ module.exports = {
     });
     collector.on('collect', async (i) => {
       const key = i.values[0];
-      const embed = key === '__home' ? homeEmbed(client, grouped) : categoryEmbed(key, grouped.get(key) || []);
-      await i.update({ embeds: [embed], components: [row(menu(key))] }).catch(() => {});
+      const embed = key === '__home' || !grouped.has(key) ? homeEmbed(client, grouped) : categoryEmbed(key, grouped.get(key));
+      await i.update({ embeds: [embed], components: components(key) }).catch(() => {});
     });
-    collector.on('end', () => interaction.editReply({ components: [] }).catch(() => {}));
+    // Fin de navigation : le menu disparaît, les liens restent utiles.
+    collector.on('end', () => interaction.editReply({ components: links }).catch(() => {}));
   },
 
   /** @param {import('discord.js').AutocompleteInteraction} interaction */
@@ -88,66 +94,88 @@ function groupByCategory(commands) {
   return map;
 }
 
+/** Sous-commandes « à plat » d'une commande (groupes dépliés). */
+function subcommandsOf(data) {
+  return (data.options || []).flatMap((o) => (o.type === T.Subcommand ? [o] : o.type === T.SubcommandGroup ? o.options || [] : []));
+}
+
 /** Nombre total de commandes + sous-commandes (ce que l'utilisateur peut réellement taper). */
 function countEntries(commands) {
   let n = 0;
-  for (const c of commands.values()) {
-    const subs = (c.data.toJSON().options || []).flatMap((o) =>
-      o.type === T.Subcommand ? [o] : o.type === T.SubcommandGroup ? o.options || [] : [],
-    );
-    n += subs.length || 1;
-  }
+  for (const c of commands.values()) n += subcommandsOf(c.data.toJSON()).length || 1;
   return n;
 }
 
+const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
+
 function homeEmbed(client, grouped) {
-  return embeds
-    .neutral(`👋 Bienvenue dans l'aide de ${client.user.username}`)
-    .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
-    .setDescription(
-      `Un bot tout-en-un : **${client.commands.size} commandes** et **${countEntries(client.commands)} actions** au total.\n` +
-        'Choisissez une catégorie dans le menu ci-dessous, ou tapez `/help commande:<nom>` pour le détail d\'une commande.\n​',
-    )
-    .addFields(
-      [...grouped.entries()].slice(0, 24).map(([key, cmds]) => ({
-        name: `${categoryMeta(key).emoji} ${categoryMeta(key).label}`,
-        value: `\`${cmds.length}\` commande${cmds.length > 1 ? 's' : ''}`,
-        inline: true,
-      })),
-    );
+  return card({
+    tone: 'brand',
+    section: 'information',
+    icon: ICONS.help,
+    title: `Aide de ${client.user.username}`,
+    description: [
+      `Bienvenue ! **${client.commands.size}** commandes et **${countEntries(client.commands)}** actions sont à votre disposition.`,
+      '',
+      `${ICONS.next} Choisissez une **catégorie** dans le menu ci-dessous.`,
+      `${ICONS.search} Tapez \`/help commande:<nom>\` pour la fiche d'une commande.`,
+      subtext('Les commandes que vous ne pouvez pas utiliser sont masquées par Discord.'),
+    ],
+    thumbnail: client.user.displayAvatarURL({ size: 256 }),
+    fields: [...grouped.entries()].slice(0, 24).map(([key, cmds]) => {
+      const meta = categoryMeta(key);
+      return field(meta.emoji, meta.label, `\`${plural(cmds.length, 'commande')}\``);
+    }),
+  });
 }
 
 function categoryEmbed(key, cmds) {
   const meta = categoryMeta(key);
   const lines = cmds.map((c) => {
-    const subs = (c.data.toJSON().options || []).filter((o) => o.type === T.Subcommand || o.type === T.SubcommandGroup);
-    const suffix = subs.length ? ` *(${subs.length} sous-commandes)*` : '';
-    return `**\`/${c.data.name}\`** — ${c.data.description}${suffix}`;
+    const subs = subcommandsOf(c.data.toJSON()).length;
+    return `**\`/${c.data.name}\`** — ${c.data.description}${subs ? ` *(${plural(subs, 'action')})*` : ''}`;
   });
-  return embeds
-    .neutral(`${meta.emoji} ${meta.label}`)
-    .setDescription(truncate(`${meta.description}\n\n${lines.join('\n')}`, 4096))
-    .setFooter(brandFooter(`${cmds.length} commande(s) • /help commande:<nom> pour le détail`));
+  return card({
+    tone: 'brand',
+    section: 'information',
+    icon: meta.emoji,
+    title: meta.label,
+    description: [meta.description, '', ...lines],
+    footer: `${plural(cmds.length, 'commande')} • /help commande:<nom> pour le détail`,
+  });
 }
 
 function describeOption(o) {
   return `\`${o.name}\`${o.required ? '' : ' *(optionnel)*'} — ${o.description}`;
 }
 
+/** Répartit des lignes sur plusieurs champs pleine largeur (≤ 1024 caractères chacun). */
+function chunkFields(icon, label, lines) {
+  const out = [];
+  let chunk = '';
+  for (const line of lines) {
+    if (chunk && (chunk + line).length > 1000) {
+      out.push(wide(out.length ? null : icon, out.length ? '​' : label, chunk));
+      chunk = '';
+    }
+    chunk += `${line}\n`;
+  }
+  if (chunk) out.push(wide(out.length ? null : icon, out.length ? '​' : label, chunk));
+  return out;
+}
+
 function commandDetailEmbed(cmd) {
   const data = cmd.data.toJSON();
   const options = data.options || [];
-  const embed = embeds
-    .neutral(`📖 /${data.name}`)
-    .setDescription(data.description)
-    .addFields(
-      { name: 'Catégorie', value: `${categoryMeta(cmd.category).emoji} ${categoryMeta(cmd.category).label}`, inline: true },
-      { name: 'Utilisable en MP', value: cmd.guildOnly === false ? 'Oui' : 'Non', inline: true },
-    );
-  if (cmd.cooldown) embed.addFields({ name: 'Délai', value: `${Math.round(cmd.cooldown / 1000)} s`, inline: true });
+  const meta = categoryMeta(cmd.category);
+  const fields = [
+    field(ICONS.category, 'Catégorie', `${meta.emoji} ${meta.label}`),
+    field(ICONS.mail, 'En message privé', cmd.guildOnly === false ? 'Oui' : 'Non'),
+    field(ICONS.duration, 'Délai', cmd.cooldown ? `\`${Math.round(cmd.cooldown / 1000)} s\`` : 'Aucun'),
+  ];
   if (data.default_member_permissions) {
     const perms = new PermissionsBitField(BigInt(data.default_member_permissions)).toArray().map(permissionLabel);
-    if (perms.length) embed.addFields({ name: 'Permission requise', value: perms.join(', '), inline: true });
+    if (perms.length) fields.push(wide(ICONS.lock, 'Permission requise', perms.join(' · ')));
   }
 
   const subs = options.filter((o) => o.type === T.Subcommand || o.type === T.SubcommandGroup);
@@ -157,20 +185,22 @@ function commandDetailEmbed(cmd) {
         ? (s.options || []).map((ss) => `**\`/${data.name} ${s.name} ${ss.name}\`** — ${ss.description}`)
         : [`**\`/${data.name} ${s.name}\`** — ${s.description}`],
     );
-    // Les sous-commandes peuvent être nombreuses : on répartit sur plusieurs champs de 1024 caractères.
-    let chunk = '';
-    let part = 1;
-    for (const line of lines) {
-      if ((chunk + line).length > 1000) {
-        embed.addFields({ name: part === 1 ? 'Sous-commandes' : '​', value: chunk });
-        chunk = '';
-        part += 1;
-      }
-      chunk += `${line}\n`;
-    }
-    if (chunk) embed.addFields({ name: part === 1 ? 'Sous-commandes' : '​', value: chunk });
+    fields.push(...chunkFields(ICONS.list, `Sous-commandes (${lines.length})`, lines));
   } else {
-    embed.addFields({ name: 'Options', value: truncate(options.map(describeOption).join('\n') || 'Aucune', 1024) });
+    fields.push(wide(ICONS.settings, 'Options', options.length ? options.map(describeOption).join('\n') : '*Aucune option*'));
   }
-  return embed;
+
+  return card({
+    tone: 'info',
+    section: 'information',
+    icon: ICONS.search,
+    title: `/${data.name}`,
+    description: [data.description, subtext(`Tapez /${data.name} pour l'utiliser.`)],
+    fields,
+  });
 }
+
+module.exports.commandDetailEmbed = commandDetailEmbed;
+module.exports.homeEmbed = homeEmbed;
+module.exports.categoryEmbed = categoryEmbed;
+module.exports.groupByCategory = groupByCategory;

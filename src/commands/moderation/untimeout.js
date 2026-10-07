@@ -1,8 +1,13 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { successReply } = require('../../utils/embeds');
+const { ICONS, actionButton, buttonRows } = require('../../utils/ui');
+const { sanctionCard, needPermission, settleAndAnnounce } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
+
+function historyButton(userId) {
+  return actionButton({ command: 'sanctions', action: 'history', args: [userId], label: 'Sanctions', emoji: ICONS.history });
+}
 
 module.exports = {
   category: 'moderation',
@@ -20,6 +25,26 @@ module.exports = {
     if (!member.isCommunicationDisabled()) throw new UserError('Ce membre n\'est pas en timeout.');
 
     await client.services.moderation.removeTimeout(interaction.guild, member, interaction.member);
-    await interaction.reply(successReply(`Le timeout de ${user.tag} a été retiré.`));
+    await interaction.reply({
+      embeds: [sanctionCard({ type: 'untimeout', user, moderator: interaction.user })],
+      components: buttonRows(historyButton(user.id)),
+    });
+  },
+
+  buttons: {
+    /** cmd:untimeout:revoke:<userId> — bouton « Retirer le timeout » (permission + hiérarchie revérifiées). */
+    async revoke(interaction, client, [userId]) {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) throw needPermission('ModerateMembers');
+      const member = await interaction.guild.members.fetch(userId).catch(() => null);
+      if (!member) throw new UserError('Ce membre n\'est plus sur le serveur.');
+      if (!member.isCommunicationDisabled()) throw new UserError('Ce membre n\'est plus en timeout.');
+      // removeTimeout() applique assertCanModerate (hiérarchie du cliqueur et du bot).
+      await client.services.moderation.removeTimeout(interaction.guild, member, interaction.member, `Timeout retiré via le bouton par ${interaction.user.tag}`);
+      await settleAndAnnounce(interaction, {
+        label: `Retiré par ${interaction.user.username}`,
+        embed: sanctionCard({ type: 'untimeout', user: member.user, moderator: interaction.user }),
+        buttons: [historyButton(userId)],
+      });
+    },
   },
 };

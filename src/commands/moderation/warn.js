@@ -1,9 +1,15 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, truncate } = require('../../utils/embeds');
+const { truncate } = require('../../utils/embeds');
 const { parseDuration } = require('../../utils/time');
+const { field, wide, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { sanctionCard } = require('../../services/ModerationService');
+const { describeThreshold } = require('../../services/StrikeService');
 const { UserError } = require('../../core/errors');
+
+/** Ton de la carte selon l'escalade réellement appliquée. */
+const ESCALATION_TONES = { timeout: 'caution', kick: 'caution', ban: 'danger' };
 
 /**
  * Avertit un membre, incrémente ses strikes et applique automatiquement
@@ -28,24 +34,45 @@ module.exports = {
     // Avertissement + escalade éventuelle (timeout/kick/ban, DM, logs) : peut dépasser 3 s.
     await interaction.deferReply();
     const { moderation, strikes } = client.services;
-    await moderation.warn(interaction.guild, member, interaction.member, reason);
+    const { id } = await moderation.warn(interaction.guild, member, interaction.member, reason);
     const { count, action } = strikes.add(interaction.guild.id, user.id, 1);
 
-    let escalation = '';
+    let escalation = null;
     if (action && count === action.strikes) {
       escalation = await applyEscalation(client, interaction, member, action, count);
     }
+    const next = strikes.nextThreshold?.(interaction.guild.id, count);
 
-    const embed = embeds.moderation('⚠️ Avertissement').addFields(
-      { name: 'Membre', value: `${user}`, inline: true },
-      { name: 'Strikes', value: `${count}`, inline: true },
-      { name: 'Raison', value: truncate(reason || 'Aucune raison fournie', 1024) },
-    );
-    if (escalation) embed.addFields({ name: 'Escalade automatique', value: truncate(escalation, 1024) });
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply({
+      embeds: [
+        sanctionCard({
+          id,
+          type: 'warn',
+          user,
+          moderator: interaction.user,
+          reason,
+          tone: escalation?.ok ? ESCALATION_TONES[escalation.type] : undefined,
+          fields: [
+            field(ICONS.warn, 'Strikes', `**${count}**`),
+            next ? field(ICONS.stats, 'Prochain palier', describeThreshold(next)) : null,
+            escalation ? wide('⚡', 'Escalade automatique', truncate(escalation.text, 1024)) : null,
+          ],
+        }),
+      ],
+      components: buttonRows(
+        escalation?.ok && escalation.type === 'timeout'
+          ? actionButton({ command: 'untimeout', action: 'revoke', args: [user.id], label: 'Retirer le timeout', emoji: ICONS.unmute, style: ButtonStyle.Success })
+          : null,
+        escalation?.ok && escalation.type === 'ban'
+          ? actionButton({ command: 'unban', action: 'revoke', args: [user.id], label: 'Débannir', emoji: ICONS.unlock, style: ButtonStyle.Success })
+          : null,
+        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+      ),
+    });
   },
 };
 
+/** @returns {Promise<{ ok: boolean, type: 'timeout'|'kick'|'ban'|null, text: string }|null>} */
 async function applyEscalation(client, interaction, member, action, count) {
   const { moderation } = client.services;
   const reason = `Escalade automatique (${count} strikes)`;
@@ -53,18 +80,18 @@ async function applyEscalation(client, interaction, member, action, count) {
     if (action.action === 'mute' || action.action === 'timeout') {
       const ms = parseDuration(action.duration || '1h') || 3_600_000;
       await moderation.timeout(interaction.guild, member, interaction.guild.members.me, reason, ms);
-      return `Timeout appliqué (${action.duration || '1h'}).`;
+      return { ok: true, type: 'timeout', text: `${ICONS.mute} Timeout de **${action.duration || '1h'}** appliqué (palier de ${count} strikes).` };
     }
     if (action.action === 'kick') {
       await moderation.kick(interaction.guild, member, interaction.guild.members.me, reason);
-      return 'Membre expulsé.';
+      return { ok: true, type: 'kick', text: `${ICONS.kick} Membre **expulsé** (palier de ${count} strikes).` };
     }
     if (action.action === 'ban') {
       await moderation.ban(interaction.guild, member.user, interaction.guild.members.me, reason, { targetMember: member });
-      return 'Membre banni.';
+      return { ok: true, type: 'ban', text: `${ICONS.ban} Membre **banni** (palier de ${count} strikes).` };
     }
   } catch (err) {
-    return `Échec de l'escalade : ${err.message}`;
+    return { ok: false, type: null, text: `${ICONS.error} Échec de l'escalade : ${err.message}` };
   }
-  return '';
+  return null;
 }

@@ -1,7 +1,7 @@
 'use strict';
 
 const { EmbedBuilder } = require('discord.js');
-const { successReply } = require('../utils/embeds');
+const { status, TONES, ICONS, linkButton, buttonRows } = require('../utils/ui');
 const { parseColor, isHttpUrl } = require('../commands/utility/embed');
 const { UserError } = require('../core/errors');
 
@@ -22,10 +22,14 @@ module.exports = {
     if (image && !isHttpUrl(image)) throw new UserError('L\'URL de l\'image doit commencer par `http://` ou `https://`.');
     if (title) embed.setTitle(title);
     embed.setDescription(description);
-    embed.setColor(parseColor(color) ?? 0x5865f2);
+    embed.setColor(parseColor(color) ?? TONES.brand);
     if (image) embed.setImage(image);
 
-    await interaction.channel.send({ embeds: [embed] });
-    await interaction.reply(successReply('Embed publié.', { ephemeral: true }));
+    const sent = await interaction.channel.send({ embeds: [embed] });
+    await interaction.reply({
+      embeds: [status.ok(`Votre embed a été publié dans ${interaction.channel}.`, 'Embed envoyé')],
+      components: sent?.url ? buttonRows(linkButton('Voir le message', sent.url, ICONS.link)) : [],
+      ephemeral: true,
+    });
   },
 };

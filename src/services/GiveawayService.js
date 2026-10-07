@@ -1,14 +1,34 @@
 'use strict';
 
-const { embeds, truncate } = require('../utils/embeds');
+const { truncate, listOrMore } = require('../utils/embeds');
 const { button, row, ButtonStyle } = require('../utils/components');
+const { card, field, wide, ICONS, subtext, actionButton, linkButton, buttonRows } = require('../utils/ui');
 const { discordTimestamp } = require('../utils/time');
 const { pickWinners } = require('../utils/random');
 const { UserError } = require('../core/errors');
 
+/** Lien direct vers le message d'un giveaway (null si pas encore publié). */
+function giveawayUrl(g) {
+  return g?.message_id ? `https://discord.com/channels/${g.guild_id}/${g.channel_id}/${g.message_id}` : null;
+}
+
+/** Conditions de participation lisibles. */
+function conditions(g) {
+  const parts = [
+    g.required_role ? `${ICONS.check} Rôle requis : <@&${g.required_role}>` : null,
+    g.forbidden_role ? `${ICONS.ban} Rôle exclu : <@&${g.forbidden_role}>` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join('\n') : 'Aucune : ouvert à tous les membres.';
+}
+
+const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
+
 /**
  * Giveaways persistants : création, participation par bouton, fin automatique
  * (via scheduler) et reroll. Tout survit au redémarrage.
+ *
+ * customIds : giveaway:enter:<id> (participation, rétrocompatible)
+ *             cmd:giveaway:reroll:<id> (nouveau tirage, réservé aux organisateurs)
  */
 class GiveawayService {
   /**
@@ -21,23 +41,104 @@ class GiveawayService {
     this.giveaways = giveaways;
   }
 
-  #render(g) {
+  /** Carte du giveaway en cours. */
+  render(g) {
     const entries = this.giveaways.countEntries(g.id);
-    const embed = embeds.neutral(`🎉 ${g.prize}`)
-      .setDescription(
-        [
-          `Cliquez sur 🎉 pour participer !`,
-          `Fin : ${discordTimestamp(g.ends_at)} (${discordTimestamp(g.ends_at, 'R')})`,
-          `Gagnant(s) : **${g.winners}**`,
-          `Organisé par : <@${g.host_id}>`,
-          g.required_role ? `Rôle requis : <@&${g.required_role}>` : null,
-          `Participants : **${entries}**`,
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      );
-    const components = [row(button({ id: `giveaway:enter:${g.id}`, label: 'Participer', style: ButtonStyle.Primary, emoji: '🎉' }))];
+    const embed = card({
+      tone: 'celebrate',
+      section: 'giveaways',
+      icon: ICONS.gift,
+      title: truncate(g.prize, 200),
+      description: [
+        `Cliquez sur **${ICONS.gift} Participer** pour tenter votre chance !`,
+        subtext('Cliquez à nouveau pour retirer votre participation.'),
+      ],
+      fields: [
+        field('🏆', 'Gagnants', `**${g.winners}**`),
+        field(ICONS.expires, 'Fin', `${discordTimestamp(g.ends_at, 'R')}\n${discordTimestamp(g.ends_at, 'f')}`),
+        field(ICONS.owner, 'Organisateur', `<@${g.host_id}>`),
+        field(ICONS.members, 'Participants', `**${entries}**`),
+        wide(ICONS.list, 'Conditions', conditions(g)),
+      ],
+      footer: `Giveaway #${g.id} · Fin`,
+      timestamp: g.ends_at,
+    });
+    const components = [
+      row(button({ id: `giveaway:enter:${g.id}`, label: entries ? `Participer · ${entries}` : 'Participer', style: ButtonStyle.Primary, emoji: ICONS.gift })),
+    ];
     return { embeds: [embed], components };
+  }
+
+  /** Carte du giveaway terminé (remplace le message d'origine). */
+  renderEnded(g, winners) {
+    const entries = this.giveaways.countEntries(g.id);
+    const list = winners.map((w) => `<@${w}>`);
+    return {
+      embeds: [
+        card({
+          tone: winners.length ? 'celebrate' : 'neutral',
+          section: 'giveaways',
+          icon: winners.length ? '🏆' : ICONS.gift,
+          title: truncate(g.prize, 200),
+          description: winners.length
+            ? [`Giveaway terminé ! Bravo à ${listOrMore(list, 20)} 🎉`]
+            : ['Giveaway terminé, sans participant éligible.'],
+          fields: [
+            wide('🏆', winners.length > 1 ? 'Gagnants' : 'Gagnant', winners.length ? listOrMore(list, 20, '\n') : '*Aucun*'),
+            field(ICONS.members, 'Participants', `**${entries}**`),
+            field(ICONS.owner, 'Organisateur', `<@${g.host_id}>`),
+            field(ICONS.date, 'Terminé', discordTimestamp(Date.now(), 'R')),
+          ],
+          footer: `Giveaway #${g.id} · Terminé`,
+        }),
+      ],
+      components: buttonRows(
+        actionButton({ command: 'giveaway', action: 'reroll', args: [g.id], label: 'Relancer', emoji: ICONS.dice, disabled: !entries }),
+      ),
+    };
+  }
+
+  /** Annonce des gagnants (nouveau message dans le salon). */
+  #announcement(g, winners, reroll) {
+    const url = giveawayUrl(g);
+    const list = winners.map((w) => `<@${w}>`);
+    if (!winners.length) {
+      return {
+        embeds: [
+          card({
+            tone: 'neutral',
+            section: 'giveaways',
+            icon: ICONS.gift,
+            title: 'Giveaway terminé sans gagnant',
+            description: `Personne n'a participé à **${truncate(g.prize, 200)}**.`,
+            footer: `Giveaway #${g.id}`,
+          }),
+        ],
+        components: url ? buttonRows(linkButton('Voir le giveaway', url, ICONS.link)) : [],
+      };
+    }
+    return {
+      content: list.join(' '),
+      embeds: [
+        card({
+          tone: 'celebrate',
+          section: 'giveaways',
+          icon: reroll ? ICONS.dice : '🏆',
+          title: reroll ? 'Nouveau tirage !' : 'Félicitations !',
+          description: [
+            `${listOrMore(list, 20)} ${winners.length > 1 ? 'remportent' : 'remporte'} **${truncate(g.prize, 200)}** ! 🎉`,
+            subtext(`Contactez ${g.host_id ? `<@${g.host_id}>` : 'l\'organisateur'} pour récupérer votre lot.`),
+          ],
+          fields: [
+            field(ICONS.gift, 'Récompense', truncate(g.prize, 200)),
+            field('🏆', 'Gagnants', `**${winners.length}**`),
+            field(ICONS.owner, 'Organisateur', `<@${g.host_id}>`),
+          ],
+          footer: `Giveaway #${g.id}${reroll ? ' · Reroll' : ''}`,
+        }),
+      ],
+      components: url ? buttonRows(linkButton('Voir le giveaway', url, ICONS.link)) : [],
+    };
   }
 
   async create(channel, host, { prize, winners, durationMs, requiredRole, forbiddenRole }) {
@@ -60,7 +161,7 @@ class GiveawayService {
     const g = this.giveaways.get(id);
     let message;
     try {
-      message = await channel.send(this.#render(g));
+      message = await channel.send(this.render(g));
     } catch (err) {
       // Pas de ligne orpheline si le message n'a pas pu être publié.
       this.giveaways.delete(id);
@@ -90,25 +191,38 @@ class GiveawayService {
     return winners;
   }
 
+  /**
+   * Bascule la participation du membre.
+   * @returns {Promise<boolean>} true si le membre participe désormais
+   */
   async toggleEntry(interaction, giveawayId) {
     const g = this.giveaways.get(giveawayId);
     if (!g || g.guild_id !== interaction.guildId || g.ended) throw new UserError('Ce giveaway est terminé.');
     if (interaction.user.bot) throw new UserError('Les bots ne peuvent pas participer.');
     const member = interaction.member;
     if (g.required_role && !member.roles.cache.has(g.required_role)) {
-      throw new UserError('Vous n\'avez pas le rôle requis pour participer.');
+      throw new UserError(`Il faut le rôle <@&${g.required_role}> pour participer à ce giveaway.`);
     }
     if (g.forbidden_role && member.roles.cache.has(g.forbidden_role)) {
-      throw new UserError('Vous ne pouvez pas participer à ce giveaway.');
+      throw new UserError(`Les membres ayant le rôle <@&${g.forbidden_role}> ne peuvent pas participer à ce giveaway.`);
     }
     const joined = this.giveaways.toggleEntry(giveawayId, member.id);
     // Met à jour le compteur affiché
     const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
     if (channel && g.message_id) {
       const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-      if (msg) await msg.edit(this.#render(g)).catch(() => {});
+      if (msg) await msg.edit(this.render(g)).catch(() => {});
     }
     return joined;
+  }
+
+  /** Nombre de participants (affichage). */
+  countEntries(giveawayId) {
+    return this.giveaways.countEntries(giveawayId);
+  }
+
+  get(giveawayId) {
+    return this.giveaways.get(giveawayId);
   }
 
   /**
@@ -131,25 +245,10 @@ class GiveawayService {
     const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
 
     if (channel?.isTextBased()) {
-      if (!winners.length) {
-        await channel.send({ embeds: [embeds.warning(`Aucun participant pour **${truncate(g.prize, 200)}**.`, '🎉 Giveaway terminé')] });
-      } else {
-        const mention = winners.map((w) => `<@${w}>`).join(', ');
-        await channel.send({
-          content: mention,
-          embeds: [embeds.success(`Félicitations ${mention} ! Vous gagnez **${truncate(g.prize, 200)}** 🎉`, reroll ? '🎉 Reroll' : '🎉 Giveaway terminé')],
-        });
-      }
+      await channel.send(this.#announcement(g, winners, reroll)).catch(() => {});
       if (g.message_id && !reroll) {
         const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-        if (msg) {
-          await msg
-            .edit({
-              embeds: [embeds.neutral(`🎉 ${g.prize}`).setDescription(`Terminé — gagnant(s) : ${winners.length ? winners.map((w) => `<@${w}>`).join(', ') : 'aucun'}`)],
-              components: [],
-            })
-            .catch(() => {});
-        }
+        if (msg) await msg.edit(this.renderEnded(g, winners)).catch(() => {});
       }
     }
     return winners;
@@ -160,4 +259,4 @@ class GiveawayService {
   }
 }
 
-module.exports = { GiveawayService };
+module.exports = { GiveawayService, giveawayUrl, conditions };

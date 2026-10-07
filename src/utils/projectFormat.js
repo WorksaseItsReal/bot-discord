@@ -165,7 +165,8 @@ function projectSection(project, guild) {
 
 function tasksLabel(counts) {
   if (!counts?.total) return null;
-  return `${counts.done}/${counts.total} tâche${counts.total > 1 ? 's' : ''} terminée${counts.done > 1 ? 's' : ''}`;
+  const s = counts.done > 1 ? 's' : '';
+  return `${counts.done} tâche${s} terminée${s} sur ${counts.total}`;
 }
 
 /** « `██████░░░░` **42 %** » — la ligne la plus visible de la fiche. */

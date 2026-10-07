@@ -71,7 +71,8 @@ test('buildProjectEmbed respecte les limites Discord même avec un contenu maxim
   for (const field of json.fields) assert.ok(field.value.length <= 1024, field.name);
   const total = json.title.length + json.description.length + json.footer.text.length + json.author.name.length + json.fields.reduce((n, x) => n + x.name.length + x.value.length, 0);
   assert.ok(total <= 6000, `total ${total}`);
-  assert.ok(json.fields.find((x) => x.name.startsWith('⏰')).value.includes('En retard'));
+  assert.ok(json.fields.find((x) => x.name.includes('Échéance')).value.includes('En retard'));
+  assert.ok(json.description.includes('%'), 'progression visible dans la description');
   const rows = f.buildProjectComponents(project, { hasTasks: true }).map((r) => r.toJSON());
   assert.ok(rows.every((r) => r.components.length <= 5));
 });

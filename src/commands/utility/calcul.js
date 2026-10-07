@@ -1,9 +1,14 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embeds, truncate } = require('../../utils/embeds');
 const { evaluate, formatNumber, CalcError } = require('../../utils/calc');
+const { card, wide, subtext } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+
+/** Bloc de code sûr (les accents graves de l'utilisateur sont neutralisés). */
+function block(text, lang = '') {
+  return `\`\`\`${lang}\n${String(text).replace(/`/g, 'ˋ')}\n\`\`\``;
+}
 
 module.exports = {
   guildOnly: false,
@@ -20,12 +25,14 @@ module.exports = {
       if (err instanceof CalcError) throw new UserError(`Calcul impossible : ${err.message}`);
       throw err;
     }
-    const embed = embeds
-      .utility('🧮 Calculatrice')
-      .addFields(
-        { name: 'Expression', value: `\`\`\`\n${truncate(expression, 900)}\n\`\`\`` },
-        { name: 'Résultat', value: `\`\`\`fix\n${formatNumber(result)}\n\`\`\`` },
-      );
+    const embed = card({
+      tone: 'info',
+      section: 'utility',
+      icon: '🧮',
+      title: 'Calculatrice',
+      description: subtext('Opérateurs + − × ÷ % ^ · fonctions sqrt, sin, cos, log, abs… · constantes pi, e'),
+      fields: [wide('✏️', 'Expression', block(expression)), wide('🟰', 'Résultat', block(formatNumber(result), 'fix'))],
+    });
     await interaction.reply({ embeds: [embed] });
   },
 };

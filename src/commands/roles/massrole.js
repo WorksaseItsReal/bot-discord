@@ -1,8 +1,41 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds } = require('../../utils/embeds');
+const { progressBar } = require('../../utils/embeds');
+const { formatDuration } = require('../../utils/time');
+const { card, field, ICONS, subtext } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+
+const TARGET_LABELS = { all: 'Tous les membres', humans: 'Humains', bots: 'Bots' };
+const BATCH = 5;
+/** Intervalle minimal entre deux mises à jour de la carte de progression. */
+const PROGRESS_EVERY_MS = 3_000;
+
+/** Carte de progression / résultat. Pure. */
+function progressCard({ action, role, target, total, done, failed, startedAt, finished }) {
+  const processed = done + failed;
+  const ratio = total ? processed / total : 1;
+  const verb = action === 'add' ? 'Ajout' : 'Retrait';
+  return card({
+    tone: finished ? (failed ? 'warning' : 'success') : 'info',
+    section: 'roles',
+    icon: finished ? (failed ? ICONS.warning : ICONS.success) : ICONS.loading,
+    title: finished ? `${verb} en masse terminé` : `${verb} en masse en cours…`,
+    description: [
+      `${action === 'add' ? 'Ajout de' : 'Retrait de'} ${role} · ${TARGET_LABELS[target] ?? target}`,
+      `\`${progressBar(ratio, 18)}\` **${Math.round(ratio * 100)} %**`,
+      finished ? null : subtext('Traitement par lots pour respecter les limites de Discord.'),
+    ],
+    fields: [
+      field(ICONS.success, 'Mis à jour', `**${done}**`),
+      field(ICONS.error, 'Échecs', `**${failed}**`),
+      field(ICONS.count, 'Concernés', `**${total}**`),
+      field(ICONS.role, 'Rôle', `${role}`),
+      field(ICONS.members, 'Cible', TARGET_LABELS[target] ?? target),
+      field(ICONS.duration, finished ? 'Durée' : 'Écoulé', formatDuration(Math.max(1000, Date.now() - startedAt))),
+    ],
+  });
+}
 
 /**
  * Ajoute/retire un rôle à TOUS les membres (ou aux humains/bots), par lots pour
@@ -10,6 +43,7 @@ const { UserError } = require('../../core/errors');
  */
 module.exports = {
   category: 'roles',
+  progressCard,
   data: new SlashCommandBuilder()
     .setName('massrole')
     .setDescription('Ajoute ou retire un rôle en masse.')
@@ -32,6 +66,7 @@ module.exports = {
     }
 
     await interaction.deferReply();
+    const startedAt = Date.now();
     const members = await interaction.guild.members.fetch();
     const filtered = members.filter((m) => {
       if (target === 'humans' && m.user.bot) return false;
@@ -42,9 +77,14 @@ module.exports = {
     let done = 0;
     let failed = 0;
     const list = [...filtered.values()];
+    const state = () => ({ action, role, target, total: list.length, done, failed, startedAt });
+    await interaction.editReply({ embeds: [progressCard({ ...state(), finished: list.length === 0 })] });
+    if (!list.length) return;
+
+    let lastUpdate = Date.now();
     // Traitement par lots pour éviter les rate limits
-    for (let i = 0; i < list.length; i += 5) {
-      const batch = list.slice(i, i + 5);
+    for (let i = 0; i < list.length; i += BATCH) {
+      const batch = list.slice(i, i + BATCH);
       await Promise.all(
         batch.map((m) =>
           (action === 'add' ? m.roles.add(role) : m.roles.remove(role))
@@ -52,8 +92,14 @@ module.exports = {
             .catch(() => (failed += 1)),
         ),
       );
-      if (i + 5 < list.length) await new Promise((r) => setTimeout(r, 1000));
+      if (i + BATCH < list.length) {
+        if (Date.now() - lastUpdate >= PROGRESS_EVERY_MS) {
+          lastUpdate = Date.now();
+          await interaction.editReply({ embeds: [progressCard({ ...state(), finished: false })] }).catch(() => {});
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
-    await interaction.editReply({ embeds: [embeds.success(`Terminé : ${done} membre(s) mis à jour${failed ? `, ${failed} échec(s)` : ''}.`)] });
+    await interaction.editReply({ embeds: [progressCard({ ...state(), finished: true })] });
   },
 };

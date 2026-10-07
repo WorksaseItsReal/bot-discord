@@ -10,11 +10,24 @@ const {
   ActionRowBuilder,
 } = require('discord.js');
 const { UserError } = require('../../core/errors');
-const { embeds, progressBar, truncate } = require('../../utils/embeds');
-const { paginate } = require('../../utils/pagination');
+const { progressBar, truncate } = require('../../utils/embeds');
 const { confirm } = require('../../utils/confirmation');
+const { assertInvoker } = require('../../utils/buttonGuard');
+const { discordTimestamp } = require('../../utils/time');
 const {
-  STATUSES,
+  card,
+  field,
+  status: statusCard,
+  subtext,
+  ICONS,
+  actionButton,
+  linkButton,
+  labelButton,
+  deleteButton,
+  buttonRows,
+  ButtonStyle,
+} = require('../../utils/ui');
+const {
   LIMITS,
   statusMeta,
   statusChoices,
@@ -22,8 +35,12 @@ const {
   formatColor,
   parseTags,
   parseDeadline,
+  normalizeUrl,
+  projectSection,
   buildProjectEmbed,
   buildProjectListPages,
+  buildProjectStatsEmbed,
+  buildProjectSettingsEmbed,
 } = require('../../utils/projectFormat');
 
 const projectOption = (o) =>
@@ -157,10 +174,149 @@ const data = new SlashCommandBuilder()
       .addBooleanOption((o) => o.setName('reinitialiser').setDescription('Retirer le rôle et le salon configurés')),
   );
 
+/** Projets affichés par page dans /projet liste. */
+const PER_PAGE = 6;
+
+/**
+ * Formulaire d'édition d'un projet (soumis vers `project:edit:<id>`,
+ * traité par src/components/project.js). Utilisé par /projet modifier et le bouton « Modifier ».
+ */
+function buildEditModal(project) {
+  const input = (id, label, style, { value, max, required = false, placeholder } = {}) => {
+    const text = new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required).setMaxLength(max);
+    if (value) text.setValue(String(value).slice(0, max));
+    if (placeholder) text.setPlaceholder(placeholder);
+    return new ActionRowBuilder().addComponents(text);
+  };
+  return new ModalBuilder()
+    .setCustomId(`project:edit:${project.id}`)
+    .setTitle(truncate(`Modifier le projet #${project.number}`, 45))
+    .addComponents(
+      input('name', 'Nom', TextInputStyle.Short, { value: project.name, max: LIMITS.name, required: true }),
+      input('description', 'Description', TextInputStyle.Paragraph, { value: project.description, max: LIMITS.description }),
+      input('tags', 'Tags (séparés par des virgules)', TextInputStyle.Short, { value: (project.tags || []).join(', '), max: 250 }),
+      input('image', 'Image de bannière (https://…)', TextInputStyle.Short, { value: project.imageUrl, max: LIMITS.url }),
+      input('color', 'Couleur (#RRGGBB, vide = couleur du statut)', TextInputStyle.Short, {
+        value: project.color != null ? formatColor(project.color) : '',
+        max: 9,
+        placeholder: '#5865F2',
+      }),
+    );
+}
+
+/** Projet visé par un bouton (identifiant interne encodé dans le customId). */
+function projectFromButton(service, interaction, idStr) {
+  const project = service.repo.get(Number(idStr));
+  if (!project || project.guildId !== interaction.guildId) {
+    throw new UserError('Ce projet n\'existe plus. Il a peut-être été supprimé.');
+  }
+  return project;
+}
+
+/** Réponse éphémère : retour d'action + aperçu à jour du projet. */
+function updatedReply(service, project, guild, message) {
+  const { tasks, members } = service.details(project);
+  return {
+    embeds: [statusCard.ok(message), buildProjectEmbed(project, { tasks, members, guild })],
+    ephemeral: true,
+  };
+}
+
+function publishedHint(project) {
+  return project.messageId ? ' La fiche publiée sera mise à jour automatiquement.' : '';
+}
+
+/** Publie une fiche dans `channel` après vérification des droits de la personne. */
+async function publishTo(interaction, service, project, channel) {
+  service.assertCanEdit(project, interaction.member);
+  if (!channel?.isTextBased?.()) throw new UserError('Choisissez un salon textuel.');
+  // La personne doit elle-même pouvoir écrire dans le salon visé.
+  if (!channel.permissionsFor?.(interaction.member)?.has(PermissionFlagsBits.SendMessages)) {
+    throw new UserError(`Vous ne pouvez pas envoyer de messages dans ${channel}.`);
+  }
+  await interaction.deferReply({ ephemeral: true });
+  const updated = await service.publish(project, channel);
+  const link = `https://discord.com/channels/${interaction.guildId}/${updated.channelId}/${updated.messageId}`;
+  await interaction.editReply({
+    embeds: [
+      card({
+        tone: 'success',
+        section: projectSection(updated, interaction.guild),
+        icon: '📢',
+        title: 'Fiche publiée',
+        description: [
+          `La fiche de **${updated.name}** est en ligne dans ${channel}.`,
+          subtext('Elle se met à jour automatiquement à chaque modification du projet.'),
+        ],
+        fields: [field(ICONS.channel, 'Salon', `${channel}`), field(ICONS.refresh, 'Mise à jour', 'Automatique')],
+      }),
+    ],
+    components: buttonRows(linkButton('Voir la fiche', link, ICONS.link)),
+  });
+  return updated;
+}
+
+/**
+ * Liste paginée SANS état serveur : page, filtre et auteur sont encodés dans le bouton.
+ *   cmd:projet:list:<ownerId>:<page>:<statut|->:<membreId|->:<p|r|n>
+ */
+async function renderList(client, service, guild, { ownerId, page = 0, status = null, memberId = null }) {
+  const entries = service.list(guild.id, { status, memberId });
+  const why = status ? ` avec le statut **${statusMeta(status).label}**` : memberId ? ` pour <@${memberId}>` : '';
+  if (!entries.length) {
+    return {
+      embeds: [statusCard.note(`Aucun projet${why}. Créez-en un avec \`/projet creer\`.`, `${ICONS.project} Projets`)],
+      components: buttonRows(deleteButton(ownerId)),
+    };
+  }
+  let filterLabel = null;
+  if (status) filterLabel = `${statusMeta(status).emoji} ${statusMeta(status).label}`;
+  else if (memberId) {
+    const user = client.users.cache.get(memberId) ?? (await client.users.fetch(memberId).catch(() => null));
+    filterLabel = user?.username ?? 'membre';
+  }
+  const pages = buildProjectListPages(entries, { guildName: guild.name, filterLabel, perPage: PER_PAGE });
+  const index = Math.min(Math.max(0, Number(page) || 0), pages.length - 1);
+  const embed = pages[index];
+  if (pages.length > 1) embed.setFooter({ ...embed.data.footer, text: `${embed.data.footer.text} • Page ${index + 1}/${pages.length}` });
+
+  const args = (target, tag) => [ownerId, target, status ?? '-', memberId ?? '-', tag];
+  const nav = pages.length > 1
+    ? [
+      actionButton({ command: 'projet', action: 'list', args: args(index - 1, 'p'), emoji: ICONS.back, disabled: index === 0 }),
+      labelButton(`${index + 1} / ${pages.length}`),
+      actionButton({ command: 'projet', action: 'list', args: args(index + 1, 'n'), emoji: ICONS.next, disabled: index === pages.length - 1 }),
+    ]
+    : [];
+  return {
+    embeds: [embed],
+    components: buttonRows(
+      ...nav,
+      actionButton({ command: 'projet', action: 'list', args: args(index, 'r'), label: 'Actualiser', emoji: ICONS.refresh, style: ButtonStyle.Primary }),
+      deleteButton(ownerId),
+    ),
+  };
+}
+
+function renderStats(service, guild, ownerId) {
+  const s = service.stats(guild.id);
+  if (!s.total) return null;
+  return {
+    embeds: [buildProjectStatsEmbed(s, { guildName: guild.name, thumbnail: guild.iconURL?.({ size: 128 }) ?? null })],
+    components: buttonRows(
+      actionButton({ command: 'projet', action: 'stats', args: [ownerId], label: 'Actualiser', emoji: ICONS.refresh, style: ButtonStyle.Primary }),
+      deleteButton(ownerId),
+    ),
+  };
+}
+
+const EMPTY_STATS = 'Aucun projet pour le moment. Lancez-vous avec `/projet creer` !';
+
 module.exports = {
   category: 'projects',
   cooldown: 2_000,
   data,
+  buildEditModal,
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
@@ -208,20 +364,43 @@ module.exports = {
     }
     return interaction.respond([]);
   },
+
+  buttons: {
+    /** cmd:projet:publish:<projectId> — publie la fiche dans le salon courant. */
+    async publish(interaction, client, [projectId]) {
+      const service = client.services.projects;
+      const project = projectFromButton(service, interaction, projectId);
+      await publishTo(interaction, service, project, interaction.channel);
+    },
+
+    /** cmd:projet:edit:<projectId> — ouvre le formulaire de modification. */
+    async edit(interaction, client, [projectId]) {
+      const service = client.services.projects;
+      const project = projectFromButton(service, interaction, projectId);
+      service.assertCanEdit(project, interaction.member);
+      await interaction.showModal(buildEditModal(project));
+    },
+
+    /** cmd:projet:list:<ownerId>:<page>:<statut|->:<membreId|->:<tag> — navigation / actualisation. */
+    async list(interaction, client, [ownerId, page, status, memberId]) {
+      assertInvoker(interaction, ownerId);
+      const view = await renderList(client, client.services.projects, interaction.guild, {
+        ownerId,
+        page: Number(page) || 0,
+        status: status && status !== '-' ? status : null,
+        memberId: memberId && memberId !== '-' ? memberId : null,
+      });
+      await interaction.update(view);
+    },
+
+    /** cmd:projet:stats:<ownerId> — actualise les statistiques. */
+    async stats(interaction, client, [ownerId]) {
+      assertInvoker(interaction, ownerId);
+      const view = renderStats(client.services.projects, interaction.guild, ownerId);
+      await interaction.update(view ?? { embeds: [statusCard.note(EMPTY_STATS, `${ICONS.stats} Statistiques des projets`)], components: buttonRows(deleteButton(ownerId)) });
+    },
+  },
 };
-
-/** Réponse éphémère : message de succès + aperçu à jour du projet. */
-function updatedReply(service, project, guild, message) {
-  const { tasks, members } = service.details(project);
-  return {
-    embeds: [embeds.success(message), buildProjectEmbed(project, { tasks, members, guild })],
-    ephemeral: true,
-  };
-}
-
-function publishedHint(project) {
-  return project.messageId ? ' La fiche publiée sera mise à jour automatiquement.' : '';
-}
 
 const HANDLERS = {
   async creer({ interaction, service, guild, member }) {
@@ -246,12 +425,24 @@ const HANDLERS = {
       imageUrl: o.getString('image'),
       color,
     });
-    const view = service.render(project, guild);
+    const { tasks, members } = service.details(project);
+    const links = (project.links || []).filter((l) => normalizeUrl(l.url)).slice(0, LIMITS.links);
     await interaction.reply({
-      ...view,
       embeds: [
-        embeds.success(`Projet **#${project.number} · ${project.name}** créé ! Ajoutez des tâches avec \`/projet tache-ajouter\` et publiez-le avec \`/projet publier\`.`),
-        ...view.embeds,
+        statusCard.ok(
+          [
+            `Projet **#${project.number} · ${project.name}** créé !`,
+            subtext('Ajoutez des tâches avec /projet tache-ajouter, puis publiez la fiche pour la partager.'),
+          ].join('\n'),
+        ),
+        buildProjectEmbed(project, { tasks, members, guild }),
+      ],
+      components: [
+        ...buttonRows(links.map((l) => linkButton(truncate(l.label, 80), l.url, ICONS.link))),
+        ...buttonRows(
+          actionButton({ command: 'projet', action: 'publish', args: [project.id], label: 'Publier ici', emoji: '📢', style: ButtonStyle.Primary }),
+          actionButton({ command: 'projet', action: 'edit', args: [project.id], label: 'Modifier', emoji: '✏️' }),
+        ),
       ],
     });
   },
@@ -261,46 +452,24 @@ const HANDLERS = {
     await interaction.reply(service.render(project, guild));
   },
 
-  async liste({ interaction, service, guild }) {
+  async liste({ interaction, client, service, guild }) {
     const status = interaction.options.getString('statut');
     const user = interaction.options.getUser('membre');
     const entries = service.list(guild.id, { status, memberId: user?.id });
     if (!entries.length) {
       const why = status ? ` avec le statut **${statusMeta(status).label}**` : user ? ` pour ${user}` : '';
       return interaction.reply({
-        embeds: [embeds.info(`Aucun projet${why}. Créez-en un avec \`/projet creer\`.`, '📁 Projets')],
+        embeds: [statusCard.note(`Aucun projet${why}. Créez-en un avec \`/projet creer\`.`, `${ICONS.project} Projets`)],
         ephemeral: true,
       });
     }
-    const filterLabel = status ? `${statusMeta(status).emoji} ${statusMeta(status).label}` : user ? user.username : null;
-    const pages = buildProjectListPages(entries, { guildName: guild.name, filterLabel });
-    await paginate(interaction, pages);
+    await interaction.reply(await renderList(client, service, guild, { ownerId: interaction.user.id, status, memberId: user?.id ?? null }));
   },
 
   async modifier({ interaction, service, guild, member }) {
     const project = service.resolve(guild.id, interaction.options.getString('projet'));
     service.assertCanEdit(project, member);
-    const input = (id, label, style, { value, max, required = false, placeholder } = {}) => {
-      const field = new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required).setMaxLength(max);
-      if (value) field.setValue(String(value).slice(0, max));
-      if (placeholder) field.setPlaceholder(placeholder);
-      return new ActionRowBuilder().addComponents(field);
-    };
-    const modal = new ModalBuilder()
-      .setCustomId(`project:edit:${project.id}`)
-      .setTitle(truncate(`Modifier le projet #${project.number}`, 45))
-      .addComponents(
-        input('name', 'Nom', TextInputStyle.Short, { value: project.name, max: LIMITS.name, required: true }),
-        input('description', 'Description', TextInputStyle.Paragraph, { value: project.description, max: LIMITS.description }),
-        input('tags', 'Tags (séparés par des virgules)', TextInputStyle.Short, { value: project.tags.join(', '), max: 250 }),
-        input('image', 'Image de bannière (https://…)', TextInputStyle.Short, { value: project.imageUrl, max: LIMITS.url }),
-        input('color', 'Couleur (#RRGGBB, vide = couleur du statut)', TextInputStyle.Short, {
-          value: project.color != null ? formatColor(project.color) : '',
-          max: 9,
-          placeholder: '#5865F2',
-        }),
-      );
-    await interaction.showModal(modal);
+    await interaction.showModal(buildEditModal(project));
   },
 
   async statut({ interaction, service, guild, member }) {
@@ -326,7 +495,7 @@ const HANDLERS = {
     const parsed = parseDeadline(interaction.options.getString('date'));
     if (parsed.error) throw new UserError(parsed.error);
     const updated = service.update(project, { deadline: parsed.value });
-    const msg = parsed.clear ? `Échéance de **${updated.name}** retirée.` : `Échéance de **${updated.name}** : <t:${Math.floor(parsed.value / 1000)}:D>.`;
+    const msg = parsed.clear ? `Échéance de **${updated.name}** retirée.` : `Échéance de **${updated.name}** : ${discordTimestamp(parsed.value, 'D')}.`;
     await interaction.reply(updatedReply(service, updated, guild, msg + publishedHint(updated)));
   },
 
@@ -390,24 +559,14 @@ const HANDLERS = {
     await interaction.reply(updatedReply(service, updated, guild, `Lien retiré de **${updated.name}**.`));
   },
 
-  async publier({ interaction, client, service, guild, member }) {
+  async publier({ interaction, client, service, guild }) {
     const project = service.resolve(guild.id, interaction.options.getString('projet'));
-    service.assertCanEdit(project, member);
     const settings = service.settings(guild.id);
     const channel =
       interaction.options.getChannel('salon') ||
       (settings.channelId && guild.channels.cache.get(settings.channelId)) ||
       interaction.channel;
-    // L'utilisateur doit lui-même pouvoir écrire dans le salon visé.
-    if (!channel.permissionsFor(member)?.has(PermissionFlagsBits.SendMessages)) {
-      throw new UserError(`Vous ne pouvez pas envoyer de messages dans ${channel}.`);
-    }
-    await interaction.deferReply({ ephemeral: true });
-    const updated = await service.publish(project, channel);
-    const link = `https://discord.com/channels/${guild.id}/${updated.channelId}/${updated.messageId}`;
-    await interaction.editReply({
-      embeds: [embeds.success(`Fiche de **${updated.name}** publiée dans ${channel}. [Voir le message](${link})\nElle se mettra à jour automatiquement à chaque modification.`)],
-    });
+    const updated = await publishTo(interaction, service, project, channel);
     client.logger.debug(`Projet ${updated.id} publié dans ${channel.id}`);
   },
 
@@ -431,36 +590,26 @@ const HANDLERS = {
     });
     if (!ok) return;
     await service.delete(project);
-    await interaction.followUp({ embeds: [embeds.success(`Projet **${project.name}** supprimé.`)], ephemeral: true });
+    await interaction.followUp({
+      embeds: [
+        card({
+          tone: 'danger',
+          section: projectSection(project, guild),
+          icon: ICONS.delete,
+          title: 'Projet supprimé',
+          description: [`**${project.name}** a été supprimé, avec ses tâches et sa fiche publiée.`, subtext('Cette action est définitive.')],
+        }),
+      ],
+      ephemeral: true,
+    });
   },
 
   async stats({ interaction, service, guild }) {
-    const s = service.stats(guild.id);
-    if (!s.total) {
-      return interaction.reply({ embeds: [embeds.info('Aucun projet pour le moment. Lancez-vous avec `/projet creer` !', '📊 Statistiques des projets')], ephemeral: true });
+    const view = renderStats(service, guild, interaction.user.id);
+    if (!view) {
+      return interaction.reply({ embeds: [statusCard.note(EMPTY_STATS, `${ICONS.stats} Statistiques des projets`)], ephemeral: true });
     }
-    const lines = Object.entries(STATUSES)
-      .filter(([key]) => s.byStatus[key])
-      .map(([key, meta]) => {
-        const n = s.byStatus[key];
-        return `${meta.emoji} \`${progressBar(n / s.total, 10)}\` **${n}** ${meta.label}`;
-      });
-    const done = s.byStatus.termine || 0;
-    const embed = embeds
-      .custom(0x5865f2, `📊 Projets de ${guild.name}`)
-      .setThumbnail(guild.iconURL({ size: 128 }))
-      .setDescription(lines.join('\n'))
-      .addFields(
-        { name: '📁 Total', value: `**${s.total}** projet${s.total > 1 ? 's' : ''}`, inline: true },
-        { name: '✅ Taux de réussite', value: `**${Math.round((done / s.total) * 100)} %**`, inline: true },
-        { name: '⚠️ En retard', value: `**${s.overdue}**`, inline: true },
-        {
-          name: '🧩 Tâches',
-          value: s.tasks.total ? `\`${progressBar(s.tasks.done / s.tasks.total, 10)}\` **${s.tasks.done}/${s.tasks.total}** terminées` : 'Aucune tâche',
-        },
-        { name: '🏆 Membres les plus actifs', value: s.topOwners.map(([id, n], i) => `${['🥇', '🥈', '🥉', '4.', '5.'][i]} <@${id}> — ${n} projet${n > 1 ? 's' : ''}`).join('\n') },
-      );
-    await interaction.reply({ embeds: [embed] });
+    await interaction.reply(view);
   },
 
   async config({ interaction, client, service, guild, member }) {
@@ -484,16 +633,8 @@ const HANDLERS = {
     if (channel) patch.channelId = channel.id;
     if (open !== null) patch.openCreation = open;
     if (max !== null) patch.maxPerUser = max;
-    const settings = Object.keys(patch).length ? client.services.config.update(guild.id, { projects: patch }).projects : service.settings(guild.id);
-    const embed = embeds
-      .custom(0x5865f2, '⚙️ Configuration des projets')
-      .setDescription(Object.keys(patch).length ? '✅ Réglages mis à jour.' : 'Réglages actuels :')
-      .addFields(
-        { name: '👑 Rôle gestionnaire', value: settings.managerRoleId ? `<@&${settings.managerRoleId}>` : '*Aucun (« Gérer le serveur » uniquement)*', inline: true },
-        { name: '📢 Salon par défaut', value: settings.channelId ? `<#${settings.channelId}>` : '*Salon courant*', inline: true },
-        { name: '🔓 Création ouverte', value: settings.openCreation ? 'Oui, à tous' : 'Non, gestionnaires', inline: true },
-        { name: '📦 Projets actifs / membre', value: `${settings.maxPerUser}`, inline: true },
-      );
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    const changed = Object.keys(patch).length > 0;
+    const settings = changed ? client.services.config.update(guild.id, { projects: patch }).projects : service.settings(guild.id);
+    await interaction.reply({ embeds: [buildProjectSettingsEmbed(settings, { changed })], ephemeral: true });
   },
 };

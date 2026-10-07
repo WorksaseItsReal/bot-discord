@@ -1,5 +1,15 @@
 'use strict';
 
+/** Libellés français des sanctions d'escalade. */
+const ACTION_LABELS = { mute: 'Timeout', timeout: 'Timeout', kick: 'Expulsion', ban: 'Bannissement' };
+
+/** « 3 strikes → Timeout (1h) ». Pur. */
+function describeThreshold(t) {
+  if (!t) return null;
+  const label = ACTION_LABELS[t.action] ?? t.action;
+  return `${t.strikes} strikes → ${label}${t.duration ? ` (${t.duration})` : ''}`;
+}
+
 /**
  * Système de strikes configurable par serveur. À partir d'un nombre de strikes
  * et des paliers définis dans la config, détermine la sanction à appliquer.
@@ -47,6 +57,13 @@ class StrikeService {
     }
     return matched;
   }
+
+  /** Prochain palier non encore atteint (ou null). */
+  nextThreshold(guildId, count) {
+    const { strikes } = this.config.get(guildId);
+    if (!strikes?.enabled) return null;
+    return [...(strikes.thresholds || [])].sort((a, b) => a.strikes - b.strikes).find((t) => t.strikes > count) ?? null;
+  }
 }
 
-module.exports = { StrikeService };
+module.exports = { StrikeService, ACTION_LABELS, describeThreshold };

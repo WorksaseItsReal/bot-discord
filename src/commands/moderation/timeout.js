@@ -1,8 +1,9 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { successReply } = require('../../utils/embeds');
-const { parseDuration, formatDuration } = require('../../utils/time');
+const { parseDuration } = require('../../utils/time');
+const { ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { sanctionCard } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -25,7 +26,14 @@ module.exports = {
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
 
-    await client.services.moderation.timeout(interaction.guild, member, interaction.member, reason, durationMs);
-    await interaction.reply(successReply(`${user.tag} est timeout pour **${formatDuration(durationMs)}**.`));
+    await interaction.deferReply();
+    const { id, expiresAt } = await client.services.moderation.timeout(interaction.guild, member, interaction.member, reason, durationMs);
+    await interaction.editReply({
+      embeds: [sanctionCard({ id, type: 'timeout', user, moderator: interaction.user, reason, durationMs, expiresAt })],
+      components: buttonRows(
+        actionButton({ command: 'untimeout', action: 'revoke', args: [user.id], label: 'Retirer le timeout', emoji: ICONS.unmute, style: ButtonStyle.Success }),
+        actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history }),
+      ),
+    });
   },
 };

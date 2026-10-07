@@ -1,12 +1,26 @@
 'use strict';
 
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
-const { embeds, truncate } = require('../utils/embeds');
+const { truncate } = require('../utils/embeds');
+const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
+const { discordTimestamp } = require('../utils/time');
 const { UserError } = require('../core/errors');
+
+/** Section « nom du serveur » pour les cartes envoyées en MP. */
+function guildSection(guild) {
+  return { emoji: ICONS.mail, label: guild?.name ? `ModMail · ${guild.name}` : 'ModMail' };
+}
+
+/** Liste des pièces jointes d'un message (liens). */
+function attachmentsList(message) {
+  const list = message.attachments ? [...message.attachments.values()] : [];
+  if (!list.length) return null;
+  return list.slice(0, 10).map((a) => `[${truncate(a.name ?? 'fichier', 60)}](${a.url})`).join('\n');
+}
 
 /**
  * ModMail : un membre écrit au bot en DM → une conversation est créée côté
- * serveur ; le staff répond via une commande, le membre reçoit la réponse en DM.
+ * serveur ; le staff répond (commande ou bouton), le membre reçoit la réponse en DM.
  */
 class ModmailService {
   /**
@@ -19,6 +33,26 @@ class ModmailService {
     this.client = client;
     this.modmail = modmail;
     this.config = config;
+  }
+
+  /** Le membre fait-il partie du staff ModMail (rôle staff ou Gérer les messages) ? */
+  isStaff(member) {
+    if (!member?.permissions) return false;
+    if (member.permissions.has(PermissionFlagsBits.ManageMessages)) return true;
+    const roleId = this.config.get(member.guild.id).modmail?.staffRoleId;
+    return Boolean(roleId && member.roles?.cache?.has(roleId));
+  }
+
+  assertStaff(member) {
+    if (!this.isStaff(member)) throw new UserError('Seul le staff ModMail (ou un membre pouvant gérer les messages) peut faire cela.');
+  }
+
+  /** Boutons du message d'ouverture côté staff. */
+  controls() {
+    return buttonRows(
+      actionButton({ command: 'modmail', action: 'reply', label: 'Répondre', emoji: '✉️', style: ButtonStyle.Primary }),
+      actionButton({ command: 'modmail', action: 'close', label: 'Fermer', emoji: ICONS.lock, style: ButtonStyle.Danger }),
+    );
   }
 
   /** Traite un DM entrant : crée le thread si besoin, relaie au salon staff. */
@@ -64,7 +98,16 @@ class ModmailService {
       const last = this.#noticeAt.get(userId) ?? 0;
       if (Date.now() - last > 10 * 60_000) {
         this.#noticeAt.set(userId, Date.now());
-        await message.reply({ embeds: [embeds.warning('Aucun serveur commun avec le ModMail activé n\'a été trouvé : votre message n\'a pas été transmis.')] }).catch(() => {});
+        await message
+          .reply({
+            embeds: [
+              status.warn(
+                'Aucun serveur commun avec le ModMail activé n\'a été trouvé : votre message n\'a pas été transmis.',
+                'Message non transmis',
+              ),
+            ],
+          })
+          .catch(() => {});
       }
       return;
     }
@@ -77,8 +120,9 @@ class ModmailService {
         { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
       ];
       // Rôle/catégorie supprimés depuis la configuration : on les ignore.
-      if (cfg.staffRoleId && guild.roles.cache.has(cfg.staffRoleId)) {
-        overwrites.push({ id: cfg.staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
+      const staffRoleId = cfg.staffRoleId && guild.roles.cache.has(cfg.staffRoleId) ? cfg.staffRoleId : null;
+      if (staffRoleId) {
+        overwrites.push({ id: staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
       }
       const parent = cfg.categoryId && guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? cfg.categoryId : null;
       channel = await guild.channels.create({
@@ -88,13 +132,73 @@ class ModmailService {
         permissionOverwrites: overwrites,
       });
       this.modmail.create({ guildId: guild.id, userId, channelId: channel.id });
-      await channel.send({ embeds: [embeds.info(`Nouvelle conversation ModMail avec ${message.author.tag} (${userId}). Répondez avec \`/modmail reply\`.`, '📬 ModMail')] });
+
+      const member = await guild.members.fetch(userId).catch(() => null);
+      await channel.send({
+        content: staffRoleId ? `<@&${staffRoleId}>` : undefined,
+        embeds: [this.#openingCard(message.author, member)],
+        components: this.controls(),
+      });
+
+      // Accusé de réception côté membre (une seule fois, à l'ouverture).
+      await message.author
+        .send({
+          embeds: [
+            card({
+              tone: 'brand',
+              section: guildSection(guild),
+              icon: ICONS.success,
+              title: 'Message transmis au staff',
+              description: [
+                `Votre message a bien été transmis à l'équipe de **${guild.name}**.`,
+                'La réponse vous parviendra ici, en message privé.',
+                subtext('Vous pouvez continuer à écrire ici pour compléter votre demande.'),
+              ],
+              thumbnail: guild.iconURL?.({ size: 128 }) ?? null,
+            }),
+          ],
+        })
+        .catch(() => {});
     }
 
-    await channel.send({
-      embeds: [embeds.neutral(`✉️ ${message.author.tag}`).setDescription(truncate(message.content || '*(pièce jointe)*', 4096))],
+    await channel.send({ embeds: [this.#incomingCard(message)] });
+    await message.react(ICONS.mail).catch(() => {});
+  }
+
+  /** Carte d'ouverture côté staff : qui écrit, depuis quand il est là. */
+  #openingCard(user, member) {
+    return card({
+      tone: 'brand',
+      section: 'tickets',
+      icon: ICONS.mail,
+      title: 'Nouvelle conversation ModMail',
+      description: [`${userLine(user)} a écrit au bot en message privé.`, subtext('Vos réponses lui sont envoyées en MP, signées de votre pseudo.')],
+      fields: [
+        field(ICONS.user, 'Utilisateur', userLine(user)),
+        field(ICONS.id, 'Identifiant', code(user.id)),
+        field(ICONS.date, 'Compte créé', user.createdTimestamp ? discordTimestamp(user.createdTimestamp, 'R') : '—'),
+        field('📥', 'Arrivée', member?.joinedTimestamp ? discordTimestamp(member.joinedTimestamp, 'R') : '*Inconnue*'),
+        field(ICONS.role, 'Rôle principal', member && member.roles?.highest && member.roles.highest.id !== member.guild?.id ? `${member.roles.highest}` : '—'),
+        field(ICONS.status, 'Statut', '🟢 Ouverte'),
+        wide(ICONS.help, 'Répondre', 'Bouton **✉️ Répondre** ou `/modmail reply`. Fermez avec **🔒 Fermer** ou `/modmail close`.'),
+      ],
+      thumbnail: user.displayAvatarURL?.({ size: 256 }) ?? null,
+      footer: `Utilisateur ${user.id}`,
     });
-    await message.react('📨').catch(() => {});
+  }
+
+  /** Message du membre relayé côté staff. */
+  #incomingCard(message) {
+    const author = message.author;
+    const files = attachmentsList(message);
+    return card({
+      tone: 'neutral',
+      section: { emoji: '📥', label: `${author.tag ?? author.username} a écrit` },
+      description: truncate(message.content || '*(pièce jointe uniquement)*', 4000),
+      fields: files ? [wide('📎', 'Pièces jointes', files)] : [],
+      thumbnail: author.displayAvatarURL?.({ size: 64 }) ?? null,
+      footer: `Utilisateur ${author.id}`,
+    });
   }
 
   async reply(channel, staff, content) {
@@ -102,10 +206,37 @@ class ModmailService {
     if (!thread || thread.status !== 'open') throw new UserError('Ce salon n\'est pas une conversation ModMail ouverte.');
     const user = await this.client.users.fetch(thread.user_id).catch(() => null);
     if (!user) throw new UserError('Impossible de contacter cet utilisateur.');
-    await user.send({ embeds: [embeds.neutral(`Réponse du staff`).setDescription(truncate(content, 4096))] }).catch(() => {
-      throw new UserError('L\'utilisateur a fermé ses DM : impossible de répondre.');
+    const guild = channel.guild ?? this.client.guilds.cache.get(thread.guild_id);
+    const staffName = staff.displayName ?? staff.globalName ?? staff.username;
+    await user
+      .send({
+        embeds: [
+          card({
+            tone: 'info',
+            section: guildSection(guild),
+            icon: ICONS.mail,
+            title: 'Réponse du staff',
+            description: truncate(content, 4000),
+            fields: [field(ICONS.moderator, 'Répondu par', `**${truncate(staffName, 80)}**`)],
+            thumbnail: guild?.iconURL?.({ size: 128 }) ?? null,
+            footer: 'Répondez ici pour poursuivre la conversation',
+          }),
+        ],
+      })
+      .catch(() => {
+        throw new UserError('L\'utilisateur a fermé ses MP : impossible de lui répondre.');
+      });
+    await channel.send({
+      embeds: [
+        card({
+          tone: 'success',
+          section: { emoji: '📤', label: `Réponse de ${staff.tag ?? staff.username}` },
+          description: truncate(content, 4000),
+          thumbnail: staff.displayAvatarURL?.({ size: 64 }) ?? null,
+          footer: `Envoyé en MP à ${user.tag ?? user.username}`,
+        }),
+      ],
     });
-    await channel.send({ embeds: [embeds.success(truncate(`Répondu par ${staff} : ${content}`, 4000))] });
   }
 
   async close(channel) {
@@ -113,7 +244,25 @@ class ModmailService {
     if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
     this.modmail.close(channel.id);
     const user = await this.client.users.fetch(thread.user_id).catch(() => null);
-    if (user) await user.send({ embeds: [embeds.warning('Votre conversation avec le staff a été fermée.')] }).catch(() => {});
+    const guild = channel.guild ?? this.client.guilds.cache.get(thread.guild_id);
+    if (user) {
+      await user
+        .send({
+          embeds: [
+            card({
+              tone: 'neutral',
+              section: guildSection(guild),
+              icon: ICONS.lock,
+              title: 'Conversation fermée',
+              description: [
+                `Votre conversation avec l'équipe de **${guild?.name ?? 'ce serveur'}** est terminée. Merci pour votre message !`,
+                subtext('Besoin d\'autre chose ? Écrivez-moi à nouveau pour ouvrir une nouvelle conversation.'),
+              ],
+            }),
+          ],
+        })
+        .catch(() => {});
+    }
     await channel.delete().catch(() => {});
   }
 

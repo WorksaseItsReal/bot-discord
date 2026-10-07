@@ -1,7 +1,7 @@
 'use strict';
 
 const { PermissionFlagsBits } = require('discord.js');
-const { embeds } = require('../utils/embeds');
+const { card, field, ICONS, status, subtext } = require('../utils/ui');
 
 /** Permissions qu'un rôle auto-attribuable ne doit jamais conférer. */
 const DANGEROUS_PERMISSIONS = [
@@ -28,7 +28,7 @@ module.exports = {
 
     const record = client.repositories.roleMenus.getByMessage(interaction.message.id);
     if (!record || record.guild_id !== interaction.guildId) {
-      await interaction.reply({ embeds: [embeds.warning('Ce menu de rôles n\'existe plus.')], ephemeral: true });
+      await interaction.reply({ embeds: [status.warn('Ce menu de rôles n\'existe plus. Demandez au staff d\'en publier un nouveau.', 'Menu expiré')], ephemeral: true });
       return;
     }
 
@@ -60,10 +60,29 @@ module.exports = {
       }
     }
 
-    const parts = [];
-    if (added.length) parts.push(`Ajouté(s) : ${added.map((r) => `<@&${r}>`).join(', ')}`);
-    if (removed.length) parts.push(`Retiré(s) : ${removed.map((r) => `<@&${r}>`).join(', ')}`);
-    if (failed.length) parts.push(`Impossible de modifier : ${failed.map((r) => `<@&${r}>`).join(', ')}`);
-    await interaction.reply({ embeds: [embeds.success(parts.join('\n') || 'Aucun changement.')], ephemeral: true });
+    const mentions = (ids) => ids.map((r) => `<@&${r}>`).join(' ');
+    if (!added.length && !removed.length && !failed.length) {
+      await interaction.reply({ embeds: [status.note('Aucun changement : sélectionnez un rôle pour l\'obtenir ou le retirer.', 'Vos rôles')], ephemeral: true });
+      return;
+    }
+    const tone = failed.length && !added.length && !removed.length ? 'danger' : failed.length ? 'warning' : 'success';
+    await interaction.reply({
+      embeds: [
+        card({
+          tone,
+          section: 'roles',
+          icon: tone === 'success' ? ICONS.success : tone === 'danger' ? ICONS.error : ICONS.warning,
+          title: tone === 'danger' ? 'Aucun rôle modifié' : 'Vos rôles ont été mis à jour',
+          description: tone === 'danger' ? 'Je n\'ai pu modifier aucun des rôles choisis.' : subtext('Resélectionnez un rôle pour annuler.'),
+          fields: [
+            added.length ? field('➕', 'Ajoutés', mentions(added), false) : null,
+            removed.length ? field('➖', 'Retirés', mentions(removed), false) : null,
+            failed.length ? field(ICONS.error, 'Impossibles à modifier', `${mentions(failed)}\n${subtext('Prévenez le staff : rôle supprimé, trop haut ou devenu sensible.')}`, false) : null,
+          ],
+          timestamp: false,
+        }),
+      ],
+      ephemeral: true,
+    });
   },
 };

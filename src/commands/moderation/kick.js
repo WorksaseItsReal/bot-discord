@@ -1,8 +1,9 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { successReply } = require('../../utils/embeds');
 const { confirm } = require('../../utils/confirmation');
+const { ICONS, actionButton, buttonRows } = require('../../utils/ui');
+const { sanctionCard } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
 module.exports = {
@@ -23,13 +24,19 @@ module.exports = {
 
     const cfg = client.services.config.get(interaction.guild.id);
     if (cfg.moderation.confirmDangerous) {
-      const ok = await confirm(interaction, { description: `Expulser ${user} ?`, confirmLabel: 'Expulser' });
+      const ok = await confirm(interaction, { description: `Expulser ${user} du serveur ?`, confirmLabel: 'Expulser' });
       if (!ok) return;
+    } else {
+      // DM + action + log : peut dépasser 3 s.
+      await interaction.deferReply();
     }
 
-    await client.services.moderation.kick(interaction.guild, member, interaction.member, reason);
-    const payload = successReply(`${user.tag} a été expulsé.`);
-    if (cfg.moderation.confirmDangerous) await interaction.followUp({ ...payload, ephemeral: true });
-    else await interaction.reply(payload);
+    const { id } = await client.services.moderation.kick(interaction.guild, member, interaction.member, reason);
+    const payload = {
+      embeds: [sanctionCard({ id, type: 'kick', user, moderator: interaction.user, reason })],
+      components: buttonRows(actionButton({ command: 'sanctions', action: 'history', args: [user.id], label: 'Sanctions', emoji: ICONS.history })),
+    };
+    // Après confirmation, la carte remplace la demande de confirmation (éphémère).
+    await interaction.editReply(payload);
   },
 };

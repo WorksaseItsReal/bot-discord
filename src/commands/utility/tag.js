@@ -1,7 +1,8 @@
 'use strict';
 
 const { SlashCommandBuilder } = require('discord.js');
-const { embeds, truncate } = require('../../utils/embeds');
+const { truncate } = require('../../utils/embeds');
+const { card, ICONS } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 
 /** Substitue les variables supportées dans le contenu d'un tag. */
@@ -12,8 +13,22 @@ function renderTag(content, { user, guild }) {
     .replaceAll('{membercount}', String(guild.memberCount));
 }
 
+/** Carte d'un tag (le contenu personnalisé va dans la description). Pur. */
+function tagCard(name, content) {
+  return card({
+    tone: 'neutral',
+    section: 'utility',
+    icon: ICONS.tag,
+    title: name,
+    description: truncate(content, 4096) || '*Ce tag est vide.*',
+    footer: `Tag · /tag ${truncate(name, 50)}`,
+  });
+}
+
 module.exports = {
   category: 'utility',
+  renderTag,
+  tagCard,
   data: new SlashCommandBuilder()
     .setName('tag')
     .setDescription('Exécute une commande personnalisée (tag).')
@@ -24,9 +39,8 @@ module.exports = {
     const tag = client.repositories.customCommands.get(interaction.guild.id, name);
     if (!tag) throw new UserError('Tag introuvable. Voir `/custom list`.');
     const content = renderTag(tag.content, { user: interaction.user, guild: interaction.guild });
-    // Les variables ({server}…) peuvent faire dépasser les limites Discord.
-    if (tag.is_embed) return interaction.reply({ embeds: [embeds.neutral(name).setDescription(truncate(content, 4096) || '​')] });
-    return interaction.reply({ content: truncate(content, 2000) || '​', allowedMentions: { parse: ['users'] } });
+    // Le contenu est libre : aucune mention ne doit notifier (@everyone, rôles…).
+    await interaction.reply({ embeds: [tagCard(name, content)], allowedMentions: { parse: [] } });
   },
 
   async autocomplete(interaction, client) {
@@ -35,5 +49,3 @@ module.exports = {
     await interaction.respond(list.filter((c) => c.name.includes(focused)).slice(0, 25).map((c) => ({ name: c.name, value: c.name })));
   },
 };
-
-module.exports.renderTag = renderTag;

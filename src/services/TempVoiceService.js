@@ -1,6 +1,7 @@
 'use strict';
 
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
+const { card, field, ICONS, bullets } = require('../utils/ui');
 
 /**
  * Vocaux temporaires : rejoindre un salon "hub" crée un vocal personnel,
@@ -61,7 +62,37 @@ class TempVoiceService {
       // Le membre a quitté entre-temps (ou déplacement impossible) : pas de salon orphelin.
       this.tempVoice.delete(channel.id);
       await channel.delete().catch(() => {});
+      return;
     }
+    // Carte d'accueil dans le chat textuel du vocal (facultative).
+    if (typeof channel.send === 'function') {
+      await channel.send({ embeds: [this.welcomeCard(member, channel)] }).catch(() => {});
+    }
+  }
+
+  /** Carte d'accueil d'un vocal temporaire. Pure. */
+  welcomeCard(member, channel) {
+    return card({
+      tone: 'info',
+      section: 'voice',
+      icon: ICONS.voice,
+      title: 'Votre vocal temporaire',
+      description: [
+        `Bienvenue ${member} ! Ce salon est à vous : il sera supprimé automatiquement dès qu'il sera vide.`,
+        '',
+        bullets([
+          'Renommez-le ou fixez une limite de places depuis ses paramètres.',
+          'Déplacez ou déconnectez les membres si besoin.',
+        ]),
+      ],
+      fields: [field(ICONS.owner, 'Propriétaire', `${member}`), field(ICONS.voice, 'Salon', `${channel}`)],
+      footer: 'Vocaux temporaires',
+    });
+  }
+
+  /** Vocaux temporaires actifs d'un serveur. */
+  listByGuild(guildId) {
+    return this.tempVoice.all().filter((r) => r.guild_id === guildId);
   }
 
   /**

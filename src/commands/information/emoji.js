@@ -67,8 +67,8 @@ module.exports = {
           title: 'Emoji standard',
           description: [`# ${chars.join('')}`, subtext('Emoji Unicode : disponible partout, sans Nitro.')],
           fields: [
-            field(ICONS.count, 'Points de code', code(codes)),
-            field(ICONS.list, 'Caractères', `**${chars.length}**`),
+            field(ICONS.id, 'Unicode', code(codes)),
+            field(ICONS.count, 'Points de code', `**${chars.length}**`),
             wide(ICONS.tag, 'Copier', copyBlock(chars.join(''))),
           ],
         }),
