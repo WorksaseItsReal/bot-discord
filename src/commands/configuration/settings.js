@@ -66,7 +66,7 @@ function renderDashboard(guild, cfg) {
     field('⚖️', 'Strikes', cfg.strikes?.enabled ? `${ON} Activés\n${subtext(`${thresholds.length} palier${thresholds.length > 1 ? 's' : ''}`)}` : `${OFF} Désactivés`),
     field(ICONS.automod, 'AutoMod', cfg.automod?.enabled ? `${ON} Actif\n${subtext(`${activeFilters}/${filters.length} filtres`)}` : `${OFF} Inactif`),
     field('🚨', 'AntiRaid', cfg.antiraid?.enabled ? `${ON} Actif\n${subtext(`Seuil : ${cfg.antiraid.joinThreshold} arrivées / ${cfg.antiraid.joinWindowSeconds} s`)}` : `${OFF} Inactif`),
-    field(ICONS.ticket, 'Tickets', cfg.tickets?.categoryId ? `${ON} Configurés\n${subtext(`${cfg.tickets.maxPerUser ?? 1} par membre`)}` : `${UNSET} Non configurés`),
+    field(ICONS.ticket, 'Tickets', cfg.tickets?.categoryId ? `${ON} Configurés\n${subtext(`${cfg.tickets.maxPerUser ?? 1} par membre${cfg.tickets.reasons?.length ? ` · ${cfg.tickets.reasons.length} motif(s)` : ''}`)}` : `${UNSET} Non configurés`),
     field(ICONS.mail, 'Modmail', onOff(cfg.modmail?.enabled, 'Actif', 'Inactif')),
     field(ICONS.idea, 'Suggestions', cfg.suggestions?.channelId ? `${ON} <#${cfg.suggestions.channelId}>` : `${UNSET} Non configurées`),
     field(ICONS.voice, 'Vocaux temporaires', onOff(cfg.tempVoice?.enabled, 'Actifs', 'Inactifs')),
@@ -104,7 +104,7 @@ function renderDashboard(guild, cfg) {
     ],
     thumbnail: guild.iconURL?.({ size: 128 }) ?? null,
     fields,
-    footer: 'Modifier : /logs · /settings moderation',
+    footer: 'Modifier : /logs · /antiraid · /tickets · /settings moderation',
   });
 }
 
@@ -156,7 +156,15 @@ function renderModeration(cfg) {
 }
 
 function dashboardView(guild, cfg) {
-  return { embeds: [renderDashboard(guild, cfg)], components: tabsFor('view') };
+  return { embeds: [renderDashboard(guild, cfg)], components: [...tabsFor('view'), ...shortcuts()] };
+}
+
+/** Raccourcis vers les tableaux de bord de configuration (chacun revérifie sa permission). */
+function shortcuts() {
+  return buttonRows(
+    actionButton({ command: 'antiraid', action: 'go', args: ['home'], label: 'AntiRaid', emoji: '🚨' }),
+    actionButton({ command: 'tickets', action: 'go', args: ['home'], label: 'Tickets', emoji: ICONS.ticket }),
+  );
 }
 
 /** Onglets : [⚙️ Vue d'ensemble | 🔄 Actualiser] [📋 Logs] [🛡️ Modération] — l'onglet courant est désactivé. */
