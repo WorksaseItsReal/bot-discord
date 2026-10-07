@@ -128,11 +128,21 @@ class GadgetClient extends Client {
     this.services.scheduler.start();
   }
 
-  /** Arrêt propre : stoppe le scheduler, ferme la connexion Discord puis la base. */
-  async shutdown() {
+  /**
+   * Arrêt propre : stoppe le scheduler (en attendant la fin du tick en cours),
+   * ferme la connexion Discord puis la base. Idempotent : un signal et une
+   * exception fatale simultanés partagent le même arrêt.
+   */
+  shutdown() {
+    if (!this.shutdownPromise) this.shutdownPromise = this.#doShutdown();
+    return this.shutdownPromise;
+  }
+
+  async #doShutdown() {
     if (this.presenceTimer) clearInterval(this.presenceTimer);
     try {
-      this.services?.scheduler?.stop();
+      // Attendre le tick en cours : il écrit en base, qu'on ne doit pas fermer sous lui.
+      await this.services?.scheduler?.stop();
     } catch (err) {
       logger.warn('Arrêt du scheduler :', err?.message);
     }
@@ -141,7 +151,11 @@ class GadgetClient extends Client {
     } catch (err) {
       logger.warn('Fermeture de la connexion Discord :', err?.message);
     }
-    this.database?.close();
+    try {
+      this.database?.close();
+    } catch (err) {
+      logger.warn('Fermeture de la base :', err?.message);
+    }
   }
 
   get uptime() {

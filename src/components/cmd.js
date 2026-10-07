@@ -55,9 +55,15 @@ async function commonAction(interaction, action, args) {
       throw new UserError('Seule la personne qui a lancé la commande (ou un modérateur) peut supprimer ce message.');
     }
     await interaction.deferUpdate();
-    await interaction.message.delete().catch(() => {
-      throw new UserError('Je ne peux pas supprimer ce message.');
-    });
+    // deleteReply passe par le webhook de l'interaction : fonctionne même sans accès
+    // au salon (réponses envoyées par l'interaction). Sinon, suppression classique.
+    try {
+      await interaction.deleteReply();
+    } catch {
+      await interaction.message.delete().catch(() => {
+        throw new UserError('Je ne peux pas supprimer ce message.');
+      });
+    }
     return;
   }
   // « noop » et actions inconnues : on acquitte silencieusement.

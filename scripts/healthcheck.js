@@ -8,10 +8,26 @@
  *
  * Usage : npm run check   (ne nécessite pas de DISCORD_TOKEN)
  */
+const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-process.env.DATABASE_PATH = process.env.DATABASE_PATH || path.join(os.tmpdir(), `gadget-healthcheck-${Date.now()}.sqlite`);
+// Toujours une base temporaire : le healthcheck ne doit jamais migrer ni toucher
+// la vraie base (DATABASE_PATH du .env est volontairement ignoré). Défini AVANT de
+// charger la config ; dotenv n'écrase pas une variable déjà présente.
+const TEMP_DB = path.join(os.tmpdir(), `gadget-healthcheck-${process.pid}-${Date.now()}.sqlite`);
+process.env.DATABASE_PATH = TEMP_DB;
+
+/** Supprime la base temporaire et ses fichiers annexes (WAL). */
+function cleanup() {
+  for (const file of [TEMP_DB, `${TEMP_DB}-wal`, `${TEMP_DB}-shm`, `${TEMP_DB}-journal`]) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      /* ignoré */
+    }
+  }
+}
 
 const { GadgetClient } = require('../src/core/GadgetClient');
 const { logger } = require('../src/core/logger');
@@ -21,6 +37,11 @@ function main() {
   client.bootstrap();
 
   const problems = [];
+
+  // 0) Aucun module (commande, composant, événement) ne doit avoir échoué au chargement
+  for (const [kind, handler] of [['Commande', client.commandHandler], ['Composant', client.componentHandler], ['Événement', client.eventHandler]]) {
+    for (const f of handler.failures ?? []) problems.push(`${kind} non chargé(e) : ${f.file} (${f.reason})`);
+  }
 
   // 1) Base de données connectée + migrations appliquées
   const migrations = client.database.raw.prepare('SELECT COUNT(*) AS n FROM _migrations').get().n;
@@ -49,6 +70,7 @@ function main() {
   if (!cfg || cfg.locale !== 'fr') problems.push('La configuration par défaut ne se résout pas correctement.');
 
   client.database.close();
+  cleanup();
 
   logger.info('--- Résumé du healthcheck ---');
   logger.info(`Commandes chargées : ${client.commands.size} (${[...names].sort().join(', ')})`);
@@ -64,4 +86,10 @@ function main() {
   process.exit(0);
 }
 
-main();
+try {
+  main();
+} catch (err) {
+  logger.error('Healthcheck ÉCHOUÉ :', err);
+  cleanup();
+  process.exit(1);
+}

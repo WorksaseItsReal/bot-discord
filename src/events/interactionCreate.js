@@ -3,7 +3,7 @@
 const { createLogger } = require('../core/logger');
 const { UserError } = require('../core/errors');
 const { describeApiError } = require('../core/apiErrors');
-const { hardenInteraction, safeRespond } = require('../core/interactionSafety');
+const { hardenInteraction, safeRespond, safeRespondPrivately, isAcknowledged } = require('../core/interactionSafety');
 const { errorReply } = require('../utils/embeds');
 const { missingPermissions, permissionLabel } = require('../utils/permissionNames');
 const { discordTimestamp } = require('../utils/time');
@@ -112,7 +112,8 @@ async function handleComponent(client, interaction) {
     // Laissé aux collectors locaux (confirmation, pagination, help…). Si personne ne
     // répond (bouton expiré, redémarrage, clic d'un autre membre), on l'explique.
     setTimeout(() => {
-      if (!interaction.deferred && !interaction.replied) {
+      // isAcknowledged couvre aussi un acquittement en cours (requête pas encore revenue).
+      if (!isAcknowledged(interaction)) {
         safeRespond(interaction, errorReply('Ce bouton a expiré ou ne vous est pas destiné. Relancez la commande.'));
       }
     }, ORPHAN_COMPONENT_MS).unref?.();
@@ -183,8 +184,11 @@ function errorRef() {
 /**
  * Envoie la carte d'erreur. Après une confirmation (« exécution en cours… »),
  * remplace ce message plutôt que d'en ajouter un second.
+ * `privately` (erreurs attendues : UserError, erreurs Discord traduites) : après un
+ * deferReply public encore vide, la réponse différée est supprimée et l'erreur
+ * part en éphémère, au lieu de s'afficher publiquement.
  */
-async function respondError(interaction, payload) {
+async function respondError(interaction, payload, { privately = false } = {}) {
   const pending = interaction.pendingConfirmation;
   if (pending?.message) {
     interaction.pendingConfirmation = null;
@@ -195,13 +199,14 @@ async function respondError(interaction, payload) {
       /* message supprimé ou interaction expirée : on retombe sur une réponse classique */
     }
   }
-  await safeRespond(interaction, payload);
+  if (privately) await safeRespondPrivately(interaction, payload);
+  else await safeRespond(interaction, payload);
 }
 
 async function reportError(client, interaction, err, source) {
   const isUserError = err instanceof UserError || err?.isUserError;
   if (isUserError) {
-    await respondError(interaction, errorReply(err.message));
+    await respondError(interaction, errorReply(err.message), { privately: true });
     return;
   }
 
@@ -215,7 +220,7 @@ async function reportError(client, interaction, err, source) {
   const ref = errorRef();
   if (api.friendly) {
     logger.warn(`${source} [${ref}] : ${err?.message ?? err}`);
-    await respondError(interaction, errorReply(api.friendly, { footer: `Réf. ${ref}` }));
+    await respondError(interaction, errorReply(api.friendly, { footer: `Réf. ${ref}` }), { privately: true });
     return;
   }
 

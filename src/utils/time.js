@@ -12,8 +12,13 @@ const UNITS = {
   w: 7 * 24 * 60 * 60 * 1000,
 };
 
+/** Durée maximale acceptée par parseDuration (1 an). */
+const MAX_DURATION_MS = 365 * UNITS.d;
+
 /**
  * Convertit une chaîne de durée ("10m", "1h30m", "2d", "1w") en millisecondes.
+ * Au-delà d'un an (ou valeur non représentable exactement), renvoie null : une
+ * durée absurde ne doit jamais produire une date invalide ou un timer cassé.
  * @param {string} input
  * @returns {number|null} durée en ms, ou null si invalide
  */
@@ -33,7 +38,8 @@ function parseDuration(input) {
   // Rejette les caractères parasites (ex: "10x") pour éviter les silences trompeurs
   const cleaned = str.replace(/(\d+)\s*(w|d|h|m|s)/g, '').trim();
   if (cleaned.length > 0) return null;
-  return total > 0 ? total : null;
+  if (!Number.isFinite(total) || !Number.isSafeInteger(total) || total <= 0) return null;
+  return total <= MAX_DURATION_MS ? total : null;
 }
 
 /**
@@ -70,4 +76,4 @@ function discordTimestamp(ms, style = 'R') {
   return `<t:${Math.floor(ms / 1000)}:${style}>`;
 }
 
-module.exports = { parseDuration, formatDuration, discordTimestamp, UNITS };
+module.exports = { parseDuration, formatDuration, discordTimestamp, UNITS, MAX_DURATION_MS };

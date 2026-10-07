@@ -3,7 +3,7 @@
 const { GadgetClient } = require('./core/GadgetClient');
 const { validate } = require('./config');
 const { logger } = require('./core/logger');
-const { registerGlobalHandlers } = require('./core/errors');
+const { registerGlobalHandlers, setShutdownHook } = require('./core/errors');
 
 async function main() {
   registerGlobalHandlers(logger);
@@ -17,6 +17,8 @@ async function main() {
   }
 
   const client = new GadgetClient();
+  // Exception non capturée : arrêt propre (scheduler, Discord, base) avant exit(1).
+  setShutdownHook(() => client.shutdown());
 
   let stopping = false;
   const shutdown = async (signal) => {

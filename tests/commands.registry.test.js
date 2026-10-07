@@ -43,6 +43,12 @@ test('au moins 60 commandes chargées sans erreur', () => {
   assert.ok(commands.size >= 60, `seulement ${commands.size} commandes`);
 });
 
+test('chaque fichier de commande est chargé (aucun échec silencieux)', () => {
+  const files = CommandHandler.countFiles(path.join(__dirname, '..', 'src', 'commands'));
+  assert.deepStrictEqual(handler.failures, [], `échecs : ${handler.failures.map((f) => `${f.file} (${f.reason})`).join(', ')}`);
+  assert.strictEqual(commands.size, files, `${commands.size} commande(s) chargée(s) pour ${files} fichier(s)`);
+});
+
 test('noms et descriptions de commandes conformes', () => {
   for (const cmd of commands.values()) {
     const json = cmd.data.toJSON();

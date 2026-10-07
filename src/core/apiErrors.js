@@ -37,8 +37,13 @@ const FRIENDLY = {
   200000: 'Ce contenu a été bloqué par l\'AutoMod de Discord.',
 };
 
-/** Codes signifiant que l'interaction est morte : inutile d'essayer de répondre. */
-const DEAD_INTERACTION = new Set([10062, 40060]);
+/**
+ * Codes signifiant que l'interaction est morte : inutile d'essayer de répondre.
+ *  10062 Unknown interaction · 40060 Interaction has already been acknowledged
+ *  50027 Invalid webhook token (jeton d'interaction expiré, > 15 min)
+ *  10015 Unknown webhook (webhook de l'interaction disparu)
+ */
+const DEAD_INTERACTION = new Set([10062, 40060, 50027, 10015]);
 
 /**
  * @param {unknown} err
@@ -56,4 +61,4 @@ function describeApiError(err) {
   return { friendly, code, deadInteraction, rateLimited };
 }
 
-module.exports = { describeApiError, FRIENDLY };
+module.exports = { describeApiError, FRIENDLY, DEAD_INTERACTION };
