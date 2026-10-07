@@ -2,7 +2,8 @@
 
 /**
  * Préréglages AutoMod (« /automod preset »). Ne touchent qu'aux interrupteurs,
- * actions et seuils : les listes (mots interdits, domaines autorisés…) sont conservées.
+ * actions et seuils : les listes (mots interdits, domaines autorisés…), les exemptions
+ * propres à chaque filtre et le retrait des rôles en quarantaine sont conservés.
  */
 const off = (extra = {}) => ({ enabled: false, ...extra });
 const on = (extra = {}) => ({ enabled: true, ...extra });
@@ -31,6 +32,7 @@ const PRESETS = {
         antiDuplicate: off(),
         antiWall: off(),
         antiZalgo: on({ action: 'delete' }),
+        antiHacked: on({ channels: 4, windowSeconds: 60, scamScore: 6, action: 'quarantine', duration: '1d', purgeMinutes: 10 }),
       },
     },
   },
@@ -57,6 +59,7 @@ const PRESETS = {
         antiDuplicate: off(),
         antiWall: on({ maxLines: 20, maxLength: 1800, action: 'delete' }),
         antiZalgo: on({ action: 'delete' }),
+        antiHacked: on({ channels: 3, windowSeconds: 60, scamScore: 5, action: 'quarantine', duration: '1d', purgeMinutes: 10 }),
       },
     },
   },
@@ -83,6 +86,7 @@ const PRESETS = {
         antiDuplicate: on({ action: 'delete' }),
         antiWall: on({ maxLines: 12, maxLength: 1200, action: 'delete' }),
         antiZalgo: on({ action: 'delete' }),
+        antiHacked: on({ channels: 3, windowSeconds: 120, scamScore: 4, action: 'quarantine', duration: '3d', purgeMinutes: 30 }),
       },
     },
   },

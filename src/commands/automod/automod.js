@@ -13,13 +13,16 @@ const {
   RoleSelectMenuBuilder,
 } = require('discord.js');
 const { truncate, progressBar } = require('../../utils/embeds');
-const { card, field, wide, ICONS, code, status, actionButton, buttonRows, ButtonStyle, subtext, bullets } = require('../../utils/ui');
+const { card, field, wide, ICONS, code, status, actionButton, buttonRows, ButtonStyle, subtext, bullets, userLine } = require('../../utils/ui');
 const { parseDuration } = require('../../utils/time');
 const { fitList } = require('../../services/LoggingService');
-const { requirePermission } = require('../../services/ModerationService');
+const { requirePermission, needPermission, settleComponents, historyButton } = require('../../services/ModerationService');
+const { BUILTIN_ALLOWED_HOSTS, QUARANTINE_ROLES_FIELD } = require('../../services/AutoModService');
+const { snowflake } = require('../../utils/buttonGuard');
 const { variants } = require('../../utils/automod/normalize');
 const { phishingScore } = require('../../utils/automod/phishing');
-const { isValidWord } = require('../../utils/automod/words');
+const { extractLinks, hostMatches } = require('../../utils/automod/links');
+const { isValidWord, matchingWords } = require('../../utils/automod/words');
 const { PRESETS } = require('../../utils/automod/presets');
 const native = require('../../services/NativeAutoMod');
 const { UserError } = require('../../core/errors');
@@ -32,6 +35,9 @@ const { UserError } = require('../../core/errors');
  *
  * Vues : home · grp:<security|spam|content> · filter:<clé> · lists · escalation ·
  *        newmembers · notify · native · presets · stats:<jours>
+ *
+ * Boutons des logs AutoMod (même commande) : « Faux positif » (fp, puis fpfix / fpdm
+ * dans la vue éphémère) et quarantaine d'un compte piraté (qlift, qban → qbanok / qcancel).
  */
 
 // ---------------------------------------------------------------- métadonnées
@@ -51,6 +57,7 @@ const FILTER_LABELS = {
   antiCrossChannel: 'Spam multi-salons',
   antiWall: 'Pavés de texte',
   antiZalgo: 'Texte zalgo',
+  antiHacked: 'Compte piraté',
 };
 const FILTERS = Object.keys(FILTER_LABELS);
 
@@ -70,10 +77,11 @@ const FILTER_INFO = {
   antiEmojiSpam: 'Trop d\'emojis dans un message.',
   antiWall: 'Pavés de texte : trop de lignes ou trop de caractères.',
   antiZalgo: 'Texte « zalgo » illisible (diacritiques empilés).',
+  antiHacked: 'Repère un compte piraté : mêmes fichiers ou même message dans plusieurs salons en peu de temps, ou lien d\'arnaque très probable. Quarantaine : timeout + suppression de ses messages récents partout.',
 };
 
 const GROUPS = {
-  security: { label: 'Sécurité', emoji: '🛡️', description: 'Arnaques, comptes piratés, invitations, liens', filters: ['antiPhishing', 'antiCrossChannel', 'antiInvite', 'antiLink'] },
+  security: { label: 'Sécurité', emoji: '🛡️', description: 'Arnaques, comptes piratés, invitations, liens', filters: ['antiPhishing', 'antiHacked', 'antiCrossChannel', 'antiInvite', 'antiLink'] },
   spam: { label: 'Spam', emoji: '💬', description: 'Spam, flood, doublons, répétitions, mentions', filters: ['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiMassMention'] },
   content: { label: 'Contenu', emoji: '✍️', description: 'Mots interdits, majuscules, emojis, pavés, zalgo', filters: ['badWords', 'antiCaps', 'antiEmojiSpam', 'antiWall', 'antiZalgo'] },
 };
@@ -89,13 +97,27 @@ const THRESHOLDS = {
   antiPhishing: ['threshold', 'points de suspicion', 1, 6],
   antiCrossChannel: ['channels', 'salons', 2, 10],
   antiWall: ['maxLines', 'lignes', 3, 100],
+  antiHacked: ['channels', 'salons', 2, 10],
 };
 /** Fenêtre réglable (secondes) : [min, max]. */
-const WINDOWS = { antiSpam: [2, 120], antiFlood: [5, 300], antiCrossChannel: [10, 600] };
+const WINDOWS = { antiSpam: [2, 120], antiFlood: [5, 300], antiCrossChannel: [10, 600], antiHacked: [10, 600] };
 
-const ACTION_LABELS = { delete: 'Suppression', warn: 'Avertissement', timeout: 'Timeout', kick: 'Expulsion' };
+const ACTION_LABELS = { delete: 'Suppression', warn: 'Avertissement', timeout: 'Timeout', kick: 'Expulsion', quarantine: 'Quarantaine' };
+/** Sanctions proposées dans la vue d'un filtre (la quarantaine est propre à « Compte piraté »). */
+const ACTION_OPTIONS = {
+  delete: { emoji: '🗑️', description: 'Le message est retiré' },
+  warn: { emoji: ICONS.warn, description: 'Retiré + avertissement (+1 strike)' },
+  timeout: { emoji: ICONS.mute, description: 'Retiré + exclusion temporaire' },
+  kick: { emoji: ICONS.kick, description: 'Retiré + expulsion du serveur' },
+  quarantine: { emoji: ICONS.lock, description: 'Timeout + suppression de ses messages récents' },
+};
+const actionsFor = (key) => (key === 'antiHacked' ? ['quarantine', 'timeout', 'kick', 'delete'] : ['delete', 'warn', 'timeout', 'kick']);
+/** Sanctions avec une durée de timeout. */
+const TIMED = new Set(['timeout', 'quarantine']);
 const NOTIFY_LABELS = { channel: 'Dans le salon (supprimé après 8 s)', dm: 'En message privé', none: 'Aucune' };
 const MAX_IGNORED = 25;
+/** Salons proposés dans les menus d'exemption (les fils suivent leur salon parent). */
+const IGNORABLE_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice];
 
 const NAV = [
   { value: 'home', label: 'Accueil', emoji: '🏠', description: 'Vue d\'ensemble' },
@@ -114,7 +136,7 @@ const NAV = [
 /** « 🟢 **Anti-spam** · Timeout (5m) ». Pur. */
 function filterLine(name, fc = {}) {
   const action = ACTION_LABELS[fc.action] ?? fc.action ?? ACTION_LABELS.delete;
-  return `${fc.enabled ? '🟢' : '🔴'} **${FILTER_LABELS[name] ?? name}** · ${action}${fc.action === 'timeout' && fc.duration ? ` (${fc.duration})` : ''}`;
+  return `${fc.enabled ? '🟢' : '🔴'} **${FILTER_LABELS[name] ?? name}** · ${action}${TIMED.has(fc.action) && fc.duration ? ` (${fc.duration})` : ''}`;
 }
 
 function escalationText(esc) {
@@ -287,23 +309,58 @@ function groupView(client, guildId, groupKey, notice) {
   };
 }
 
-/** Vue détaillée d'un filtre : activation, sanction, réglages. */
+/** Exemptions d'un filtre présélectionnées dans ses menus : existantes, d'un type accepté, 25 au plus. */
+function filterExemptions(client, guildId, key) {
+  const fc = cfgOf(client, guildId).filters?.[key] ?? {};
+  const guild = client.guilds?.cache?.get(guildId);
+  const chCache = guild?.channels?.cache;
+  const roleCache = guild?.roles?.cache;
+  return {
+    channels: (fc.exemptChannels ?? []).filter((id) => !chCache || IGNORABLE_TYPES.includes(chCache.get(id)?.type)).slice(0, MAX_IGNORED),
+    roles: (fc.exemptRoles ?? []).filter((id) => !roleCache || roleCache.has(id)).slice(0, MAX_IGNORED),
+  };
+}
+
+/** Vue détaillée d'un filtre : activation, sanction, réglages, exemptions propres (≤ 4 rangées). */
 function filterView(client, guildId, key, notice) {
   if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
   const cfg = cfgOf(client, guildId);
   const fc = cfg.filters?.[key] ?? {};
   const t = THRESHOLDS[key];
-  const hasSettings = Boolean(t || WINDOWS[key] || fc.action === 'timeout');
+  const current = fc.action ?? (key === 'antiHacked' ? 'quarantine' : 'delete');
+  const timed = TIMED.has(current);
+  const hasSettings = Boolean(t || WINDOWS[key] || timed);
+  const ex = filterExemptions(client, guildId, key);
   const fields = [
     field(ICONS.status, 'État', fc.enabled ? '🟢 Actif' : '🔴 Désactivé'),
-    field(ICONS.shield, 'Sanction', ACTION_LABELS[fc.action] ?? ACTION_LABELS.delete),
-    field(ICONS.duration, 'Durée du timeout', fc.action === 'timeout' ? fc.duration ?? '5m' : '—'),
+    field(ICONS.shield, 'Sanction', ACTION_LABELS[current] ?? ACTION_LABELS.delete),
+    field(ICONS.duration, 'Durée du timeout', timed ? fc.duration ?? (current === 'quarantine' ? '1d' : '5m') : '—'),
   ];
   if (t) fields.push(field(ICONS.count, 'Seuil', `${fc[t[0]] ?? '—'} ${t[1]}`));
   if (WINDOWS[key]) fields.push(field(ICONS.time, 'Fenêtre', `${fc.windowSeconds ?? '—'} s`));
   if (key === 'badWords') fields.push(field('🚫', 'Mots', `${fc.words?.length ?? 0} (section Listes)`));
   if (key === 'antiLink') fields.push(field('🌐', 'Domaines autorisés', `${fc.allowedDomains?.length ?? 0} (section Listes)`));
   if (key === 'antiInvite') fields.push(field('✉️', 'Invitations autorisées', `${fc.allowedCodes?.length ?? 0} (section Listes)`));
+  if (key === 'antiHacked') {
+    fields.push(
+      field('🎣', 'Lien d\'arnaque', `score ≥ **${fc.scamScore ?? 5}**`),
+      field(ICONS.delete, 'Messages supprimés', `${fc.purgeMinutes ?? 10} dernières min`),
+      field(ICONS.role, 'Retirer les rôles', fc.removeRoles ? '✅ Oui (rendus à la levée)' : '❌ Non'),
+    );
+  }
+  fields.push(
+    field(ICONS.channel, 'Salons exemptés', fitList(ex.channels.map((c) => `<#${c}>`), 1000) ?? '*Aucun*'),
+    field(ICONS.role, 'Rôles exemptés', fitList(ex.roles.map((r) => `<@&${r}>`), 1000) ?? '*Aucun*'),
+  );
+  const channelMenu = new ChannelSelectMenuBuilder()
+    .setCustomId(`cmd:automod:fexch:${key}`)
+    .setPlaceholder('Salons exemptés de ce filtre (aucun)')
+    .setChannelTypes(...IGNORABLE_TYPES)
+    .setMinValues(0)
+    .setMaxValues(MAX_IGNORED);
+  if (ex.channels.length) channelMenu.setDefaultChannels(...ex.channels);
+  const roleMenu = new RoleSelectMenuBuilder().setCustomId(`cmd:automod:fexrole:${key}`).setPlaceholder('Rôles exemptés de ce filtre (aucun)').setMinValues(0).setMaxValues(MAX_IGNORED);
+  if (ex.roles.length) roleMenu.setDefaultRoles(...ex.roles);
   return {
     embeds: [
       card({
@@ -313,7 +370,7 @@ function filterView(client, guildId, key, notice) {
         title: FILTER_LABELS[key],
         description: [notice ? `${ICONS.success} ${notice}\n` : null, FILTER_INFO[key]],
         fields,
-        footer: 'La sanction la plus sévère l\'emporte si plusieurs filtres se déclenchent',
+        footer: 'Exemptions du filtre en plus des exemptions globales · la sanction la plus sévère l\'emporte',
       }),
     ],
     components: [
@@ -321,18 +378,19 @@ function filterView(client, guildId, key, notice) {
         new StringSelectMenuBuilder()
           .setCustomId(`cmd:automod:faction:${key}`)
           .setPlaceholder('Sanction…')
-          .addOptions(
-            { value: 'delete', label: 'Suppression', emoji: '🗑️', description: 'Le message est retiré', default: (fc.action ?? 'delete') === 'delete' },
-            { value: 'warn', label: 'Avertissement', emoji: ICONS.warn, description: 'Retiré + avertissement (+1 strike)', default: fc.action === 'warn' },
-            { value: 'timeout', label: 'Timeout', emoji: ICONS.mute, description: 'Retiré + exclusion temporaire', default: fc.action === 'timeout' },
-          ),
+          .addOptions(actionsFor(key).map((a) => ({ value: a, label: ACTION_LABELS[a], ...ACTION_OPTIONS[a], default: current === a }))),
       ),
+      new ActionRowBuilder().addComponents(channelMenu),
+      new ActionRowBuilder().addComponents(roleMenu),
       ...buttonRows(
         fc.enabled
           ? actionButton({ command: 'automod', action: 'ftoggle', args: [key, 'off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
           : actionButton({ command: 'automod', action: 'ftoggle', args: [key, 'on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
         hasSettings ? actionButton({ command: 'automod', action: 'fset', args: [key], label: 'Réglages', emoji: ICONS.settings, style: ButtonStyle.Primary }) : null,
         ['badWords', 'antiLink', 'antiInvite'].includes(key) ? actionButton({ command: 'automod', action: 'go', args: ['lists'], label: 'Listes', emoji: ICONS.list }) : null,
+        key === 'antiHacked'
+          ? actionButton({ command: 'automod', action: 'hkroles', args: [fc.removeRoles ? 'off' : 'on'], label: fc.removeRoles ? 'Garder les rôles' : 'Retirer les rôles', emoji: ICONS.role })
+          : null,
         actionButton({ command: 'automod', action: 'go', args: [`grp.${groupOf(key)}`], label: 'Retour', emoji: ICONS.back }),
         backHome(),
       ),
@@ -443,8 +501,6 @@ function newMembersView(client, guildId, notice) {
   };
 }
 
-const IGNORABLE_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice];
-
 /** Salons présélectionnés dans le menu : existants, d'un type accepté, 25 au plus. */
 function notifyDefaults(client, guildId) {
   const cfg = cfgOf(client, guildId);
@@ -515,7 +571,7 @@ async function nativeView(client, guild, notice) {
         title: 'AutoMod natif de Discord',
         description: [
           notice ? `${notice}\n` : null,
-          'Les règles natives bloquent les messages **avant leur envoi**, même quand le bot est hors ligne. Elles reprennent vos filtres actifs : mots interdits (+ contenu offensant), anti-spam, mentions de masse.',
+          'Les règles natives bloquent les messages **avant leur envoi**, même quand le bot est hors ligne. Elles reprennent vos filtres actifs (et leurs exemptions) : mots interdits (+ contenu offensant), anti-spam, mentions de masse.',
         ],
         fields: [
           wide('📜', 'Règles en place', rules == null ? '⚠️ Lecture impossible : il me faut **Gérer le serveur**.' : rules.length ? rules.map((r) => `${r.enabled ? '🟢' : '🔴'} ${r.name}`).join('\n') : '*Aucune*'),
@@ -687,6 +743,12 @@ function filterModal(cfg, key) {
   if (WINDOWS[key]) rows.push(input('window', `Fenêtre : ${WINDOWS[key][0]} à ${WINDOWS[key][1]} secondes`, { value: fc.windowSeconds, max: 3 }));
   if (key === 'antiCrossChannel') rows.push(input('minLength', 'Longueur minimale du message (5 à 200)', { value: fc.minLength ?? 20, max: 3 }));
   if (key === 'antiWall') rows.push(input('maxLength', 'Caractères maximum (200 à 4000)', { value: fc.maxLength ?? 1500, max: 4 }));
+  if (key === 'antiHacked') {
+    rows.push(
+      input('purgeMinutes', 'Messages à supprimer : minutes (1 à 60)', { value: fc.purgeMinutes ?? 10, max: 2 }),
+      input('scamScore', 'Score d\'arnaque déclencheur (3 à 10)', { value: fc.scamScore ?? 5, max: 2 }),
+    );
+  }
   return new ModalBuilder().setCustomId(`cmd:automod:fsetsubmit:${key}`).setTitle(truncate(`Réglages · ${FILTER_LABELS[key]}`, 45)).addComponents(...rows);
 }
 
@@ -747,6 +809,177 @@ function intField(interaction, id, min, max, label) {
   return n;
 }
 
+// ---------------------------------------------------------------- logs : faux positif et quarantaine
+
+/** Champ « Message » vide des logs AutoMod. */
+const NO_CONTENT = '*Aucun contenu texte*';
+/** Filtres dont un faux positif se corrige en autorisant un domaine. */
+const LINK_FILTERS = new Set(['antiLink', 'antiPhishing', 'newMembers', 'antiHacked']);
+const FIXES_FIELD = 'Correctifs proposés';
+const FIX_KINDS = { domain: 'Autoriser le domaine', word: 'Retirer le mot interdit' };
+
+const embedOf = (message) => message?.embeds?.[0] ?? null;
+const embedFields = (message) => {
+  const e = embedOf(message);
+  return e?.fields ?? e?.data?.fields ?? [];
+};
+const fieldNamed = (message, name) => embedFields(message).find((f) => String(f?.name ?? '').endsWith(name));
+
+/** Contenu du message filtré, relu dans le champ « Message » d'une carte écrite par le bot. Pur. */
+function logMessageContent(message) {
+  const value = fieldNamed(message, 'Message')?.value;
+  return !value || value === NO_CONTENT || value === '—' ? null : String(value);
+}
+
+/** Membre concerné par une carte (pied de page « ID : … »), ou null. Pur. */
+function footerUserId(message) {
+  const e = embedOf(message);
+  const text = e?.footer?.text ?? e?.data?.footer?.text ?? '';
+  return /ID : (\d{17,20})/.exec(text)?.[1] ?? null;
+}
+
+/** Rôles retirés par une quarantaine, relus dans son log. Pur. */
+function quarantineRoles(message) {
+  const value = fieldNamed(message, QUARANTINE_ROLES_FIELD)?.value ?? '';
+  return [...new Set([...String(value).matchAll(/<@&(\d{17,20})>/g)].map((m) => m[1]))];
+}
+
+/** Domaine valide pour la liste blanche, ou null (punycode, caractères exotiques…). */
+function safeDomain(host) {
+  try {
+    return cleanDomain(host);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Correctifs à proposer après un faux positif : domaines du message à autoriser
+ * (filtres de liens) ou mots de la liste qui l'ont bloqué (mots interdits). Pur.
+ * @returns {Array<{ kind: 'domain'|'word', value: string }>} 4 au plus
+ */
+function fixSuggestions(cfg, filter, content) {
+  if (!content) return [];
+  const out = [];
+  if (LINK_FILTERS.has(filter)) {
+    const allowed = [...BUILTIN_ALLOWED_HOSTS, ...(cfg.filters?.antiLink?.allowedDomains ?? [])];
+    for (const l of extractLinks(content)) {
+      const d = safeDomain(l.host);
+      if (d && !hostMatches(d, allowed) && !out.some((x) => x.value === d)) out.push({ kind: 'domain', value: d });
+    }
+  }
+  if (filter === 'badWords') for (const w of matchingWords(content, cfg.filters?.badWords?.words, 4)) out.push({ kind: 'word', value: w });
+  return out.slice(0, 4);
+}
+
+/** Correctifs relus dans la vue « Faux positif » (écrite par le bot), dans l'ordre des boutons. Pur. */
+function parseFixes(message) {
+  const value = fieldNamed(message, FIXES_FIELD)?.value ?? '';
+  const out = [];
+  for (const line of String(value).split('\n')) {
+    const m = /^`(\d)` · (.+?) `([^`]+)`$/.exec(line.trim());
+    const kind = m && Object.keys(FIX_KINDS).find((k) => FIX_KINDS[k] === m[2]);
+    if (kind) out[Number(m[1]) - 1] = { kind, value: m[3] };
+  }
+  return out;
+}
+
+const filterLabel = (f) => FILTER_LABELS[f] ?? (f === 'newMembers' ? 'Nouveaux venus' : f);
+
+/**
+ * Vue éphémère après un « Faux positif » : ce qui a été fait, correctifs en un clic
+ * et renvoi du message à son auteur.
+ */
+function falsePositiveView({ userId, filter, action, content, done = [], fixes = [], canFix = false }) {
+  const lines = fixes.map((fx, i) => `${code(i + 1)} · ${FIX_KINDS[fx.kind]} ${code(fx.value)}`);
+  return {
+    embeds: [
+      card({
+        tone: 'success',
+        section: 'automod',
+        icon: '🙅',
+        title: 'Faux positif',
+        description: done.map((d) => `› ${d}`),
+        fields: [
+          field(ICONS.user, 'Membre', `<@${userId}>`),
+          field(ICONS.warning, 'Filtre', filterLabel(filter)),
+          field(ICONS.shield, 'Sanction', ACTION_LABELS[action] ?? action),
+          lines.length ? wide('🛠️', FIXES_FIELD, [...lines, canFix ? null : subtext('Réservé à « Gérer le serveur ».')].filter(Boolean).join('\n')) : null,
+          wide(ICONS.channel, 'Message', content ?? NO_CONTENT),
+        ],
+        footer: `ID : ${userId}`,
+      }),
+    ],
+    components: buttonRows(
+      ...(canFix
+        ? fixes.map((fx, i) => actionButton({
+          command: 'automod',
+          action: 'fpfix',
+          args: [i + 1],
+          label: fx.kind === 'domain' ? `Autoriser ${fx.value}` : `Retirer « ${fx.value} »`,
+          emoji: fx.kind === 'domain' ? '🌐' : '🚫',
+        }))
+        : []),
+      content ? actionButton({ command: 'automod', action: 'fpdm', args: [userId], label: 'Renvoyer en MP', emoji: ICONS.mail }) : null,
+    ),
+  };
+}
+
+/** Bouton « Faux positif » : « Gérer le serveur » ou « Gérer les messages » (revérifié à chaque clic). */
+function guardModerator(interaction) {
+  const perms = interaction.memberPermissions;
+  if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.ManageMessages)) {
+    throw new UserError('Il vous faut la permission **Gérer les messages** ou **Gérer le serveur** pour cette action.');
+  }
+}
+
+const who = (interaction) => interaction.user?.tag ?? interaction.user?.username ?? interaction.user?.id;
+
+/** Message rendu à son auteur après un faux positif. */
+function restoredMessageCard(guild, content) {
+  return card({
+    tone: 'info',
+    section: { emoji: '🏠', label: guild.name },
+    icon: ICONS.automod,
+    title: 'Votre message a été rétabli',
+    description: `Un modérateur de **${guild.name}** a confirmé que l'AutoMod avait retiré votre message par erreur. Le voici, pour que vous puissiez le reposter :`,
+    fields: [wide(ICONS.channel, 'Message', content)],
+  });
+}
+
+/** Lève un timeout via ModerationService (permission et hiérarchie du cliqueur). @returns {Promise<string>} */
+async function liftTimeout(interaction, client, userId, reason) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
+    return 'Timeout non levé : il vous faut la permission **Exclure temporairement des membres**.';
+  }
+  const member = await interaction.guild.members.fetch(userId).catch(() => null);
+  if (!member) return 'Timeout non levé : le membre n\'est plus sur le serveur.';
+  if (!member.isCommunicationDisabled?.()) return 'Le membre n\'est pas en timeout.';
+  try {
+    await client.services.moderation.removeTimeout(interaction.guild, member, interaction.member, reason);
+    return 'Timeout **levé**.';
+  } catch (err) {
+    if (err?.isUserError) return `Timeout non levé : ${err.message}`;
+    throw err;
+  }
+}
+
+/** Rend les rôles retirés par une quarantaine (rôles existants, sous le cliqueur et le bot). @returns {Promise<string>} */
+async function restoreRoles(interaction, userId, roleIds, reason) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) return 'Rôles non rendus : il vous faut la permission **Gérer les rôles**.';
+  const guild = interaction.guild;
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return 'Rôles non rendus : le membre n\'est plus sur le serveur.';
+  const isOwner = interaction.user.id === guild.ownerId;
+  const top = interaction.member?.roles?.highest?.position ?? 0;
+  const roles = roleIds
+    .map((id) => guild.roles.cache.get(id))
+    .filter((r) => r && !r.managed && r.editable !== false && !member.roles.cache.has(r.id) && (isOwner || r.position < top));
+  if (!roles.length) return 'Aucun rôle à rendre.';
+  const ok = await member.roles.add(roles.map((r) => r.id), reason).then(() => true, () => false);
+  return ok ? `**${roles.length}** rôle(s) rendu(s).` : 'Rôles non rendus : vérifiez ma permission **Gérer les rôles** et ma position.';
+}
+
 // ---------------------------------------------------------------- commande
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
@@ -758,6 +991,10 @@ module.exports = {
   analyse,
   parseSteps,
   render,
+  logMessageContent,
+  footerUserId,
+  fixSuggestions,
+  falsePositiveView,
   data: new SlashCommandBuilder()
     .setName('automod')
     .setDescription('Ouvre le tableau de bord de l\'AutoMod : tout se configure depuis ici.')
@@ -811,9 +1048,9 @@ module.exports = {
     async faction(interaction, client, [key]) {
       guard(interaction);
       const action = interaction.values?.[0];
-      if (!FILTER_LABELS[key] || !['delete', 'warn', 'timeout'].includes(action)) throw new UserError('Sanction invalide.');
+      if (!FILTER_LABELS[key] || !actionsFor(key).includes(action)) throw new UserError('Sanction invalide.');
       const patch = { action };
-      if (action === 'timeout' && !cfgOf(client, interaction.guildId).filters?.[key]?.duration) patch.duration = '5m';
+      if (TIMED.has(action) && !cfgOf(client, interaction.guildId).filters?.[key]?.duration) patch.duration = action === 'quarantine' ? '1d' : '5m';
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: patch } } });
       await interaction.update(filterView(client, interaction.guildId, key, `Sanction : **${ACTION_LABELS[action]}**.`));
     },
@@ -849,6 +1086,12 @@ module.exports = {
       if (key === 'antiWall') {
         const v = intField(interaction, 'maxLength', 200, 4000, 'Caractères maximum');
         if (v !== undefined) patch.maxLength = v;
+      }
+      if (key === 'antiHacked') {
+        const minutes = intField(interaction, 'purgeMinutes', 1, 60, 'Minutes de messages à supprimer');
+        if (minutes !== undefined) patch.purgeMinutes = minutes;
+        const score = intField(interaction, 'scamScore', 3, 10, 'Score d\'arnaque');
+        if (score !== undefined) patch.scamScore = score;
       }
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: patch } } });
       await interaction.update(filterView(client, interaction.guildId, key, 'Réglages enregistrés.'));
@@ -1004,6 +1247,160 @@ module.exports = {
       guard(interaction);
       const text = interaction.fields.getTextInputValue('text');
       await interaction.reply({ embeds: [analysisCard(client, interaction.guild, text)], ephemeral: true });
+    },
+    /** cmd:automod:fexch:<filtre> — salons exemptés de CE filtre (remplace la liste). */
+    async fexch(interaction, client, [key]) {
+      guard(interaction);
+      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id));
+      // Salons enregistrés mais absents du menu (fils, au-delà de 25) : conservés s'ils existent.
+      const shown = new Set(filterExemptions(client, interaction.guildId, key).channels);
+      const cache = interaction.guild?.channels?.cache;
+      const hidden = (cfgOf(client, interaction.guildId).filters?.[key]?.exemptChannels ?? []).filter((id) => !shown.has(id) && cache?.has(id));
+      const ids = [...new Set([...picked, ...hidden])].slice(0, 100);
+      client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { exemptChannels: ids } } } });
+      await interaction.update(filterView(client, interaction.guildId, key, `${ids.length} salon(s) exempté(s) de ce filtre.`));
+    },
+    /** cmd:automod:fexrole:<filtre> — rôles exemptés de CE filtre (remplace la liste). */
+    async fexrole(interaction, client, [key]) {
+      guard(interaction);
+      if (!FILTER_LABELS[key]) throw new UserError('Filtre inconnu.');
+      const ids = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId).slice(0, MAX_IGNORED);
+      client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { exemptRoles: ids } } } });
+      await interaction.update(filterView(client, interaction.guildId, key, `${ids.length} rôle(s) exempté(s) de ce filtre.`));
+    },
+    /** cmd:automod:hkroles:<on|off> — retirer les rôles pendant une quarantaine. */
+    async hkroles(interaction, client, [state]) {
+      guard(interaction);
+      const removeRoles = target(state, cfgOf(client, interaction.guildId).filters?.antiHacked?.removeRoles);
+      client.services.config.update(interaction.guildId, { automod: { filters: { antiHacked: { removeRoles } } } });
+      await interaction.update(filterView(client, interaction.guildId, 'antiHacked', removeRoles ? 'Les rôles seront retirés pendant la quarantaine, puis rendus à la levée.' : 'Les rôles ne seront plus retirés.'));
+    },
+
+    /**
+     * cmd:automod:fp:<idInfraction> — « Faux positif » sur un log AutoMod : retire l'infraction
+     * du compteur de récidive, lève le timeout posé et ouvre une vue éphémère de correctifs.
+     */
+    async fp(interaction, client, [rawId]) {
+      guardModerator(interaction);
+      if (!/^\d{1,15}$/.test(rawId ?? '')) throw new UserError('Bouton invalide (infraction).');
+      const repo = client.repositories?.automodEvents;
+      const row = repo?.get(interaction.guildId, Number(rawId));
+      if (!row) throw new UserError('Cette infraction est introuvable : déjà traitée ou expirée (30 jours).');
+      // Le log et l'infraction doivent concerner le même membre (pied de page « ID : … »).
+      if (footerUserId(interaction.message) !== row.user_id) throw new UserError('Ce bouton ne correspond pas à ce log.');
+      const content = logMessageContent(interaction.message);
+      await interaction.deferUpdate();
+      repo.remove(interaction.guildId, row.id);
+      client.services.automod?.forget?.(interaction.guildId, row.user_id);
+      const done = ['Infraction retirée du compteur de récidive.'];
+      if (row.action === 'timeout') done.push(await liftTimeout(interaction, client, row.user_id, `Faux positif AutoMod (signalé par ${who(interaction)})`));
+      if (row.action === 'warn') done.push('L\'avertissement reste dans l\'historique des sanctions (📜).');
+      if (row.action === 'kick') done.push('L\'expulsion ne peut pas être annulée : renvoyez une invitation au membre si besoin.');
+      const fixes = fixSuggestions(cfgOf(client, interaction.guildId), row.filter, content);
+      const canFix = Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
+      await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Faux positif · ${interaction.user.username}`) });
+      await interaction.followUp({ ...falsePositiveView({ userId: row.user_id, filter: row.filter, action: row.action, content, done, fixes, canFix }), ephemeral: true });
+    },
+    /** cmd:automod:fpfix:<n> — correctif n°n, relu dans la vue (jamais dans le customId). */
+    async fpfix(interaction, client, [n]) {
+      guard(interaction);
+      if (!/^[1-4]$/.test(n ?? '')) throw new UserError('Bouton invalide.');
+      const fix = parseFixes(interaction.message)[Number(n) - 1];
+      if (!fix) throw new UserError('Ce correctif n\'est plus disponible.');
+      const cfg = cfgOf(client, interaction.guildId);
+      let label;
+      if (fix.kind === 'domain') {
+        const domain = cleanDomain(fix.value);
+        if (!extractLinks(logMessageContent(interaction.message) ?? '').some((l) => l.host === domain)) throw new UserError('Ce domaine ne figure pas dans le message.');
+        const list = cfg.filters?.antiLink?.allowedDomains ?? [];
+        if (list.includes(domain)) throw new UserError(`${code(domain)} est déjà autorisé.`);
+        client.services.config.update(interaction.guildId, { automod: { filters: { antiLink: { allowedDomains: [...list, domain] } } } });
+        label = `Autorisé : ${domain}`;
+      } else {
+        const words = cfg.filters?.badWords?.words ?? [];
+        if (!words.includes(fix.value)) throw new UserError('Ce mot n\'est plus dans la liste.');
+        client.services.config.update(interaction.guildId, { automod: { filters: { badWords: { words: words.filter((w) => w !== fix.value) } } } });
+        label = `Retiré : ${fix.value}`;
+      }
+      await interaction.update({ components: settleComponents(interaction.message, interaction.customId, label) });
+    },
+    /** cmd:automod:fpdm:<userId> — renvoie le message filtré à son auteur (MP). */
+    async fpdm(interaction, client, [rawUserId]) {
+      guardModerator(interaction);
+      const userId = snowflake(rawUserId, 'membre');
+      if (footerUserId(interaction.message) !== userId) throw new UserError('Ce bouton ne correspond pas à cette vue.');
+      const content = logMessageContent(interaction.message);
+      if (!content) throw new UserError('Aucun contenu texte à renvoyer.');
+      await interaction.deferUpdate();
+      const user = await client.users.fetch(userId).catch(() => null);
+      if (!user) throw new UserError('Utilisateur introuvable.');
+      const sent = await user.send({ embeds: [restoredMessageCard(interaction.guild, content)] }).then(() => true, () => false);
+      if (!sent) throw new UserError('Impossible d\'envoyer le message privé : ses MP sont sans doute fermés.');
+      await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, 'Renvoyé en MP') });
+    },
+
+    /** cmd:automod:qlift:<userId> — lève la quarantaine : timeout retiré, rôles retirés rendus. */
+    async qlift(interaction, client, [rawUserId]) {
+      requirePermission(interaction, 'ModerateMembers');
+      const userId = snowflake(rawUserId, 'membre');
+      await interaction.deferUpdate();
+      const reason = `Quarantaine AutoMod levée par ${who(interaction)}`;
+      const done = [await liftTimeout(interaction, client, userId, reason)];
+      // Rôles relus dans CE log (écrit par le bot), seulement s'il concerne bien ce membre.
+      const roles = footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
+      if (roles.length) done.push(await restoreRoles(interaction, userId, roles, reason));
+      client.services.automod?.forget?.(interaction.guildId, userId);
+      await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
+      await interaction.followUp({
+        embeds: [card({ tone: 'success', section: 'automod', icon: ICONS.unlock, title: 'Quarantaine levée', description: done.map((d) => `› ${d}`), fields: [field(ICONS.user, 'Membre', `<@${userId}>`)] })],
+        components: buttonRows(historyButton(userId)),
+        ephemeral: true,
+      });
+    },
+    /** cmd:automod:qban:<userId> — demande de confirmation (éphémère) avant de bannir. */
+    async qban(interaction, client, [rawUserId]) {
+      requirePermission(interaction, 'BanMembers');
+      const userId = snowflake(rawUserId, 'membre');
+      const logId = /^\d{17,20}$/.test(interaction.message?.id ?? '') ? interaction.message.id : null;
+      await interaction.reply({
+        embeds: [
+          card({
+            tone: 'warning',
+            icon: ICONS.warning,
+            title: 'Confirmer le bannissement',
+            description: [`Bannir <@${userId}> définitivement ? Ses messages de la dernière heure seront aussi supprimés.`, subtext('Si son propriétaire récupère le compte, il pourra être débanni avec /unban.')],
+          }),
+        ],
+        components: buttonRows(
+          actionButton({ command: 'automod', action: 'qbanok', args: logId ? [userId, logId] : [userId], label: 'Bannir', emoji: ICONS.ban, style: ButtonStyle.Danger }),
+          actionButton({ command: 'automod', action: 'qcancel', label: 'Annuler', emoji: ICONS.error }),
+        ),
+        ephemeral: true,
+      });
+    },
+    /** cmd:automod:qbanok:<userId>[:<idDuLog>] — bannissement confirmé. */
+    async qbanok(interaction, client, [rawUserId, rawLogId]) {
+      requirePermission(interaction, 'BanMembers');
+      const userId = snowflake(rawUserId, 'membre');
+      await interaction.deferUpdate();
+      const user = await client.users.fetch(userId).catch(() => null);
+      if (!user) throw new UserError('Utilisateur introuvable.');
+      const member = await interaction.guild.members.fetch(userId).catch(() => null);
+      const res = await client.services.moderation.ban(interaction.guild, user, interaction.member, 'Compte piraté (quarantaine AutoMod)', { deleteMessageSeconds: 3600, targetMember: member ?? undefined });
+      await interaction.editReply({ embeds: [status.ok(`${userLine(user)} est banni${res?.id ? ` · sanction #${res.id}` : ''}.`, 'Membre banni')], components: [] });
+      // Fige le bouton « Bannir » du log d'origine (best-effort).
+      if (/^\d{17,20}$/.test(rawLogId ?? '')) {
+        const log = await interaction.channel?.messages?.fetch(rawLogId).catch(() => null);
+        if (log && log.author?.id === client.user?.id) {
+          await log.edit({ components: settleComponents(log, `cmd:automod:qban:${userId}`, `Banni par ${interaction.user.username}`) }).catch(() => {});
+        }
+      }
+    },
+    /** cmd:automod:qcancel — annule le bannissement. */
+    async qcancel(interaction) {
+      requirePermission(interaction, 'BanMembers');
+      await interaction.update({ embeds: [status.warn('Bannissement annulé. Rien n\'a été modifié.')], components: [] });
     },
   },
 };

@@ -43,22 +43,25 @@ function desiredRules(cfg, logChannelId, guild = null) {
   const f = cfg.filters ?? {};
   // Un rôle ou salon supprimé dans les exemptions ferait refuser TOUTES les règles par Discord.
   const exists = (cache) => (id) => !cache || cache.has(id);
-  const exempt = {
-    exemptRoles: (cfg.ignoredRoles ?? []).filter(exists(guild?.roles?.cache)).slice(0, 20),
-    exemptChannels: (cfg.ignoredChannels ?? []).filter(exists(guild?.channels?.cache)).slice(0, 50),
-  };
+  // Exemptions globales + exemptions propres au filtre (limites Discord : 20 rôles, 50 salons).
+  const exemptFor = (fc = {}) => ({
+    exemptRoles: [...new Set([...(cfg.ignoredRoles ?? []), ...(fc.exemptRoles ?? [])])].filter(exists(guild?.roles?.cache)).slice(0, 20),
+    exemptChannels: [...new Set([...(cfg.ignoredChannels ?? []), ...(fc.exemptChannels ?? [])])].filter(exists(guild?.channels?.cache)).slice(0, 50),
+  });
   const rules = [];
   if (f.badWords?.enabled) {
+    const exempt = exemptFor(f.badWords);
     const keywords = toKeywords(f.badWords.words);
     if (keywords.length) rules.push({ name: NAMES.keywords, triggerType: Trigger.Keyword, triggerMetadata: { keywordFilter: keywords }, ...exempt });
     rules.push({ name: NAMES.preset, triggerType: Trigger.KeywordPreset, triggerMetadata: { presets: [Preset.Slurs, Preset.SexualContent] }, ...exempt });
   }
   if (f.antiMassMention?.enabled) {
+    const exempt = exemptFor(f.antiMassMention);
     // Le bot sanctionne à partir de `limit` mentions ; Discord bloque AU-DELÀ de la limite.
     const limit = Math.min(50, Math.max(1, (f.antiMassMention.limit ?? 5) - 1));
     rules.push({ name: NAMES.mentions, triggerType: Trigger.MentionSpam, triggerMetadata: { mentionTotalLimit: limit, mentionRaidProtectionEnabled: true }, ...exempt });
   }
-  if (f.antiSpam?.enabled) rules.push({ name: NAMES.spam, triggerType: Trigger.Spam, ...exempt });
+  if (f.antiSpam?.enabled) rules.push({ name: NAMES.spam, triggerType: Trigger.Spam, ...exemptFor(f.antiSpam) });
   return rules.map((r) => ({ ...r, eventType: EventType.MessageSend, actions: actions(logChannelId), enabled: true }));
 }
 

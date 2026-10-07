@@ -81,7 +81,26 @@ function findBadWord(text, words) {
   return null;
 }
 
+/**
+ * Entrées de la liste qui bloquent ce texte (pour retirer un mot après un faux positif).
+ * Une RegExp par entrée : réservé aux actions ponctuelles, pas à l'analyse des messages.
+ * @returns {string[]} au plus `max` entrées, dans l'ordre de la liste
+ */
+function matchingWords(text, words, max = 5) {
+  if (!text || !Array.isArray(words)) return [];
+  const forms = variants(text);
+  const out = [];
+  for (const w of new Set(words.map((x) => String(x ?? '').trim()).filter(Boolean))) {
+    const pattern = wordPattern(w);
+    if (!pattern) continue;
+    const re = new RegExp(`${START}(?:${pattern})${END}`, 'iu');
+    if (forms.some((v) => re.test(v))) out.push(w);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 /** Une entrée de liste est-elle utilisable (au moins une lettre ou un chiffre) ? */
 const isValidWord = (word) => wordPattern(String(word ?? '')) !== null;
 
-module.exports = { compileWords, findBadWord, wordPattern, isValidWord };
+module.exports = { compileWords, findBadWord, matchingWords, wordPattern, isValidWord };
