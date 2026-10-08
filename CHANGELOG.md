@@ -3,6 +3,25 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.5.2] — Non publié — Revue n° 3 et tests de bout en bout
+
+### Added
+- **Tests de bout en bout** (`tests/e2e`, `npm run test:e2e`) : le vrai bot tourne sur le vrai discord.js sans réseau
+  (REST simulé et validé contre les limites Discord, passerelle réelle). Les 73 commandes, environ 1 500 clics,
+  choix de menus et formulaires, 25 types d'événements, les parcours complets (tickets, giveaways, vérification,
+  niveaux, vocaux…) et des invariants d'état (lock/hide/lockdown/mute restaurent exactement l'état de départ).
+
+### Fixed
+- `/unban` lève une ligne « ban » restée active alors que Discord ne bannit plus (casier débloqué).
+- Tempban échu face à un ban définitif enregistré : reste banni, staff prévenu.
+- Rôle Muted posé sur les salons créés après coup (+ rattrapage en arrière-plan).
+- Événement d'audit en retard : ne lève plus une sanction posée après l'action manuelle.
+- `/settings moderation role_muet` : refuse un rôle à permissions, porté par des membres non muets ou au niveau de l'auteur.
+- Accueil après redémarrage : plus de réaccueil ni de re-verrouillage d'un membre vérifié.
+- Menus de rôles : un rôle devenu sensible peut toujours être abandonné ; rôles automatiques des bots moins restreints.
+- `/lock` posé pendant un lockdown n'est plus levé avec lui ; `/unlock` et `/unhide` ne laissent plus de surcharge vide.
+- Tickets, ModMail (accès au salon perdu), `/timestamp` (heure passée → lendemain), délais de réponse (logs après la réponse).
+
 ## [0.5.1] — Non publié — Revue complète n° 2
 
 ### Security

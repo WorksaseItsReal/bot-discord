@@ -9,7 +9,7 @@
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2022-339933?logo=node.js&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-embarqu%C3%A9-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-600%2B%20verts-57F287)
+![Tests](https://img.shields.io/badge/tests-700%2B%20verts-57F287)
 ![Licence](https://img.shields.io/badge/licence-MIT-lightgrey)
 
 </div>
@@ -48,7 +48,7 @@
 | 📋 **Logs** | 9 catégories et 29 événements activables un par un, tableau de bord `/logs` et création automatique des salons. |
 | 💾 **Backups** | Sauvegarde et restauration de la structure du serveur, permissions comprises. |
 | 🎨 **Design soigné** | Chaque réponse est un embed cohérent, avec des boutons utiles et un bouton 🗑️ sur les réponses publiques. |
-| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, plus de 600 tests automatiques, CI GitHub Actions. |
+| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, plus de 700 tests automatiques dont des tests de bout en bout sur le vrai discord.js, CI GitHub Actions. |
 
 ---
 
@@ -417,7 +417,8 @@ Chaque interaction passe par une couche de sûreté commune, avant même d'attei
 - **Résistance aux pannes** : bans temporaires et giveaways repris après un redémarrage, reconnexion automatique, arrêt propre.
 
 ```bash
-npm test        # plus de 600 tests, dont la validation des 73 commandes contre les limites de Discord
+npm test        # plus de 700 tests, dont la validation des 73 commandes contre les limites de Discord
+npm run test:e2e  # tests de bout en bout : le vrai bot sur le vrai discord.js, sans réseau
 npm run check   # healthcheck : base, commandes, événements, sans connexion
 ```
 
