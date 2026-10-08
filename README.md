@@ -4,12 +4,12 @@
 
 **Le bot Discord tout-en-un pour administrer, modérer, sécuriser et animer votre serveur.**
 
-68 slash commands · plus de 140 actions · embeds soignés · multi-serveurs · 100 % en français
+73 slash commands · plus de 140 actions · embeds soignés · multi-serveurs · 100 % en français
 
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
-![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2022-339933?logo=node.js&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-embarqu%C3%A9-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-259%20verts-57F287)
+![Tests](https://img.shields.io/badge/tests-600%2B%20verts-57F287)
 ![Licence](https://img.shields.io/badge/licence-MIT-lightgrey)
 
 </div>
@@ -48,7 +48,7 @@
 | 📋 **Logs** | 9 catégories et 29 événements activables un par un, tableau de bord `/logs` et création automatique des salons. |
 | 💾 **Backups** | Sauvegarde et restauration de la structure du serveur, permissions comprises. |
 | 🎨 **Design soigné** | Chaque réponse est un embed cohérent, avec des boutons utiles et un bouton 🗑️ sur les réponses publiques. |
-| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, plus de 470 tests automatiques, CI GitHub Actions. |
+| 🧠 **Fiable** | Aucune double réponse, boutons protégés contre la falsification, erreurs expliquées en français, plus de 600 tests automatiques, CI GitHub Actions. |
 
 ---
 
@@ -218,7 +218,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/kick` | Expulsion d'un membre. |
 | `/warn` | Avertissement avec strikes et sanction automatique au palier atteint. |
 | `/mute` · `/unmute` · `/timeout` · `/untimeout` | Rendre muet par rôle ou par exclusion Discord, permanent ou temporaire. |
-| `/sanctions` | Fiches et historique des sanctions : `voir`, `historique`, `raison`, `note`, `notes`, `remove`, `clear`. |
+| `/sanctions` | Fiches et historique des sanctions : `voir`, `historique`, `raison`, `note`, `notes`, `remove` (auteur ou Gérer le serveur), `clear` (Gérer le serveur, confirmé et journalisé). |
 | `/clear` | Suppression de messages en masse, filtrable par membre. |
 | `/lock` · `/unlock` · `/lockall` · `/unlockall` | Verrouillage d'un salon ou de tout le serveur, avec restauration exacte. |
 | `/hide` · `/unhide` | Masquer ou réafficher un salon. |
@@ -286,7 +286,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/custom` 🔒 · `/tag` | Commandes personnalisées avec variables. |
 | `/reminder` | Rappels personnels, conservés même après un redémarrage. |
 | `/calcul` | Calculatrice : `(2+3)^2 / sqrt(16)`, fonctions et constantes. |
-| `/timestamp` | Dates Discord affichées dans le fuseau horaire de chaque lecteur. |
+| `/timestamp` | Dates Discord affichées dans le fuseau horaire de chaque lecteur (`14h30`, `25/12 18h`, ou une durée `+2h`). |
 | `/couleur` | Aperçu d'une couleur en HEX, RGB et HSL, ou couleur aléatoire. |
 | `/invite` · `/ping` · `/uptime` | Lien d'invitation, latence, disponibilité. |
 
@@ -306,12 +306,12 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 </details>
 
 <details>
-<summary><b>⚙️ Configuration</b> (5) 🔒</summary>
+<summary><b>⚙️ Configuration</b> (6) 🔒</summary>
 
 | Commande | Description |
 | --- | --- |
 | `/logs` | Tableau de bord des logs : salons, événements, création automatique des salons. |
-| `/settings` | Vue d'ensemble de la configuration, options de modération. |
+| `/settings` | Vue d'ensemble, raccourcis vers les tableaux de bord ; `moderation` règle DM, confirmations, raison obligatoire, strikes et paliers, rôle muet. |
 | `/diagnostics` | Analyse la configuration et signale les permissions manquantes. |
 | `/backup` | Sauvegarde, restauration et sauvegarde automatique de la structure du serveur. |
 | `/health` | État technique du bot : latence, base de données, services. |
@@ -417,7 +417,7 @@ Chaque interaction passe par une couche de sûreté commune, avant même d'attei
 - **Résistance aux pannes** : bans temporaires et giveaways repris après un redémarrage, reconnexion automatique, arrêt propre.
 
 ```bash
-npm test        # 259 tests, dont la validation des 68 commandes contre les limites de Discord
+npm test        # plus de 600 tests, dont la validation des 73 commandes contre les limites de Discord
 npm run check   # healthcheck : base, commandes, événements, sans connexion
 ```
 

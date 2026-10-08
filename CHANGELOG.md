@@ -3,6 +3,30 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.5.1] — Non publié — Revue complète n° 2
+
+### Security
+- Mentions de masse et de rôles bloquées par défaut au niveau du client (les pings du staff sont explicites).
+- `/bienvenue` refuse les rôles de modération/administration et les rôles au niveau de l'auteur (rôles automatiques et rôle de vérification).
+- `/sanctions remove` réservé à l'auteur ou à « Gérer le serveur », `/sanctions clear` à « Gérer le serveur », confirmés et journalisés.
+- Bans faits via le bot surveillés par l'AntiRaid (arrivants récents exemptés) ; retrait des rôles de l'auteur vérifié.
+- `/lock`, `/hide` et leurs inverses exigent « Gérer les permissions » ; menus de rôles : plus de permissions interdites.
+- Permissions revérifiées dans `/backup`, `/custom`, `/giveaway`, `/modmail` (pas seulement côté Discord).
+
+### Fixed
+- **Rôles attribués un par un** : deux modifications successives ne s'annulent plus (mute réappliqué au retour, rôles de vérification, récompenses de niveau).
+- **Quarantaine AutoMod** : rôles retirés conservés en base (migration 12), levée partielle signalée ; « Faux positif » ne lève que le timeout posé par l'AutoMod.
+- **Anti-arnaques** : moins de faux positifs (marque + extension dans une phrase, services d'invitation, miroirs) ; seuil Strict à 3.
+- **Sanctions** : `/tempban` refusé sur un utilisateur déjà banni, le planificateur relit chaque sanction avant de la lever, mutes/timeouts retirés à la main synchronisés, palier d'escalade en colonne dédiée (migration 10), bouton « Annuler » de `/pseudo` réparé, confirmations pour `/derank`, `/massrole`, `/role delete`, `/lockall`.
+- **Communauté** : menus de rôles et de motifs remis à zéro, restauration de sauvegarde avec échecs détaillés et verrou, participation aux giveaways idempotente (bouton « Se retirer ») et annonce mémorisée (migration 11), délai entre deux tickets, `/ticket rename` non bloquant, transcripts complets, ModMail plus robuste, 25 rappels actifs maximum.
+- **Accueil, niveaux, vocaux** : accueil des membres après un redémarrage, départs des raiders tus, vocaux créés par héritage de la catégorie, actions du panneau sérialisées, bot seul ne garde plus un vocal en vie.
+- **Interface** : `/settings moderation` règle enfin raison obligatoire, strikes, paliers et rôle muet ; `/diagnostics` vérifie les rôles et salons référencés ; `/embed` refuse les embeds trop longs ; `/emoji` accepte les keycaps ; « Gérer le serveur » demandé à l'invitation ; `/logs` à interrupteurs idempotents.
+- **Cœur** : un bouton lent n'écrase plus une carte d'erreur, ids de migration vérifiés, travail différé vidé à l'arrêt.
+
+### Changed
+- `/timestamp` : « 14h30 » est une heure ; une durée s'écrit « +2h ».
+- Node.js 22 minimum (Node 20 en fin de vie) ; CI sur Node 22 et 24.
+
 ## [0.5.0] — Non publié — Accueil, niveaux, tableaux de bord et exploitation
 
 ### Added
