@@ -417,6 +417,11 @@ class WelcomeService {
    * Vague d'arrivées en cours de sanction (≈ 2 minutes) : les départs des arrivants
    * récents sont tus. Synchrone, appelé par l'AntiRaid avant de sanctionner la vague.
    */
+  /** Annule un silence posé avant une sanction qui a finalement échoué. */
+  unsilence(guildId, userId) {
+    this.silenced.delete(`${guildId}:${userId}`);
+  }
+
   silenceWave(guildId) {
     const now = this.now();
     this.#prune(this.waves, (t) => t > now);

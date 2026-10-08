@@ -185,7 +185,9 @@ class SchedulerService {
       if (!this.#stillDue(s)) continue;
       // Un ban définitif actif existe (converti pendant le tick, ou données anciennes) :
       // on ne débannit pas, seule la ligne temporaire est close.
-      if (this.sanctions.listActive?.(s.guild_id, s.user_id)?.some((r) => r.type === 'ban')) {
+      // Seul un ban posé APRÈS ce tempban le remplace : une ligne « ban » plus ancienne restée
+      // active (levée hors du bot) ne doit pas rendre le tempban définitif sans prévenir.
+      if (this.sanctions.listActive?.(s.guild_id, s.user_id)?.some((r) => r.type === 'ban' && r.created_at >= s.created_at)) {
         this.sanctions.deactivateActive(s.guild_id, s.user_id, 'tempban', { by: null, reason: 'Remplacé par un bannissement définitif' });
         continue;
       }

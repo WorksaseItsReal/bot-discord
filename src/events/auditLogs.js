@@ -37,7 +37,7 @@ module.exports = {
       if (!isBot && removed.length) {
         const mutedRoleId = client.services.moderation?.mutedRole?.(guild)?.id;
         if (mutedRoleId && removed.some((r) => r.id === mutedRoleId)) {
-          client.services.moderation.liftedOutside?.(guild.id, entry.targetId, 'mute', entry.executorId ?? null);
+          client.services.moderation.liftedOutside?.(guild.id, entry.targetId, 'mute', entry.executorId ?? null, entry.createdTimestamp ?? Date.now());
         }
       }
       if (!logging.wouldLog(guild.id, 'members', { event: 'memberRoles' })) return;
@@ -85,7 +85,7 @@ module.exports = {
       const timeout = entry.changes.find((c) => c.key === 'communication_disabled_until');
       // Timeout retiré par un tiers : la sanction en base n'est plus en vigueur.
       if (timeout && !isBot && !timeout.new) {
-        client.services.moderation?.liftedOutside?.(guild.id, entry.targetId, 'timeout', entry.executorId ?? null);
+        client.services.moderation?.liftedOutside?.(guild.id, entry.targetId, 'timeout', entry.executorId ?? null, entry.createdTimestamp ?? Date.now());
       }
       if (timeout && !isBot && logging.wouldLog(guild.id, 'moderation', { event: 'manualBan' })) {
         const until = timeout.new ? Date.parse(timeout.new) : null;

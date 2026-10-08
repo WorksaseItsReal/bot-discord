@@ -49,6 +49,8 @@ module.exports = [
     name: 'channelCreate',
     async execute(client, channel) {
       if (!channel.guild) return;
+      // Un membre muet ne doit pas pouvoir écrire dans un salon créé après la mise en place du mute.
+      await client.services.moderation?.onChannelCreate?.(channel)?.catch?.(() => {});
       await client.services.logging.send(
         channel.guild.id,
         'channels',

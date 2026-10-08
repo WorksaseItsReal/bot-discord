@@ -702,3 +702,35 @@ test('/massrole : dernière édition protégée', async () => {
   await massrole.execute(i, { services: { config: { get: () => ({ moderation: {} }) } } });
   assert.equal(edits, 2);
 });
+
+// ---------------------------------------------------------------- revue 3 : régressions
+
+test('revue 3 — /unban : une ligne « ban » restée active alors que Discord ne le bannit plus est levée (casier débloqué)', async () => {
+  const { repo, moderation } = moderationEnv();
+  const { guild } = world({ banned: false });
+  guild.client = { users: { fetch: async () => ({ id: UID }) } };
+  repo.create({ guildId: 'g1', userId: UID, moderatorId: MOD, type: 'ban', reason: 'vieux ban' });
+  const res = await moderation.unban(guild, UID, { id: MOD }, 'nettoyage');
+  assert.equal(res.dbOnly, true);
+  assert.equal(repo.listActive('g1', UID).length, 0);
+  // Rien en base et pas banni : refus habituel.
+  await assert.rejects(moderation.unban(guild, UID, { id: MOD }), /n'est pas banni/);
+  // Erreur passagère de Discord : on ne touche à rien.
+  guild.bans.fetch = async () => { throw Object.assign(new Error('boom'), { code: 500 }); };
+  repo.create({ guildId: 'g1', userId: UID, moderatorId: MOD, type: 'ban' });
+  await assert.rejects(moderation.unban(guild, UID, { id: MOD }), /Réessayez/);
+  assert.equal(repo.listActive('g1', UID).length, 1);
+});
+
+test('revue 3 — audit en retard : seul le mute ANTÉRIEUR au retrait manuel est levé', () => {
+  const { db, repo, moderation } = moderationEnv();
+  const oldId = repo.create({ guildId: 'g1', userId: UID, moderatorId: MOD, type: 'mute' });
+  const newId = repo.create({ guildId: 'g1', userId: UID, moderatorId: MOD, type: 'mute' });
+  const removedAt = 1_000_000;
+  db.prepare('UPDATE sanctions SET created_at = ? WHERE id = ?').run(removedAt - 5000, oldId);
+  db.prepare('UPDATE sanctions SET created_at = ? WHERE id = ?').run(removedAt + 2000, newId); // remute juste après
+  assert.equal(moderation.liftedOutside('g1', UID, 'mute', 'humain', removedAt), 1);
+  assert.equal(repo.get('g1', oldId).active, 0);
+  assert.equal(repo.get('g1', oldId).revoked_by, 'humain');
+  assert.equal(repo.get('g1', newId).active, 1, 'le nouveau mute reste en vigueur');
+});

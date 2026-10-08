@@ -513,7 +513,8 @@ module.exports = {
         field(sanctionIcon(sanction.type), 'Type', TYPE_LABELS[sanction.type] ?? sanction.type),
         field(ICONS.date, 'Date', discordTimestamp(sanction.created_at, 'd')),
       ];
-      await client.services.logging?.send?.(guildId, 'moderation', card({
+      // Non bloquant : la réponse doit partir dans les 3 s (le log suit).
+      Promise.resolve(client.services.logging?.send?.(guildId, 'moderation', card({
         tone: 'warning',
         section: 'moderation',
         icon: ICONS.delete,
@@ -526,7 +527,7 @@ module.exports = {
           wide(ICONS.reason, 'Raison d\'origine', sanction.reason ? truncate(sanction.reason, 1024) : '*Aucune raison fournie*'),
         ],
         footer: `Sanction #${id}`,
-      }), undefined, { event: 'sanction' });
+      }), undefined, { event: 'sanction' })).catch(() => {});
       return interaction.reply({
         embeds: [
           card({
@@ -563,7 +564,8 @@ module.exports = {
       }
       const n = repo.clearUser(guildId, user.id);
       client.services.strikes.reset(guildId, user.id);
-      await client.services.logging?.send?.(guildId, 'moderation', card({
+      // Non bloquant : la réponse doit partir dans les 3 s (le log suit).
+      Promise.resolve(client.services.logging?.send?.(guildId, 'moderation', card({
         tone: 'warning',
         section: 'moderation',
         icon: ICONS.delete,
@@ -575,7 +577,7 @@ module.exports = {
           field(ICONS.moderator, 'Par', `${interaction.user}`),
           field(ICONS.count, 'Sanctions effacées', `**${n}**`),
         ],
-      }), undefined, { event: 'sanction' });
+      }), undefined, { event: 'sanction' })).catch(() => {});
       const payload = {
         embeds: [
           card({

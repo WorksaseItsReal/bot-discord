@@ -47,12 +47,13 @@ async function handle(interaction, client) {
   for (const roleId of new Set(interaction.values)) {
     if (!menuRoles.has(roleId)) continue;
     const role = interaction.guild.roles.cache.get(roleId);
-    // Rôle supprimé, devenu sensible ou passé au-dessus du bot depuis la création du menu.
-    if (!role || role.managed || hasForbiddenPermissions(role) || role.position >= me.roles.highest.position) {
+    const has = interaction.member.roles.cache.has(roleId);
+    // Rôle supprimé ou passé au-dessus du bot : rien n'est possible. Rôle devenu sensible :
+    // on ne l'ATTRIBUE plus, mais un membre peut toujours l'abandonner.
+    if (!role || role.managed || role.position >= me.roles.highest.position || (!has && hasForbiddenPermissions(role))) {
       failed.push(roleId);
       continue;
     }
-    const has = interaction.member.roles.cache.has(roleId);
     try {
       if (has) {
         await interaction.member.roles.remove(roleId, 'Menu de rôles');

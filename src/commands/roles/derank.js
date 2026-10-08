@@ -58,10 +58,10 @@ module.exports = {
       fields,
       thumbnail: member.displayAvatarURL?.({ size: 128 }) ?? null,
     });
-    await client?.services?.logging?.send?.(interaction.guild.id, 'moderation', embed('moderation'), undefined, { event: 'sanction' })?.catch?.(() => {});
     const payload = { embeds: [embed('roles')] };
-    // Après confirmation, la carte remplace la demande (éphémère).
-    if (interaction.replied || interaction.deferred) return interaction.editReply(payload);
-    return interaction.reply(payload);
+    // Après confirmation, la carte remplace la demande (éphémère). Réponse d'abord (délai de 3 s), log ensuite.
+    const response = interaction.replied || interaction.deferred ? await interaction.editReply(payload) : await interaction.reply(payload);
+    await client?.services?.logging?.send?.(interaction.guild.id, 'moderation', embed('moderation'), undefined, { event: 'sanction' })?.catch?.(() => {});
+    return response;
   },
 };

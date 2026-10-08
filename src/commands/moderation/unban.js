@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { buttonRows } = require('../../utils/ui');
+const { buttonRows, wide, ICONS } = require('../../utils/ui');
 const { sanctionCard, historyButton, revokeHandler } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
@@ -21,11 +21,10 @@ module.exports = {
     const reason = interaction.options.getString('raison');
     // Plusieurs appels API (fetch du ban, débannissement, log) : acquittement immédiat.
     await interaction.deferReply();
-    const { user } = await client.services.moderation.unban(interaction.guild, userId, interaction.member, reason);
-    await interaction.editReply({
-      embeds: [sanctionCard({ type: 'unban', user, userId: user.id, moderator: interaction.user, reason })],
-      components: buttonRows(historyButton(user.id)),
-    });
+    const res = await client.services.moderation.unban(interaction.guild, userId, interaction.member, reason);
+    const card = sanctionCard({ type: 'unban', user: res.user, userId: res.userId, moderator: interaction.user, reason });
+    if (res.dbOnly) card.addFields(wide(ICONS.info, 'Note', 'Il n\'était déjà plus banni sur Discord : seule la sanction restée active en base a été levée.'));
+    await interaction.editReply({ embeds: [card], components: buttonRows(historyButton(res.userId)) });
   },
 
   buttons: {
@@ -43,8 +42,8 @@ module.exports = {
         }
         // unban() vérifie que l'utilisateur est toujours banni et agit sur l'utilisateur résolu.
         const reason = `Débanni via le bouton par ${interaction.user.tag}`;
-        const { user } = await client.services.moderation.unban(interaction.guild, userId, interaction.member, reason);
-        return user;
+        const { user, userId: id } = await client.services.moderation.unban(interaction.guild, userId, interaction.member, reason);
+        return user ?? { id, tag: id, toString: () => `<@${id}>` };
       },
     }),
   },

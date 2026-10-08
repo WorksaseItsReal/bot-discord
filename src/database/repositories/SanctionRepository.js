@@ -19,6 +19,7 @@ class SanctionRepository {
     this.deleteStmt = db.prepare('DELETE FROM sanctions WHERE id = ? AND guild_id = ?');
     this.clearUserStmt = db.prepare('DELETE FROM sanctions WHERE guild_id = ? AND user_id = ?');
     this.deactivateStmt = db.prepare('UPDATE sanctions SET active = 0 WHERE id = ?');
+    this.revokeStmt = db.prepare('UPDATE sanctions SET active = 0, revoked_at = @at, revoked_by = @by, revoke_reason = @reason WHERE id = @id AND active = 1');
     this.dueStmt = db.prepare(
       'SELECT * FROM sanctions WHERE active = 1 AND expires_at IS NOT NULL AND expires_at <= ?',
     );
@@ -120,6 +121,11 @@ class SanctionRepository {
 
   deactivate(id) {
     this.deactivateStmt.run(id);
+  }
+
+  /** Lève UNE sanction active en traçant qui, quand et pourquoi. @returns {boolean} */
+  revoke(id, { by = null, reason = null } = {}) {
+    return this.revokeStmt.run({ id, at: Date.now(), by: by ?? null, reason: reason ?? null }).changes > 0;
   }
 
   /** Sanctions temporaires arrivées à expiration (pour le scheduler). */

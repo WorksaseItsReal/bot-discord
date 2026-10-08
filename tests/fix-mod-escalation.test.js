@@ -154,12 +154,19 @@ test('syncMutedRole ne réécrit pas un overwrite déjà en place (ensureMutedRo
   const partial = channel('b', ChannelType.GuildText, F.SendMessages);
   const fresh = channel('c', ChannelType.GuildVoice, null);
   const guild = { id: 'g1', members: { me: { id: 'bot' } }, roles: { cache: new Map([['muted', role]]) }, channels: { cache: new Map([['a', done], ['b', partial], ['c', fresh]]) } };
-  // Rôle déjà configuré : aucun parcours des salons à chaque /mute.
+  // Rôle déjà configuré : rattrapage en arrière-plan (salons créés depuis), au plus toutes les 10 min,
+  // qui ne réécrit jamais un overwrite déjà en place.
   assert.equal(await env.moderation.ensureMutedRole(guild), role);
-  assert.deepEqual(edits, []);
-  assert.equal(await env.moderation.syncMutedRole(guild, role), 2);
+  await new Promise((r) => setImmediate(r));
   assert.deepEqual(edits.map(([id]) => id), ['b', 'c']);
   assert.deepEqual(Object.keys(edits[1][1]).sort(), ['AddReactions', 'SendMessages', 'Speak']);
+  await env.moderation.ensureMutedRole(guild);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(edits.length, 2, 'pas de nouveau parcours dans la fenêtre de 10 min');
+  // Nouveau salon : refus posés tout de suite (sauf salon synchronisé avec sa catégorie).
+  const created = { ...channel('d', ChannelType.GuildText, null), guild };
+  assert.equal(await env.moderation.onChannelCreate(created), 1);
+  assert.equal(await env.moderation.onChannelCreate({ ...channel('e', ChannelType.GuildText, null), guild, permissionsLocked: true }), 0);
 });
 
 test('SanctionRepository.deactivateActive filtre par membre en SQL', () => {

@@ -9,11 +9,17 @@ const { permissionLabel } = require('../utils/permissionNames');
 const { snowflake, SNOWFLAKE } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
 const { sanctionState } = require('../database/repositories/SanctionRepository');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('moderation');
 
 /** Durée pendant laquelle une action du bot est reconnue dans les événements Discord (anti-doublon de logs). */
 const BOT_ACTION_TTL_MS = 15_000;
 
 /** Refus posés par le rôle Muted, selon le type de salon. */
+/** Rattrapage en arrière-plan des refus du rôle Muted : au plus une fois par période. */
+const MUTED_RESYNC_MS = 10 * 60 * 1000;
+
 const MUTE_DENIES = {
   [ChannelType.GuildText]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
   [ChannelType.GuildAnnouncement]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
@@ -336,6 +342,8 @@ class ModerationService {
      * @type {Map<string, number>}
      */
     this.recentBotActions = new Map();
+    /** @type {Map<string, number>} dernier rattrapage des refus du rôle Muted, par serveur */
+    this.mutedSyncAt = new Map();
   }
 
   /** Marque une action du bot (avant l'appel API). */
@@ -391,7 +399,17 @@ class ModerationService {
       this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
       setup = true;
     }
-    if (setup) await this.syncMutedRole(guild, role);
+    // Création/adoption : synchronisation complète attendue. Sinon, rattrapage en arrière-plan
+    // (au plus toutes les 10 min) des salons créés depuis ou devenus gérables : syncMutedRole
+    // ignore les salons déjà conformes et ceux où le bot n'a pas les droits.
+    const last = this.mutedSyncAt.get(guild.id) ?? 0;
+    if (setup) {
+      this.mutedSyncAt.set(guild.id, Date.now());
+      await this.syncMutedRole(guild, role);
+    } else if (Date.now() - last > MUTED_RESYNC_MS) {
+      this.mutedSyncAt.set(guild.id, Date.now());
+      this.syncMutedRole(guild, role).catch((err) => logger.debug('Synchronisation du rôle Muted :', err?.message));
+    }
     return role;
   }
 
@@ -400,10 +418,10 @@ class ModerationService {
    * le bot peut le faire (« Voir le salon » + « Gérer les permissions » sur CE salon).
    * @returns {Promise<number>} salons modifiés
    */
-  async syncMutedRole(guild, role) {
+  async syncMutedRole(guild, role, channels = guild.channels.cache.values()) {
     const me = guild.members?.me;
     let edited = 0;
-    for (const channel of guild.channels.cache.values()) {
+    for (const channel of channels) {
       const denies = MUTE_DENIES[channel.type];
       if (!denies || !channel.permissionOverwrites) continue;
       const perms = me ? channel.permissionsFor?.(me) : null;
@@ -416,6 +434,14 @@ class ModerationService {
       if (ok) edited += 1;
     }
     return edited;
+  }
+
+  /** Nouveau salon : le rôle Muted (s'il existe) y reçoit ses refus, sauf salon synchronisé avec sa catégorie. */
+  async onChannelCreate(channel) {
+    if (!channel?.guild || channel.permissionsLocked) return 0;
+    const role = this.mutedRole(channel.guild);
+    if (!role) return 0;
+    return this.syncMutedRole(channel.guild, role, [channel]);
   }
 
   /** Rôle de mute existant (sans le créer). */
@@ -598,8 +624,12 @@ class ModerationService {
    * @param {'mute'|'timeout'} type
    * @returns {number} lignes désactivées
    */
-  liftedOutside(guildId, userId, type, executorId = null) {
-    return this.sanctions.deactivateActive(guildId, userId, type, { by: executorId, reason: 'Levé hors du bot' });
+  liftedOutside(guildId, userId, type, executorId = null, before = Date.now()) {
+    // Seules les sanctions ANTÉRIEURES à l'action manuelle sont levées : un événement d'audit
+    // reçu en retard ne doit pas annuler une sanction posée juste après (ex. remute immédiat).
+    const rows = (this.sanctions.listActive?.(guildId, userId) ?? []).filter((r) => r.type === type && r.created_at <= before);
+    for (const r of rows) this.sanctions.revoke(r.id, { by: executorId, reason: 'Levé hors du bot' });
+    return rows.length;
   }
 
   /**
@@ -623,16 +653,31 @@ class ModerationService {
    */
   async unban(guild, userId, moderator, reason) {
     if (typeof userId !== 'string' || !SNOWFLAKE.test(userId)) throw new UserError('Identifiant utilisateur invalide.');
-    const existing = await guild.bans.fetch(userId).catch(() => null);
-    const user = existing?.user;
-    if (!user?.id || user.id !== userId) throw new UserError('Cet utilisateur n\'est pas banni.');
+    let fetchError = null;
+    const existing = await guild.bans.fetch(userId).catch((err) => {
+      fetchError = err;
+      return null;
+    });
+    const revoke = { by: moderator?.id ?? null, reason: reason ?? null };
+    if (!existing?.user?.id || existing.user.id !== userId) {
+      // 10026 Unknown Ban : plus banni côté Discord (levé hors du bot, pendant une absence…).
+      // Si la base le croit encore banni, on la remet d'accord au lieu de bloquer son casier.
+      if (fetchError && fetchError.code !== 10026) throw new UserError('Impossible de vérifier le bannissement pour le moment. Réessayez dans quelques secondes.');
+      const stale = (this.sanctions.listActive?.(guild.id, userId) ?? []).some((r) => r.type === 'ban' || r.type === 'tempban');
+      if (!stale) throw new UserError('Cet utilisateur n\'est pas banni.');
+      this.#deactivateActive(guild.id, userId, 'tempban', revoke);
+      this.#deactivateActive(guild.id, userId, 'ban', revoke);
+      const user = await guild.client?.users?.fetch?.(userId).catch(() => null) ?? null;
+      await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId, moderator, reason }), undefined, { event: 'revocation' });
+      return { ok: true, user, userId, dbOnly: true };
+    }
+    const user = existing.user;
     await this.#asBot('unban', guild.id, user.id, () => guild.bans.remove(user.id, reason || undefined));
     // Lève les bannissements (temporaires et définitifs) encore actifs, avec leur auteur.
-    const revoke = { by: moderator?.id ?? null, reason: reason ?? null };
     this.#deactivateActive(guild.id, user.id, 'tempban', revoke);
     this.#deactivateActive(guild.id, user.id, 'ban', revoke);
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId: user.id, moderator, reason }), undefined, { event: 'revocation' });
-    return { ok: true, user };
+    return { ok: true, user, userId: user.id };
   }
 
   /**
@@ -712,7 +757,7 @@ class ModerationService {
         throw new UserError('Il me manque la permission **Bannir des membres** pour débannir.');
       }
       const { user } = await this.unban(guild, userId, moderator, reason);
-      return { type: 'unban', user };
+      return { type: 'unban', user: user ?? { id: userId, tag: userId, toString: () => `<@${userId}>` } };
     }
     if (!SNOWFLAKE.test(String(userId))) throw new UserError('Identifiant de membre invalide.');
     const member = await guild.members.fetch(userId).catch(() => null);

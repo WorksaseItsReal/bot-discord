@@ -256,6 +256,7 @@ class AntiRaidService {
         punished.push(id);
       } catch (e) {
         if (action === 'ban') this.client.services?.moderation?.unmarkBotAction?.('ban', guild.id, id);
+        this.client.services?.welcome?.unsilence?.(guild.id, id); // sanction échouée : un vrai départ sera annoncé
         skipped += 1;
         logger.debug(`punishWave ${id}`, e?.message);
       }
@@ -323,6 +324,7 @@ class AntiRaidService {
   /** @returns {Promise<boolean>} true si le membre a été expulsé/banni */
   async #punishNewMember(member, reason, cfg) {
     let ban = false;
+    let acted = false;
     try {
       ban = newAccountAction(cfg) === 'ban';
       this.client.services?.welcome?.silence?.(member.guild.id, member.id);
@@ -331,6 +333,7 @@ class AntiRaidService {
         await member.ban({ reason });
       }
       else await member.kick(reason);
+      acted = true;
       await this.alert(member.guild, {
         tone: 'caution',
         icon: ICONS.shield,
@@ -347,7 +350,9 @@ class AntiRaidService {
       return true;
     } catch (e) {
       // Échec : l'événement guildBanAdd ne viendra pas du bot, la marque est retirée.
+      if (acted) return true; // seule l'alerte a échoué : la sanction est bien appliquée
       if (ban) this.client.services?.moderation?.unmarkBotAction?.('ban', member.guild.id, member.id);
+      this.client.services?.welcome?.unsilence?.(member.guild.id, member.id);
       logger.debug('punishNewMember', e?.message);
       return false;
     }
