@@ -3,6 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { card, wide, ICONS, status } = require('../../utils/ui');
 const { fitList } = require('../../services/LoggingService');
+const { UserError } = require('../../core/errors');
 
 /** Carte de la whitelist, avec une ligne de retour optionnelle en tête. */
 function whitelistCard(wl, notice) {
@@ -61,6 +62,9 @@ module.exports = {
     const users = new Set(wl.users);
     const roles = new Set(wl.roles);
     const add = sub === 'add';
+    // @everyone whitelisterait tout le serveur ; un rôle géré (bot, boost…) n'est pas maîtrisé par le serveur.
+    if (add && role?.id === guildId) throw new UserError('Le rôle @everyone ne peut pas être whitelisté : l\'AntiRaid ne protégerait plus rien.');
+    if (add && role?.managed) throw new UserError(`Le rôle ${role} est géré par une intégration : whitelistez plutôt le bot ou l'utilisateur concerné.`);
     if (user) add ? users.add(user.id) : users.delete(user.id);
     if (role) add ? roles.add(role.id) : roles.delete(role.id);
     config.update(guildId, { whitelist: { users: [...users], roles: [...roles] } });

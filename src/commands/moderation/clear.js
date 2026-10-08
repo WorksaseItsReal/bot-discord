@@ -21,6 +21,8 @@ module.exports = {
   async execute(interaction) {
     const amount = interaction.options.getInteger('nombre');
     const target = interaction.options.getUser('membre');
+    // Salon non résolu (non mis en cache, contexte inattendu) : refus explicite plutôt qu'un crash.
+    if (!interaction.channel?.messages?.fetch) throw new UserError('Impossible d\'accéder à ce salon. Réessayez dans un salon textuel du serveur.');
     await interaction.deferReply({ ephemeral: true });
 
     let messages = await interaction.channel.messages.fetch({ limit: 100 });

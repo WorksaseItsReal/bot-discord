@@ -7,9 +7,10 @@ const ACTION_LABELS = { mute: 'Timeout', timeout: 'Timeout', kick: 'Expulsion', 
 const ACTION_PERMISSIONS = { mute: 'ModerateMembers', timeout: 'ModerateMembers', kick: 'KickMembers', ban: 'BanMembers' };
 
 /**
- * Préfixe de la raison des sanctions d'escalade. La raison encode le palier
- * appliqué (« Escalade automatique (palier de 5 strikes) ») : c'est ce qui permet
- * de savoir, sans migration, quels paliers ont déjà été appliqués à un membre.
+ * Préfixe de la raison des sanctions d'escalade (« Escalade automatique (palier de
+ * 5 strikes) »). La raison n'est QUE descriptive : le palier appliqué est stocké dans
+ * la colonne `sanctions.escalation_step` (migration 10), le texte libre d'une raison
+ * pouvant être imité par n'importe quel modérateur.
  */
 const ESCALATION_PREFIX = 'Escalade automatique (';
 
@@ -18,7 +19,10 @@ function escalationReason(t) {
   return `${ESCALATION_PREFIX}palier de ${t.strikes} strikes)`;
 }
 
-/** Palier encodé dans une raison d'escalade (ancien format « (N strikes) » accepté), sinon 0. Pur. */
+/**
+ * Palier encodé dans une raison d'escalade (ancien format « (N strikes) » accepté), sinon 0. Pur.
+ * Affichage / reprise d'historique uniquement : ne sert plus à décider d'une escalade.
+ */
 function parseEscalationLevel(reason) {
   const m = /^Escalade automatique \((?:palier de )?(\d+) strikes\)/.exec(reason ?? '');
   return m ? Number(m[1]) : 0;

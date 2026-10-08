@@ -19,8 +19,10 @@ module.exports = {
     const userId = interaction.options.getString('user_id').trim();
     if (!/^\d{17,20}$/.test(userId)) throw new UserError('ID utilisateur invalide : il doit contenir 17 à 20 chiffres.');
     const reason = interaction.options.getString('raison');
+    // Plusieurs appels API (fetch du ban, débannissement, log) : acquittement immédiat.
+    await interaction.deferReply();
     const { user } = await client.services.moderation.unban(interaction.guild, userId, interaction.member, reason);
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [sanctionCard({ type: 'unban', user, userId: user.id, moderator: interaction.user, reason })],
       components: buttonRows(historyButton(user.id)),
     });

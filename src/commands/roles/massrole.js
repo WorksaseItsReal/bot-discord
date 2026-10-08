@@ -5,6 +5,7 @@ const { progressBar } = require('../../utils/embeds');
 const { formatDuration } = require('../../utils/time');
 const { card, field, ICONS, subtext } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+const { confirm } = require('../../utils/confirmation');
 
 const TARGET_LABELS = { all: 'Tous les membres', humans: 'Humains', bots: 'Bots' };
 const BATCH = 5;
@@ -76,7 +77,7 @@ module.exports = {
     .addRoleOption((o) => o.setName('role').setDescription('Rôle cible').setRequired(true))
     .addStringOption((o) => o.setName('cible').setDescription('Qui ?').addChoices({ name: 'tous', value: 'all' }, { name: 'humains', value: 'humans' }, { name: 'bots', value: 'bots' })),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
     const action = interaction.options.getString('action');
     const role = interaction.options.getRole('role');
     const target = interaction.options.getString('cible') || 'all';
@@ -91,6 +92,15 @@ module.exports = {
 
     const guildId = interaction.guild.id;
     if (running.has(guildId)) throw new UserError('Un /massrole est déjà en cours sur ce serveur. Attendez qu\'il se termine.');
+    if (client?.services?.config?.get(guildId)?.moderation?.confirmDangerous) {
+      const ok = await confirm(interaction, {
+        description: `${action === 'add' ? 'Ajouter' : 'Retirer'} le rôle ${role} ${action === 'add' ? 'à' : 'de'} : **${TARGET_LABELS[target] ?? target}** ?`,
+        confirmLabel: action === 'add' ? 'Ajouter' : 'Retirer',
+      });
+      if (!ok) return;
+      // Revérifié : un autre /massrole a pu démarrer pendant la confirmation.
+      if (running.has(guildId)) throw new UserError('Un /massrole est déjà en cours sur ce serveur. Attendez qu\'il se termine.');
+    }
     running.add(guildId);
     try {
       await run(interaction, { action, role, target });
@@ -101,7 +111,8 @@ module.exports = {
 };
 
 async function run(interaction, { action, role, target }) {
-  await interaction.deferReply();
+  // Après une confirmation, l'interaction est déjà acquittée : la progression remplace la demande.
+  if (!interaction.deferred && !interaction.replied) await interaction.deferReply();
   const edit = replyEditor(interaction);
   const startedAt = Date.now();
   const members = await interaction.guild.members.fetch();
@@ -137,5 +148,6 @@ async function run(interaction, { action, role, target }) {
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
-  await edit({ embeds: [progressCard({ ...state(), finished: true })] });
+  // Dernière édition : le travail est fait, un échec d'affichage (message supprimé…) ne doit pas lever.
+  await edit({ embeds: [progressCard({ ...state(), finished: true })] }).catch(() => {});
 }

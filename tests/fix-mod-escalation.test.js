@@ -69,14 +69,15 @@ test('H2 pendingEscalation : plus haut palier atteint et pas encore appliqué', 
   assert.equal(strikes.pendingEscalation('g1', 8, 7), null);
 });
 
-test('H2 appliedEscalationLevel lit les paliers dans l\'historique (ancien format compris)', () => {
+test('H2 appliedEscalationLevel lit les paliers dans la colonne escalation_step (pas dans la raison)', () => {
   const { repo, moderation } = setup();
   assert.equal(moderation.appliedEscalationLevel('g1', UID), 0);
-  repo.create({ guildId: 'g1', userId: UID, moderatorId: 'm', type: 'timeout', reason: 'Escalade automatique (3 strikes)' });
-  repo.create({ guildId: 'g1', userId: UID, moderatorId: 'm', type: 'kick', reason: escalationReason({ strikes: 5 }) });
-  repo.create({ guildId: 'g1', userId: UID, moderatorId: 'm', type: 'warn', reason: 'Escalade automatique (palier de 9 strikes) — non, simple warn' });
-  repo.create({ guildId: 'g1', userId: 'autre', moderatorId: 'm', type: 'ban', reason: escalationReason({ strikes: 7 }) });
-  assert.equal(moderation.appliedEscalationLevel('g1', UID), 9);
+  repo.create({ guildId: 'g1', userId: UID, moderatorId: 'm', type: 'timeout', reason: 'Escalade automatique (3 strikes)', escalationStep: 3 });
+  repo.create({ guildId: 'g1', userId: UID, moderatorId: 'm', type: 'kick', reason: escalationReason({ strikes: 5 }), escalationStep: 5 });
+  // Raison imitée par un modérateur : sans effet (review2 : palier falsifiable).
+  repo.create({ guildId: 'g1', userId: UID, moderatorId: 'm', type: 'warn', reason: 'Escalade automatique (palier de 9 strikes)' });
+  repo.create({ guildId: 'g1', userId: 'autre', moderatorId: 'm', type: 'ban', reason: escalationReason({ strikes: 7 }), escalationStep: 7 });
+  assert.equal(moderation.appliedEscalationLevel('g1', UID), 5);
 });
 
 test('H2 /warn : escalade non appliquée sans la permission de l\'invocateur, puis rattrapée', async () => {
@@ -134,7 +135,7 @@ test('M4 mute() désactive les mutes actifs précédents du membre (et seulement
   assert.equal(active.find((s) => s.user_id === UID).duration_ms, 60_000);
 });
 
-test('ensureMutedRole ne réécrit pas un overwrite déjà en place', async () => {
+test('syncMutedRole ne réécrit pas un overwrite déjà en place (ensureMutedRole : rien si le rôle est déjà configuré)', async () => {
   const env = setup();
   const role = { id: 'muted' };
   env.config.update('g1', { moderation: { mutedRoleId: 'muted' } });
@@ -142,6 +143,7 @@ test('ensureMutedRole ne réécrit pas un overwrite déjà en place', async () =
   const channel = (id, type, denyBits) => ({
     id,
     type,
+    permissionsFor: () => new PermissionsBitField(['ViewChannel', 'ManageRoles']),
     permissionOverwrites: {
       cache: new Map(denyBits == null ? [] : [['muted', { deny: new PermissionsBitField(denyBits) }]]),
       edit: async (_r, perms) => edits.push([id, perms]),
@@ -151,8 +153,11 @@ test('ensureMutedRole ne réécrit pas un overwrite déjà en place', async () =
   const done = channel('a', ChannelType.GuildText, F.SendMessages | F.AddReactions | F.SendMessagesInThreads);
   const partial = channel('b', ChannelType.GuildText, F.SendMessages);
   const fresh = channel('c', ChannelType.GuildVoice, null);
-  const guild = { id: 'g1', roles: { cache: new Map([['muted', role]]) }, channels: { cache: new Map([['a', done], ['b', partial], ['c', fresh]]) } };
-  await env.moderation.ensureMutedRole(guild);
+  const guild = { id: 'g1', members: { me: { id: 'bot' } }, roles: { cache: new Map([['muted', role]]) }, channels: { cache: new Map([['a', done], ['b', partial], ['c', fresh]]) } };
+  // Rôle déjà configuré : aucun parcours des salons à chaque /mute.
+  assert.equal(await env.moderation.ensureMutedRole(guild), role);
+  assert.deepEqual(edits, []);
+  assert.equal(await env.moderation.syncMutedRole(guild, role), 2);
   assert.deepEqual(edits.map(([id]) => id), ['b', 'c']);
   assert.deepEqual(Object.keys(edits[1][1]).sort(), ['AddReactions', 'SendMessages', 'Speak']);
 });

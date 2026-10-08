@@ -548,7 +548,9 @@ test('commandes slash : voir, historique filtré ; remove/clear gardent le refus
   await sanctions.execute(h, w.client);
   assert.match(json(h.calls.reply[0].embeds[0]).footer.text, /Bannissement temporaire/);
   await assert.rejects(sanctions.execute(fake(w, { options: { sub: 'remove', id: ids.tempban } }), w.client), /encore en vigueur/);
-  await assert.rejects(sanctions.execute(fake(w, { options: { sub: 'clear', membre: { id: UID, toString: () => `<@${UID}>` } } }), w.client), /encore en vigueur/);
+  // clear exige « Gérer le serveur » (review2) ; le refus des sanctions en vigueur reste prioritaire ensuite.
+  await assert.rejects(sanctions.execute(fake(w, { perms: ['ModerateMembers'], options: { sub: 'clear', membre: { id: UID, toString: () => `<@${UID}>` } } }), w.client), /Gérer le serveur/);
+  await assert.rejects(sanctions.execute(fake(w, { perms: ['ModerateMembers', 'ManageGuild'], options: { sub: 'clear', membre: { id: UID, toString: () => `<@${UID}>` } } }), w.client), /encore en vigueur/);
 });
 
 test('/user : bouton « Historique de modération » réservé aux modérateurs', async () => {

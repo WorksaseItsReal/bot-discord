@@ -175,6 +175,15 @@ class SchedulerService {
       }
       const guild = this.#resolveGuild(s);
       if (!guild) continue;
+      // findDue() est lu une fois par tick : la sanction a pu changer pendant les appels
+      // réseau précédents (levée, remplacée, prolongée). On relit la ligne avant d'agir.
+      if (!this.#stillDue(s)) continue;
+      // Un ban définitif actif existe (converti pendant le tick, ou données anciennes) :
+      // on ne débannit pas, seule la ligne temporaire est close.
+      if (this.sanctions.listActive?.(s.guild_id, s.user_id)?.some((r) => r.type === 'ban')) {
+        this.sanctions.deactivateActive(s.guild_id, s.user_id, 'tempban', { by: null, reason: 'Remplacé par un bannissement définitif' });
+        continue;
+      }
       const moderation = this.client.services?.moderation;
       // Marqué AVANT l'appel : guildBanRemove ne journalise pas une seconde fois cette levée.
       moderation?.markBotAction?.('unban', guild.id, s.user_id);
@@ -225,6 +234,11 @@ class SchedulerService {
       throw e;
     }
     if (!member?.roles?.cache?.has(roleId)) return this.sanctions.deactivate(s.id);
+    // Relecture après le fetch : levée ou prolongée entre-temps → rien à faire.
+    if (!this.#stillDue(s)) return undefined;
+    // Un AUTRE mute est en vigueur (remute pendant le tick) : l'ancienne ligne est close, le rôle reste.
+    const other = this.sanctions.activeMute?.(s.guild_id, s.user_id);
+    if (other && other.id !== s.id) return this.sanctions.deactivate(s.id);
     try {
       await member.roles.remove(roleId, 'Fin du mute temporaire');
     } catch (e) {
@@ -235,6 +249,12 @@ class SchedulerService {
     this.sanctions.deactivate(s.id);
     logger.info(`Mute temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
     await this.#logExpiry(guild, s, 'unmute', `${member} peut de nouveau écrire et parler : son mute temporaire est terminé.`, member.user);
+  }
+
+  /** true si la sanction (relue en base) est toujours active et arrivée à échéance. */
+  #stillDue(s, now = Date.now()) {
+    const fresh = this.sanctions.get ? this.sanctions.get(s.guild_id, s.id) : s;
+    return Boolean(fresh?.active && fresh.expires_at && fresh.expires_at <= now);
   }
 
   /** Log de modération d'une levée automatique (même carte que les levées manuelles). */

@@ -3,7 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows } = require('../../utils/ui');
 const { serverLockCard } = require('../../services/LockdownService');
-const { assertAdmin } = require('../../services/ModerationService');
+const { assertAdmin, requirePermission } = require('../../services/ModerationService');
 
 /** Carte « Serveur déverrouillé » + bouton inverse « Tout verrouiller ». */
 function render(count, moderator, ownerId) {
@@ -24,6 +24,9 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction, client) {
+    // Comme Discord : modifier les permissions des salons exige « Gérer les salons » et « Gérer les rôles ».
+    requirePermission(interaction, 'ManageChannels');
+    requirePermission(interaction, 'ManageRoles');
     await interaction.deferReply();
     const n = await client.services.lockdown.disable(interaction.guild, interaction.member);
     await interaction.editReply(render(n, interaction.user, interaction.user.id));

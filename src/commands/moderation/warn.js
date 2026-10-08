@@ -18,7 +18,7 @@ const ESCALATION_TONES = { timeout: 'caution', kick: 'caution', ban: 'danger' };
  *
  * Règle d'escalade (voir StrikeService.pendingEscalation) : le plus haut palier
  * atteint est appliqué s'il n'a pas déjà été appliqué à ce membre (d'après son
- * historique de sanctions). L'escalade n'est appliquée que si l'INVOCATEUR a la
+ * historique de sanctions, colonne escalation_step). L'escalade n'est appliquée que si l'INVOCATEUR a la
  * permission correspondante (Expulser / Bannir / Exclure temporairement) : sinon,
  * la carte indique que le palier est atteint et la permission requise, et le
  * palier sera appliqué au prochain warn d'un modérateur qui l'a.
@@ -102,15 +102,15 @@ async function applyEscalation(client, interaction, member, step) {
   try {
     if (step.action === 'mute' || step.action === 'timeout') {
       const ms = parseDuration(step.duration || '1h') || 3_600_000;
-      await moderation.timeout(interaction.guild, member, moderator, reason, ms);
+      await moderation.timeout(interaction.guild, member, moderator, reason, ms, { escalationStep: step.strikes });
       return { ok: true, type: 'timeout', text: `${ICONS.mute} Timeout de **${step.duration || '1h'}** appliqué (palier de ${step.strikes} strikes).` };
     }
     if (step.action === 'kick') {
-      await moderation.kick(interaction.guild, member, moderator, reason);
+      await moderation.kick(interaction.guild, member, moderator, reason, { escalationStep: step.strikes });
       return { ok: true, type: 'kick', text: `${ICONS.kick} Membre **expulsé** (palier de ${step.strikes} strikes).` };
     }
     if (step.action === 'ban') {
-      await moderation.ban(interaction.guild, member.user, moderator, reason, { targetMember: member });
+      await moderation.ban(interaction.guild, member.user, moderator, reason, { targetMember: member, escalationStep: step.strikes });
       return { ok: true, type: 'ban', text: `${ICONS.ban} Membre **banni** (palier de ${step.strikes} strikes).` };
     }
   } catch (err) {

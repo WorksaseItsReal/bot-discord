@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { buttonRows } = require('../../utils/ui');
+const { buttonRows, wide, ICONS } = require('../../utils/ui');
 const { sanctionCard, historyButton, revokeHandler } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
@@ -17,9 +17,19 @@ module.exports = {
     const user = interaction.options.getUser('membre');
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
-    await client.services.moderation.unmute(interaction.guild, member, interaction.member);
-    await interaction.reply({
-      embeds: [sanctionCard({ type: 'unmute', user, moderator: interaction.user })],
+    // Retrait du rôle + levée en base + log : acquittement immédiat.
+    await interaction.deferReply();
+    const res = await client.services.moderation.unmute(interaction.guild, member, interaction.member);
+    await interaction.editReply({
+      embeds: [
+        sanctionCard({
+          type: 'unmute',
+          user,
+          moderator: interaction.user,
+          // Rôle déjà retiré à la main : seule la sanction en base a été levée.
+          fields: res?.dbOnly ? [wide(ICONS.info, 'Note', 'Le rôle Muted avait déjà été retiré : seule la sanction encore active a été levée.')] : [],
+        }),
+      ],
       components: buttonRows(historyButton(user.id)),
     });
   },

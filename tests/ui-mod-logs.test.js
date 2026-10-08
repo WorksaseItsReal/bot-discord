@@ -81,7 +81,8 @@ test('fitList ne coupe jamais une mention', () => {
 
 test('/pseudo : bouton « Annuler » omis si l\'ancien pseudo ne tient pas dans le customId', () => {
   const ok = pseudo.undoButton('123456789012345678', 'Ancien:pseudo');
-  assert.equal(ok.toJSON().custom_id, 'cmd:pseudo:undo:123456789012345678:Ancien%3Apseudo');
+  // base64url : ni « % » ni « : » (refusés par le routeur / séparateur d'arguments).
+  assert.equal(ok.toJSON().custom_id, `cmd:pseudo:undo:123456789012345678:${Buffer.from('Ancien:pseudo').toString('base64url')}`);
   assert.equal(pseudo.undoButton('123456789012345678', '🎉'.repeat(16)), null);
   assert.ok(pseudo.undoButton('123456789012345678', null));
 });

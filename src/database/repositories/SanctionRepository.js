@@ -8,8 +8,8 @@ class SanctionRepository {
   /** @param {import('better-sqlite3').Database} db */
   constructor(db) {
     this.insertStmt = db.prepare(
-      `INSERT INTO sanctions (guild_id, user_id, moderator_id, type, reason, duration_ms, expires_at, active, created_at)
-       VALUES (@guildId, @userId, @moderatorId, @type, @reason, @durationMs, @expiresAt, 1, @createdAt)`,
+      `INSERT INTO sanctions (guild_id, user_id, moderator_id, type, reason, duration_ms, expires_at, active, created_at, escalation_step)
+       VALUES (@guildId, @userId, @moderatorId, @type, @reason, @durationMs, @expiresAt, 1, @createdAt, @escalationStep)`,
     );
     this.byUserStmt = db.prepare(
       'SELECT * FROM sanctions WHERE guild_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT ?',
@@ -31,13 +31,16 @@ class SanctionRepository {
       `UPDATE sanctions SET active = 0, revoked_at = @at, revoked_by = @by, revoke_reason = @reason
        WHERE guild_id = @guildId AND user_id = @userId AND type = @type AND active = 1`,
     );
-    // Sanctions encore « en vigueur » : expiration future (tempban/mute/timeout) ou
-    // mute sans échéance. Les supprimer de l'historique les rendrait orphelines
-    // (le scheduler ne pourrait plus les lever, le mute ne serait plus réappliqué).
+    // Sanctions encore « en vigueur » : expiration future (tempban/mute/timeout), mute
+    // sans échéance ou ban définitif non levé. Les supprimer de l'historique les rendrait
+    // orphelines (le scheduler ne pourrait plus les lever, le mute ne serait plus réappliqué).
     this.enforcedByUserStmt = db.prepare(
       `SELECT * FROM sanctions WHERE guild_id = ? AND user_id = ? AND active = 1
-       AND ((expires_at IS NOT NULL AND expires_at > ?) OR (type = 'mute' AND expires_at IS NULL))
+       AND ((expires_at IS NOT NULL AND expires_at > ?) OR (type IN ('mute', 'ban') AND expires_at IS NULL))
        ORDER BY created_at DESC`,
+    );
+    this.maxEscalationStmt = db.prepare(
+      'SELECT MAX(escalation_step) AS n FROM sanctions WHERE guild_id = ? AND user_id = ? AND escalation_step IS NOT NULL',
     );
     this.byUserFilteredStmt = db.prepare(
       `SELECT * FROM sanctions WHERE guild_id = @guildId AND user_id = @userId AND (@type IS NULL OR type = @type)
@@ -76,7 +79,8 @@ class SanctionRepository {
   }
 
   /**
-   * @param {{guildId:string,userId:string,moderatorId:string,type:string,reason?:string,durationMs?:number|null,expiresAt?:number|null}} data
+   * @param {{guildId:string,userId:string,moderatorId:string,type:string,reason?:string,durationMs?:number|null,expiresAt?:number|null,escalationStep?:number|null}} data
+   *   escalationStep : palier d'escalade (nombre de strikes) appliqué par cette sanction
    * @returns {number} id de la sanction créée
    */
   create(data) {
@@ -89,6 +93,7 @@ class SanctionRepository {
       durationMs: data.durationMs ?? null,
       expiresAt: data.expiresAt ?? null,
       createdAt: Date.now(),
+      escalationStep: Number.isInteger(data.escalationStep) && data.escalationStep > 0 ? data.escalationStep : null,
     });
     return Number(info.lastInsertRowid);
   }
@@ -185,6 +190,11 @@ class SanctionRepository {
     return this.enforcedByUserStmt.all(guildId, userId, now);
   }
 
+  /** Plus haut palier d'escalade appliqué à un membre (colonne `escalation_step`), 0 si aucun. */
+  maxEscalationStep(guildId, userId) {
+    return this.maxEscalationStmt.get(guildId, userId)?.n ?? 0;
+  }
+
   /** Mute actif (sans échéance ou échéance future) d'un membre, le plus récent. */
   activeMute(guildId, userId, now = Date.now()) {
     return this.listEnforced(guildId, userId, now).find((s) => s.type === 'mute') ?? null;
@@ -199,12 +209,12 @@ class SanctionRepository {
 
 /**
  * true si la sanction est encore en vigueur : active avec une expiration future
- * (tempban, mute, timeout) ou mute actif sans échéance. Pur.
+ * (tempban, mute, timeout), mute actif sans échéance ou ban définitif non levé. Pur.
  */
 function isEnforced(s, now = Date.now()) {
   if (!s?.active) return false;
   if (s.expires_at) return s.expires_at > now;
-  return s.type === 'mute';
+  return s.type === 'mute' || s.type === 'ban';
 }
 
 /**
@@ -218,7 +228,7 @@ function isEnforced(s, now = Date.now()) {
 function sanctionState(s, now = Date.now()) {
   if (!s) return 'done';
   if (s.active) {
-    if (isEnforced(s, now) || (s.type === 'ban' && !s.expires_at)) return 'active';
+    if (isEnforced(s, now)) return 'active';
     return s.expires_at ? 'expired' : 'done';
   }
   if (s.revoked_by || s.revoke_reason) return 'revoked';

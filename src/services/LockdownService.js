@@ -249,11 +249,18 @@ function bitToState(allow, deny, flag = 'SendMessages') {
 
 /**
  * Vérifie que le membre a « Gérer les salons » sur CE salon (overwrites compris).
+ * `overwrites` : l'action modifie les permissions du salon (lock, hide…) → comme
+ * Discord, « Gérer les permissions » (bit ManageRoles) est aussi exigée sur ce salon.
  * @param {import('discord.js').GuildMember} member
+ * @param {{ overwrites?: boolean }} [opts]
  */
-function assertCanManageChannel(member, channel) {
-  if (!channel?.permissionsFor?.(member)?.has(PermissionFlagsBits.ManageChannels)) {
+function assertCanManageChannel(member, channel, { overwrites = false } = {}) {
+  const perms = channel?.permissionsFor?.(member);
+  if (!perms?.has(PermissionFlagsBits.ManageChannels)) {
     throw new UserError(`Il vous faut la permission **Gérer les salons** dans ${channel ?? 'ce salon'}.`);
+  }
+  if (overwrites && !perms.has(PermissionFlagsBits.ManageRoles)) {
+    throw new UserError(`Il vous faut la permission **Gérer les permissions** dans ${channel ?? 'ce salon'}.`);
   }
 }
 
@@ -262,10 +269,10 @@ function assertCanManageChannel(member, channel) {
  * même vérification que les boutons : « Gérer les salons » sur CE salon.
  * @param {import('discord.js').ChatInputCommandInteraction} interaction
  */
-function channelForCommand(interaction, option = 'salon') {
+function channelForCommand(interaction, option = 'salon', opts = {}) {
   const picked = interaction.options.getChannel(option);
   const channel = picked ? interaction.guild.channels.cache.get(picked.id) ?? picked : interaction.channel;
-  assertCanManageChannel(interaction.member, channel);
+  assertCanManageChannel(interaction.member, channel, opts);
   return channel;
 }
 
@@ -274,12 +281,12 @@ function channelForCommand(interaction, option = 'salon') {
  * exister sur ce serveur et le cliqueur doit pouvoir le gérer (« Gérer les salons » sur CE salon).
  * @param {import('discord.js').ButtonInteraction} interaction
  */
-async function channelForButton(interaction, rawChannelId) {
+async function channelForButton(interaction, rawChannelId, opts = {}) {
   const channelId = snowflake(rawChannelId, 'salon');
   const channel = interaction.guild.channels.cache.get(channelId)
     ?? (await interaction.client.channels.fetch(channelId).catch(() => null));
   if (!channel || channel.guildId !== interaction.guildId) throw new UserError('Ce salon n\'existe plus.');
-  assertCanManageChannel(interaction.member, channel);
+  assertCanManageChannel(interaction.member, channel, opts);
   return channel;
 }
 

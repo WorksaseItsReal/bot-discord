@@ -199,11 +199,11 @@ test('/bienvenue rôles automatiques : permissions sensibles et rôles au niveau
   const { client, config, guild } = welcomeWorld();
   const i = adminI(guild, { values: [ROLE.low, ROLE.mod, ROLE.equal, ROLE.events] });
   await bienvenue.buttons.roles(i, client, ['humans']);
-  assert.deepEqual(config.get(GUILD).welcome.autoRoles.humans, [ROLE.low, ROLE.events]);
+  // « Gérer les événements » fait désormais partie des permissions interdites (menus de rôles, accueil).
+  assert.deepEqual(config.get(GUILD).welcome.autoRoles.humans, [ROLE.low]);
   const desc = json(i.payload.embeds[0]).description;
   assert.match(desc, /modération ou d'administration/);
   assert.match(desc, /votre rôle le plus haut/);
-  assert.match(desc, /Attention/, 'permission sensible mineure (événements) : simple avertissement');
 
   // Rôles des bots : mêmes contrôles.
   await bienvenue.buttons.roles(adminI(guild, { values: [ROLE.mod, ROLE.low] }), client, ['bots']);

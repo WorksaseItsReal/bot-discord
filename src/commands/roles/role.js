@@ -5,6 +5,7 @@ const { card, field, ICONS, code, userLine, subtext, actionButton, deleteButton,
 const { discordTimestamp } = require('../../utils/time');
 const { paginate } = require('../../utils/pagination');
 const { UserError } = require('../../core/errors');
+const { confirm } = require('../../utils/confirmation');
 
 const HEX_COLOR = /^#?[0-9a-f]{6}$/i;
 const PER_PAGE = 15;
@@ -110,7 +111,7 @@ module.exports = {
         .addRoleOption((o) => o.setName('role').setDescription('Rôle').setRequired(true)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les rôles du serveur.')),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
     const guild = interaction.guild;
     const ownerId = interaction.user.id;
@@ -180,8 +181,17 @@ module.exports = {
       const members = role.members?.size ?? 0;
       const name = role.name;
       const color = hex(role);
+      if (client?.services?.config?.get(guild.id)?.moderation?.confirmDangerous) {
+        const ok = await confirm(interaction, {
+          description: `Supprimer définitivement le rôle ${role} (**${members}** membre${members > 1 ? 's' : ''}) ?`,
+          confirmLabel: 'Supprimer',
+        });
+        if (!ok) return undefined;
+      }
       await role.delete(`Supprimé par ${interaction.user.tag}`);
-      return interaction.reply({
+      // Après confirmation, la carte remplace la demande (éphémère).
+      const respond = (payload) => (interaction.replied || interaction.deferred ? interaction.editReply(payload) : interaction.reply(payload));
+      return respond({
         embeds: [
           card({
             tone: 'danger',

@@ -34,7 +34,7 @@ module.exports = {
       )),
 
   async execute(interaction, client) {
-    const channel = channelForCommand(interaction);
+    const channel = channelForCommand(interaction, 'salon', { overwrites: true });
     await unhide(client, channel, interaction.user);
     await interaction.reply(render(channel, interaction.user, interaction.user.id));
   },
@@ -43,7 +43,7 @@ module.exports = {
     /** cmd:unhide:run:<channelId>:<ownerId> — « Afficher » (inverse de /hide). */
     async run(interaction, client, [channelId, ownerId]) {
       requirePermission(interaction, 'ManageChannels');
-      const channel = await channelForButton(interaction, channelId);
+      const channel = await channelForButton(interaction, channelId, { overwrites: true });
       await unhide(client, channel, interaction.user);
       await interaction.update(render(channel, interaction.user, ownerId));
     },

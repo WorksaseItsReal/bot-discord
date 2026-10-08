@@ -24,6 +24,12 @@ const FORBIDDEN_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.ManageNicknames,
   PermissionFlagsBits.ManageGuildExpressions,
   PermissionFlagsBits.ViewAuditLog,
+  // Modération vocale, fils et événements : pas plus auto-attribuables que le reste.
+  PermissionFlagsBits.MuteMembers,
+  PermissionFlagsBits.DeafenMembers,
+  PermissionFlagsBits.MoveMembers,
+  PermissionFlagsBits.ManageThreads,
+  PermissionFlagsBits.ManageEvents,
 ]);
 
 /** Le rôle confère-t-il une permission de modération / d'administration ? */

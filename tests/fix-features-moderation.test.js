@@ -24,7 +24,8 @@ function sanctionsSetup() {
   const client = { repositories: { sanctions: repo }, services: { strikes: { reset: (...a) => resets.push(a), getCount: () => 0 } } };
   const interaction = (sub, { id, user } = {}) => ({
     guild: { id: 'g1' },
-    memberPermissions: { has: (flag) => flag === PermissionFlagsBits.ModerateMembers },
+    // « Gérer le serveur » : exigée par /sanctions clear (et remove d'une sanction d'un autre modérateur).
+    memberPermissions: { has: (flag) => flag === PermissionFlagsBits.ModerateMembers || flag === PermissionFlagsBits.ManageGuild },
     options: { getSubcommand: () => sub, getInteger: () => id, getUser: () => user },
     replies: [],
     async reply(p) { this.replies.push(p); },
