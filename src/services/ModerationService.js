@@ -8,7 +8,6 @@ const { card, field, wide, ICONS, userLine, subtext, buttonRows, deleteButton, a
 const { permissionLabel } = require('../utils/permissionNames');
 const { snowflake, SNOWFLAKE } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
-const { ESCALATION_PREFIX, parseEscalationLevel } = require('./StrikeService');
 const { sanctionState } = require('../database/repositories/SanctionRepository');
 
 /** Durée pendant laquelle une action du bot est reconnue dans les événements Discord (anti-doublon de logs). */
@@ -275,7 +274,10 @@ function settleComponents(message, customId, label, emoji = ICONS.success) {
  * @param {{ label: string, embed: import('discord.js').EmbedBuilder, buttons?: import('discord.js').ButtonBuilder[] }} opts
  */
 async function settleAndAnnounce(interaction, { label, embed, buttons = [] }) {
-  await interaction.update({ components: settleComponents(interaction.message, interaction.customId, label) });
+  const components = settleComponents(interaction.message, interaction.customId, label);
+  // Interaction déjà acquittée (deferUpdate avant les appels API) : on édite le message.
+  if (interaction.deferred || interaction.replied) await interaction.editReply({ components });
+  else await interaction.update({ components });
   const ephemeral = Boolean(interaction.message?.flags?.has?.(MessageFlags.Ephemeral));
   await interaction.followUp({
     embeds: [embed],
@@ -297,6 +299,8 @@ function revokeHandler({ permission, type, done, run }) {
   return async function revoke(interaction, client, [rawUserId]) {
     requirePermission(interaction, permission);
     const userId = snowflake(rawUserId, 'membre');
+    // Acquitte le clic AVANT les appels API (fetch, levée, log) : le délai de 3 s ne peut plus expirer.
+    await interaction.deferUpdate();
     const user = await run(interaction, client, userId);
     const id = user?.id ?? userId;
     await settleAndAnnounce(interaction, {
@@ -318,11 +322,13 @@ class ModerationService {
    * @param {import('../database/repositories/SanctionRepository').SanctionRepository} deps.sanctions
    * @param {import('./ConfigService').ConfigService} deps.config
    * @param {import('./LoggingService').LoggingService} deps.logging
+   * @param {import('./AntiRaidService').AntiRaidService} [deps.antiraid] détection des bans en masse faits via le bot
    */
-  constructor({ sanctions, config, logging }) {
+  constructor({ sanctions, config, logging, antiraid = null }) {
     this.sanctions = sanctions;
     this.config = config;
     this.logging = logging;
+    this.antiraid = antiraid;
     /**
      * Actions (ban/unban) lancées par le bot, marquées AVANT l'appel API : les
      * événements guildBanAdd/guildBanRemove les reconnaissent et ne les journalisent
@@ -367,27 +373,49 @@ class ModerationService {
     }
   }
 
-  /** Récupère (ou crée) le rôle "Muted" et applique les refus dans les salons. */
+  /**
+   * Récupère (ou crée) le rôle "Muted". Les refus ne sont posés dans les salons
+   * qu'à la création du rôle (ou quand un rôle « Muted » existant est adopté pour
+   * la première fois) : pas de parcours de tous les salons à chaque /mute.
+   */
   async ensureMutedRole(guild) {
     const cfg = this.config.get(guild.id);
-    let roleId = cfg.moderation.mutedRoleId;
+    const roleId = cfg.moderation.mutedRoleId;
     let role = roleId ? guild.roles.cache.get(roleId) : guild.roles.cache.find((r) => r.name === 'Muted');
+    let setup = false;
     if (!role) {
       role = await guild.roles.create({ name: 'Muted', colors: { primaryColor: 0x607d8b }, reason: 'Rôle de mute Inspecteur Gadget' });
+      setup = true;
     }
-    if (cfg.moderation.mutedRoleId !== role.id) this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
-    // Applique les refus (best-effort) uniquement là où ils manquent : un salon dont
-    // l'overwrite refuse déjà tout (ou synchronisé avec une catégorie qui le fait) est ignoré.
+    if (cfg.moderation.mutedRoleId !== role.id) {
+      this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
+      setup = true;
+    }
+    if (setup) await this.syncMutedRole(guild, role);
+    return role;
+  }
+
+  /**
+   * Pose les refus du rôle Muted (best-effort) dans les salons où ils manquent et où
+   * le bot peut le faire (« Voir le salon » + « Gérer les permissions » sur CE salon).
+   * @returns {Promise<number>} salons modifiés
+   */
+  async syncMutedRole(guild, role) {
+    const me = guild.members?.me;
+    let edited = 0;
     for (const channel of guild.channels.cache.values()) {
       const denies = MUTE_DENIES[channel.type];
       if (!denies || !channel.permissionOverwrites) continue;
+      const perms = me ? channel.permissionsFor?.(me) : null;
+      if (!perms?.has?.(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.ManageRoles)) continue;
       const ow = channel.permissionOverwrites.cache.get(role.id);
       if (ow && denies.every((p) => ow.deny?.has?.(PermissionFlagsBits[p]))) continue;
-      await channel.permissionOverwrites
+      const ok = await channel.permissionOverwrites
         .edit(role, Object.fromEntries(denies.map((p) => [p, false])), { reason: 'Configuration mute' })
-        .catch(() => {});
+        .then(() => true, () => false);
+      if (ok) edited += 1;
     }
-    return role;
+    return edited;
   }
 
   /** Rôle de mute existant (sans le créer). */
@@ -407,10 +435,20 @@ class ModerationService {
     return this.record(guild, targetMember.user, moderator, { type: 'mute', reason, durationMs });
   }
 
+  /**
+   * Retire le mute. Rôle déjà retiré à la main mais mute encore actif en base :
+   * seule la sanction est levée (sinon il serait réappliqué au retour du membre).
+   * @returns {Promise<{ ok: true, dbOnly?: boolean }>}
+   */
   async unmute(guild, targetMember, moderator, reason) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'retirer le mute de' });
     const role = this.mutedRole(guild);
-    if (!role || !targetMember.roles.cache.has(role.id)) throw new UserError('Ce membre n\'est pas mute.');
+    if (!role || !targetMember.roles.cache.has(role.id)) {
+      if (!this.sanctions.activeMute?.(guild.id, targetMember.id)) throw new UserError('Ce membre n\'est pas mute.');
+      this.#deactivateActive(guild.id, targetMember.id, 'mute', { by: moderator.id, reason });
+      await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
+      return { ok: true, dbOnly: true };
+    }
     await targetMember.roles.remove(role, reason || undefined);
     this.#deactivateActive(guild.id, targetMember.id, 'mute', { by: moderator.id, reason });
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
@@ -424,7 +462,7 @@ class ModerationService {
    * en base et le log : en cas d'échec, rien n'est enregistré et le DM est retiré.
    * @param {() => Promise<unknown>} [action]
    */
-  async record(guild, targetUser, moderator, { type, reason, durationMs }, action) {
+  async record(guild, targetUser, moderator, { type, reason, durationMs, escalationStep = null }, action) {
     const cfg = this.config.get(guild.id);
     const dm = cfg.moderation?.dmOnSanction
       ? await this.#notifyUser(guild, targetUser, { type, reason, durationMs }).catch(() => null)
@@ -447,6 +485,7 @@ class ModerationService {
       reason,
       durationMs: durationMs ?? null,
       expiresAt,
+      escalationStep,
     });
 
     await this.logging.send(guild.id, 'moderation', sanctionCard({ id, type, user: targetUser, moderator, reason, durationMs, expiresAt }), undefined, {
@@ -462,7 +501,8 @@ class ModerationService {
     return this.record(guild, targetMember.user, moderator, { type: 'warn', reason });
   }
 
-  async timeout(guild, targetMember, moderator, reason, durationMs) {
+  /** @param {{ escalationStep?: number|null }} [opts] palier d'escalade appliqué (/warn) */
+  async timeout(guild, targetMember, moderator, reason, durationMs, { escalationStep = null } = {}) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'timeout' });
     if (!durationMs) throw new UserError('Une durée valide est requise pour un timeout.');
     if (durationMs > 28 * 24 * 60 * 60 * 1000) throw new UserError('La durée maximale d\'un timeout est de 28 jours.');
@@ -470,7 +510,9 @@ class ModerationService {
       throw new UserError('Je ne peux pas timeout ce membre (administrateur, rôle trop élevé ou permission « Exclure temporairement » manquante).');
     }
     await targetMember.timeout(durationMs, reason || undefined);
-    return this.record(guild, targetMember.user, moderator, { type: 'timeout', reason, durationMs });
+    // Le nouveau timeout remplace l'ancien encore actif (même règle que le mute).
+    this.#deactivateActive(guild.id, targetMember.id, 'timeout', { by: moderator.id, reason: 'Remplacé par un nouveau timeout' });
+    return this.record(guild, targetMember.user, moderator, { type: 'timeout', reason, durationMs, escalationStep });
   }
 
   async removeTimeout(guild, targetMember, moderator, reason) {
@@ -484,15 +526,16 @@ class ModerationService {
     return { ok: true };
   }
 
-  async kick(guild, targetMember, moderator, reason) {
+  /** @param {{ escalationStep?: number|null }} [opts] palier d'escalade appliqué (/warn) */
+  async kick(guild, targetMember, moderator, reason, { escalationStep = null } = {}) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'expulser' });
     if (!targetMember.kickable) {
       throw new UserError('Je ne peux pas expulser ce membre (rôle trop élevé ou permission « Expulser » manquante).');
     }
-    return this.record(guild, targetMember.user, moderator, { type: 'kick', reason }, () => targetMember.kick(reason || undefined));
+    return this.record(guild, targetMember.user, moderator, { type: 'kick', reason, escalationStep }, () => targetMember.kick(reason || undefined));
   }
 
-  async ban(guild, targetUser, moderator, reason, { durationMs, deleteMessageSeconds = 0, targetMember } = {}) {
+  async ban(guild, targetUser, moderator, reason, { durationMs, deleteMessageSeconds = 0, targetMember, escalationStep = null } = {}) {
     if (targetMember) {
       assertCanModerate(moderator, targetMember, guild.members.me, { action: 'bannir' });
       if (!targetMember.bannable) {
@@ -500,14 +543,39 @@ class ModerationService {
       }
     }
     const type = durationMs ? 'tempban' : 'ban';
-    return this.record(guild, targetUser, moderator, { type, reason, durationMs }, async () => {
+    if (durationMs && SNOWFLAKE.test(String(targetUser?.id ?? ''))) {
+      // Déjà banni (souvent définitivement) : un tempban le débannirait à son échéance.
+      const existing = await guild.bans?.fetch?.(targetUser.id).catch(() => null);
+      if (existing?.user?.id === targetUser.id) {
+        throw new UserError('Cet utilisateur est **déjà banni** : un bannissement temporaire le débannirait à son échéance. Levez d\'abord le bannissement actuel avec `/unban` si vous voulez le remplacer.');
+      }
+    }
+    const joinedAt = targetMember?.joinedTimestamp ?? null;
+    const result = await this.record(guild, targetUser, moderator, { type, reason, durationMs, escalationStep }, async () => {
       await this.#asBot('ban', guild.id, targetUser.id, () =>
         guild.bans.create(targetUser.id, { reason: reason || undefined, deleteMessageSeconds }),
       );
       // Un nouveau ban (permanent ou temporaire) remplace tout ban temporaire en cours :
       // le scheduler ne doit pas débannir l'utilisateur à l'expiration de l'ancien.
       this.#deactivateActive(guild.id, targetUser.id, 'tempban', { by: moderator.id, reason: 'Remplacé par un nouveau bannissement' });
+      // Tempban d'un utilisateur que Discord ne voyait pas banni : une ligne « ban » encore
+      // active est périmée (débanni hors du bot pendant une absence) et bloquerait la levée.
+      if (type === 'tempban') this.#deactivateActive(guild.id, targetUser.id, 'ban', { by: null, reason: 'Débanni hors du bot' });
     });
+    // Le ban porte la signature du bot dans l'audit log (ignorée par l'AntiRaid) :
+    // on signale le MODÉRATEUR à la détection des bannissements en masse.
+    await this.#reportBan(guild, moderator, targetUser.id, joinedAt);
+    return result;
+  }
+
+  /** Signale un ban fait via le bot à l'AntiRaid (best-effort, jamais bloquant). */
+  async #reportBan(guild, moderator, targetId, targetJoinedAt) {
+    if (!this.antiraid?.handleDestructive || !moderator?.id) return;
+    try {
+      await this.antiraid.handleDestructive(guild, moderator.id, 'ban', { targetId, targetJoinedAt });
+    } catch {
+      // La détection ne doit jamais faire échouer la sanction déjà appliquée.
+    }
   }
 
   /** Désactive (lève) les sanctions actives d'un type donné pour un membre, en gardant la trace. */
@@ -515,11 +583,23 @@ class ModerationService {
     this.sanctions.deactivateActive(guildId, userId, type, revoke);
   }
 
-  /** Plus haut palier d'escalade déjà appliqué à ce membre (0 si aucun), d'après l'historique. */
+  /**
+   * Plus haut palier d'escalade déjà appliqué à ce membre (0 si aucun), d'après la
+   * colonne dédiée `escalation_step` (jamais d'après le texte libre des raisons,
+   * qu'un modérateur pourrait imiter avec /warn).
+   */
   appliedEscalationLevel(guildId, userId) {
-    return this.sanctions
-      .reasonsStartingWith(guildId, userId, ESCALATION_PREFIX)
-      .reduce((max, r) => Math.max(max, parseEscalationLevel(r)), 0);
+    return this.sanctions.maxEscalationStep(guildId, userId);
+  }
+
+  /**
+   * Sanction levée HORS du bot (rôle Muted retiré, timeout retiré par un tiers) :
+   * la ligne active est désactivée pour ne pas être réappliquée ni levée plus tard.
+   * @param {'mute'|'timeout'} type
+   * @returns {number} lignes désactivées
+   */
+  liftedOutside(guildId, userId, type, executorId = null) {
+    return this.sanctions.deactivateActive(guildId, userId, type, { by: executorId, reason: 'Levé hors du bot' });
   }
 
   /**

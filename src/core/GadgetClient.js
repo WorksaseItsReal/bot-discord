@@ -103,7 +103,10 @@ class GadgetClient extends Client {
 
     const configService = new ConfigService(this.repositories.guildConfig);
     const logging = new LoggingService(this, configService);
-    const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging });
+    // L'AntiRaid est injecté dans la modération : les bans faits via le bot alimentent
+    // la détection des bannissements en masse (l'audit log les attribue au bot).
+    const antiraid = new AntiRaidService({ client: this, config: configService, logging });
+    const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging, antiraid });
     const strikes = new StrikeService(this.repositories.strikes, configService);
     this.services = {
       config: configService,
@@ -112,7 +115,7 @@ class GadgetClient extends Client {
       strikes,
       scheduler: new SchedulerService({ client: this, sanctions: this.repositories.sanctions, reminders: this.repositories.reminders }),
       automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents }),
-      antiraid: new AntiRaidService({ client: this, config: configService, logging }),
+      antiraid,
       lockdown: new LockdownService({ locks: this.repositories.locks, logging }),
       tickets: new TicketService({ tickets: this.repositories.tickets, config: configService, logging }),
       giveaways: new GiveawayService({ client: this, giveaways: this.repositories.giveaways }),

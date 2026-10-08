@@ -16,11 +16,38 @@ function assertCanRename(guild, actor, target) {
 }
 
 /**
+ * Ancien pseudo encodé pour le customId : base64url (A-Z a-z 0-9 - _), sans « % »
+ * ni « / » que le routeur refuse (isSafeArg), sans « : » séparateur d'arguments. Pur.
+ */
+function encodeNick(nick) {
+  return Buffer.from(nick ?? '', 'utf8').toString('base64url');
+}
+
+/**
+ * Décodage tolérant : base64url (format actuel), sinon ancien format
+ * encodeURIComponent (boutons publiés avant le changement), sinon null. Pur.
+ * @returns {string|null} pseudo, '' pour « aucun », null si illisible
+ */
+function decodeNick(raw = '') {
+  if (raw === '') return '';
+  if (/^[A-Za-z0-9_-]+$/.test(raw)) {
+    const text = Buffer.from(raw, 'base64url').toString('utf8');
+    // Ré-encodage identique et aucun caractère de contrôle : c'était bien un pseudo encodé.
+    if (encodeNick(text) === raw && !/[\p{Cc}\uFFFD]/u.test(text)) return text;
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Bouton « Annuler » : restaure l'ancien pseudo, encodé dans le customId.
  * Omis si l'ancien pseudo ne tient pas dans la limite de 100 caractères.
  */
 function undoButton(targetId, previous) {
-  const encoded = encodeURIComponent(previous ?? '');
+  const encoded = encodeNick(previous);
   if (`cmd:pseudo:undo:${targetId}:${encoded}`.length > 100) return null;
   return actionButton({ command: 'pseudo', action: 'undo', args: [targetId, encoded], label: 'Annuler', emoji: '↩️' });
 }
@@ -51,6 +78,8 @@ function render(target, moderator, before, after, { restored = false } = {}) {
 module.exports = {
   category: 'moderation',
   undoButton,
+  encodeNick,
+  decodeNick,
   botPermissions: [PermissionFlagsBits.ManageNicknames],
   data: new SlashCommandBuilder()
     .setName('pseudo')
@@ -76,12 +105,9 @@ module.exports = {
       const target = await interaction.guild.members.fetch(snowflake(targetId, 'membre')).catch(() => null);
       if (!target) throw new UserError('Ce membre n\'est plus sur le serveur.');
       assertCanRename(interaction.guild, interaction.member, target);
-      let previous;
-      try {
-        previous = decodeURIComponent(encoded) || null;
-      } catch {
-        throw new UserError('Impossible de retrouver l\'ancien pseudo.');
-      }
+      const decoded = decodeNick(encoded);
+      if (decoded == null) throw new UserError('Impossible de retrouver l\'ancien pseudo.');
+      const previous = decoded || null;
       const current = target.nickname;
       await target.setNickname(previous, `Pseudo restauré par ${interaction.user.tag}`);
       await interaction.update(render(target, interaction.user, current, previous, { restored: true }));

@@ -340,6 +340,28 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 10,
+    name: 'sanctions_escalation_step',
+    up: `
+      -- Palier d'escalade (nombre de strikes) appliqué par une sanction automatique de /warn.
+      -- Remplace la lecture du texte de la raison, qu'un modérateur pouvait imiter.
+      ALTER TABLE sanctions ADD COLUMN escalation_step INTEGER;
+
+      -- Reprise de l'historique : seules les sanctions qu'une escalade peut produire
+      -- (timeout/mute, kick, ban) sont reprises, jamais un avertissement dont la raison
+      -- imiterait le format « Escalade automatique (palier de N strikes) ».
+      UPDATE sanctions
+         SET escalation_step = CAST(
+               CASE WHEN substr(reason, 23) LIKE 'palier de %' THEN substr(reason, 33) ELSE substr(reason, 23) END
+             AS INTEGER)
+       WHERE type IN ('timeout', 'mute', 'kick', 'ban')
+         AND reason LIKE 'Escalade automatique (%'
+         AND (substr(reason, 23) GLOB '[0-9]* strikes)*' OR substr(reason, 23) GLOB 'palier de [0-9]* strikes)*');
+      UPDATE sanctions SET escalation_step = NULL WHERE escalation_step IS NOT NULL AND escalation_step <= 0;
+      CREATE INDEX IF NOT EXISTS idx_sanctions_escalation ON sanctions (guild_id, user_id, escalation_step);
+    `,
+  },
 ];
 
 module.exports = { migrations };

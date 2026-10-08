@@ -15,6 +15,7 @@ const { card, field, wide, ICONS, userLine, subtext, code, actionButton, labelBu
 const { TYPE_LABELS, SANCTIONS, LIFTS, MAX_REASON, normalizeReason, sanctionIcon, userFromId, requirePermission } = require('../../services/ModerationService');
 const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
+const { confirm } = require('../../utils/confirmation');
 const { isEnforced, sanctionState } = require('../../database/repositories/SanctionRepository');
 
 /**
@@ -26,7 +27,7 @@ const { isEnforced, sanctionState } = require('../../database/repositories/Sanct
  */
 
 /** Commande qui lève chaque type de sanction encore en vigueur. */
-const LIFT_COMMANDS = { tempban: '/unban', mute: '/unmute', timeout: '/untimeout' };
+const LIFT_COMMANDS = { tempban: '/unban', ban: '/unban', mute: '/unmute', timeout: '/untimeout' };
 
 /** Types de sanction filtrables dans l'historique. */
 const SANCTION_TYPES = ['warn', 'mute', 'timeout', 'kick', 'tempban', 'ban'];
@@ -59,7 +60,8 @@ function enforcedRefusal(sanctions) {
   const lines = sanctions.map((s) => {
     const label = TYPE_LABELS[s.type] ?? s.type;
     const until = s.expires_at ? ` jusqu'au ${discordTimestamp(s.expires_at, 'f')}` : '';
-    return `• ${code(`#${s.id}`)} **${label}**${until} → ${LIFT_COMMANDS[s.type] ?? 'levez-la'} d'abord`;
+    const lift = LIFT_COMMANDS[s.type] ? `levez-la d'abord avec ${LIFT_COMMANDS[s.type]}` : 'levez-la d\'abord';
+    return `• ${code(`#${s.id}`)} **${label}**${until} → ${lift}`;
   });
   return `Impossible de supprimer une sanction **encore en vigueur** : elle ne pourrait plus être levée automatiquement.\n${lines.join('\n')}`;
 }
@@ -115,12 +117,12 @@ function parseFilter(raw) {
 
 const guard = (interaction) => requirePermission(interaction, 'ModerateMembers');
 
-/** Modifier la raison : l'auteur de la sanction ou « Gérer le serveur ». */
-function assertCanEdit(interaction, sanction) {
+/** Modifier la raison / supprimer une sanction : l'auteur de la sanction ou « Gérer le serveur ». */
+function assertCanEdit(interaction, sanction, what = 'modifier sa raison') {
   guard(interaction);
   if (sanction.moderator_id === interaction.user?.id) return;
   if (interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return;
-  throw new UserError(`Seul l'auteur de la sanction (<@${sanction.moderator_id}>) ou un membre avec **Gérer le serveur** peut modifier sa raison.`);
+  throw new UserError(`Seul l'auteur de la sanction (<@${sanction.moderator_id}>) ou un membre avec **Gérer le serveur** peut ${what}.`);
 }
 
 function getSanction(client, guildId, id) {
@@ -501,9 +503,30 @@ module.exports = {
       const id = interaction.options.getInteger('id');
       const sanction = repo.get(guildId, id);
       if (!sanction) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
+      // Effacer une trace de modération : l'auteur de la sanction ou « Gérer le serveur ».
+      assertCanEdit(interaction, sanction, 'la supprimer');
       const refusal = isEnforced(sanction) ? enforcedRefusal([sanction]) : null;
       if (refusal) throw new UserError(refusal);
       if (!repo.delete(guildId, id)) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
+      const fields = [
+        field(ICONS.user, 'Membre', `<@${sanction.user_id}>`),
+        field(sanctionIcon(sanction.type), 'Type', TYPE_LABELS[sanction.type] ?? sanction.type),
+        field(ICONS.date, 'Date', discordTimestamp(sanction.created_at, 'd')),
+      ];
+      await client.services.logging?.send?.(guildId, 'moderation', card({
+        tone: 'warning',
+        section: 'moderation',
+        icon: ICONS.delete,
+        title: 'Sanction supprimée',
+        description: `La sanction ${code(`#${id}`)} a été retirée de l'historique.`,
+        fields: [
+          ...fields,
+          field(ICONS.moderator, 'Supprimée par', `${interaction.user}`),
+          field(ICONS.moderator, 'Auteur de la sanction', `<@${sanction.moderator_id}>`),
+          wide(ICONS.reason, 'Raison d\'origine', sanction.reason ? truncate(sanction.reason, 1024) : '*Aucune raison fournie*'),
+        ],
+        footer: `Sanction #${id}`,
+      }), undefined, { event: 'sanction' });
       return interaction.reply({
         embeds: [
           card({
@@ -512,11 +535,7 @@ module.exports = {
             icon: ICONS.delete,
             title: 'Sanction supprimée',
             description: `La sanction ${code(`#${id}`)} a été retirée de l'historique.`,
-            fields: [
-              field(ICONS.user, 'Membre', `<@${sanction.user_id}>`),
-              field(sanctionIcon(sanction.type), 'Type', TYPE_LABELS[sanction.type] ?? sanction.type),
-              field(ICONS.date, 'Date', discordTimestamp(sanction.created_at, 'd')),
-            ],
+            fields,
             footer: 'Les strikes ne sont pas modifiés : /sanctions clear pour les remettre à zéro.',
           }),
         ],
@@ -525,12 +544,39 @@ module.exports = {
     }
 
     if (sub === 'clear') {
+      // Effacer tout un casier : réservé à « Gérer le serveur ».
+      requirePermission(interaction, 'ManageGuild');
       const user = interaction.options.getUser('membre');
-      const refusal = enforcedRefusal(repo.listEnforced(guildId, user.id));
-      if (refusal) throw new UserError(refusal);
+      const refuseIfEnforced = () => {
+        const refusal = enforcedRefusal(repo.listEnforced(guildId, user.id));
+        if (refusal) throw new UserError(refusal);
+      };
+      refuseIfEnforced();
+      if (client.services.config?.get(guildId)?.moderation?.confirmDangerous) {
+        const total = repo.count(guildId, user.id);
+        const ok = await confirm(interaction, {
+          description: `Effacer définitivement le casier de ${user} (**${total}** sanction${total > 1 ? 's' : ''}) et remettre ses strikes à zéro ?`,
+          confirmLabel: 'Effacer',
+        });
+        if (!ok) return undefined;
+        refuseIfEnforced(); // une sanction a pu être posée pendant la confirmation
+      }
       const n = repo.clearUser(guildId, user.id);
       client.services.strikes.reset(guildId, user.id);
-      return interaction.reply({
+      await client.services.logging?.send?.(guildId, 'moderation', card({
+        tone: 'warning',
+        section: 'moderation',
+        icon: ICONS.delete,
+        title: 'Casier effacé',
+        description: `Le casier de ${user} a été effacé.`,
+        thumbnail: user.displayAvatarURL?.(),
+        fields: [
+          field(ICONS.user, 'Membre', userLine(user)),
+          field(ICONS.moderator, 'Par', `${interaction.user}`),
+          field(ICONS.count, 'Sanctions effacées', `**${n}**`),
+        ],
+      }), undefined, { event: 'sanction' });
+      const payload = {
         embeds: [
           card({
             tone: 'success',
@@ -546,8 +592,10 @@ module.exports = {
             footer: 'Les notes de modération sont conservées (/sanctions notes).',
           }),
         ],
-        ephemeral: true,
-      });
+      };
+      // Après confirmation, la carte remplace la demande (éphémère).
+      if (interaction.replied || interaction.deferred) return interaction.editReply(payload);
+      return interaction.reply({ ...payload, ephemeral: true });
     }
     throw new UserError('Sous-commande inconnue.');
   },

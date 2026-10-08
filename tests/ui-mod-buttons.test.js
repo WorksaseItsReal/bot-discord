@@ -87,7 +87,7 @@ test('Retirer le timeout / Démuter : permission revérifiée puis état du memb
 
 test('Déverrouiller / Verrouiller : « Gérer les salons » exigée, rendu inverse avec 🗑️', async () => {
   let locked = null;
-  const channel = { id: CID, guildId: 'g1', toString: () => `<#${CID}>`, permissionsFor: () => new PermissionsBitField(['ManageChannels']) };
+  const channel = { id: CID, guildId: 'g1', toString: () => `<#${CID}>`, permissionsFor: () => new PermissionsBitField(['ManageChannels', 'ManageRoles']) };
   const client = { services: { lockdown: { lockChannel: async (c) => { locked = c; } } } };
   const guild = { channels: { cache: new Map([[CID, channel]]) } };
   await assert.rejects(lock.buttons.run(fakeButton({ client, guild }), client, [CID, UID]), { name: 'UserError' });

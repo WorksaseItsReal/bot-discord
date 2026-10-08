@@ -20,8 +20,10 @@ module.exports = {
     if (!member) throw new UserError('Ce membre n\'est pas sur le serveur.');
     if (!member.isCommunicationDisabled()) throw new UserError('Ce membre n\'est pas en timeout.');
 
+    // Retrait du timeout + levée en base + log : acquittement immédiat.
+    await interaction.deferReply();
     await client.services.moderation.removeTimeout(interaction.guild, member, interaction.member);
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [sanctionCard({ type: 'untimeout', user, moderator: interaction.user })],
       components: buttonRows(historyButton(user.id)),
     });

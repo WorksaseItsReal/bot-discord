@@ -28,7 +28,7 @@ function service() {
 }
 
 function fakeButton({ perms = [], guild = {}, client = {} } = {}) {
-  const calls = { update: [], followUp: [], reply: [] };
+  const calls = { update: [], followUp: [], reply: [], editReply: [], deferUpdate: 0 };
   return {
     calls,
     customId: 'cmd:x:y',
@@ -40,6 +40,8 @@ function fakeButton({ perms = [], guild = {}, client = {} } = {}) {
     message: { components: [], flags: new MessageFlagsBitField(0) },
     client,
     async update(p) { calls.update.push(p); },
+    async deferUpdate() { this.deferred = true; calls.deferUpdate += 1; },
+    async editReply(p) { calls.editReply.push(p); },
     async followUp(p) { calls.followUp.push(p); },
     async reply(p) { calls.reply.push(p); },
   };

@@ -11,7 +11,8 @@ const { discordTimestamp } = require('../utils/time');
  *  - rôles ajoutés / retirés et pseudos : fiables même pour les membres hors cache
  *    (après un redémarrage) et avec l'auteur du changement ;
  *  - kicks et timeouts faits HORS du bot (menu Discord, autre bot) : ceux du bot sont
- *    déjà journalisés par ses propres cartes de sanction.
+ *    déjà journalisés par ses propres cartes de sanction ;
+ *  - rôle Muted / timeout retirés à la main : la sanction active en base est levée.
  * Nécessite la permission « Voir les logs du serveur ».
  */
 
@@ -29,9 +30,17 @@ module.exports = {
     const isBot = entry.executorId && entry.executorId === client.user?.id;
 
     if (entry.action === AuditLogEvent.MemberRoleUpdate) {
+      const added = entry.changes?.find((c) => c.key === '$add')?.new ?? [];
+      const removed = entry.changes?.find((c) => c.key === '$remove')?.new ?? [];
+      // Rôle Muted retiré à la main (pas par le bot) : le mute en base est levé, sinon
+      // il serait réappliqué au retour du membre puis « levé » par le scheduler.
+      if (!isBot && removed.length) {
+        const mutedRoleId = client.services.moderation?.mutedRole?.(guild)?.id;
+        if (mutedRoleId && removed.some((r) => r.id === mutedRoleId)) {
+          client.services.moderation.liftedOutside?.(guild.id, entry.targetId, 'mute', entry.executorId ?? null);
+        }
+      }
       if (!logging.wouldLog(guild.id, 'members', { event: 'memberRoles' })) return;
-      const added = entry.changes.find((c) => c.key === '$add')?.new ?? [];
-      const removed = entry.changes.find((c) => c.key === '$remove')?.new ?? [];
       if (!added.length && !removed.length) return;
       const user = await memberUser(client, guild, entry.targetId);
       await logging.send(guild.id, 'members', logCard({
@@ -74,6 +83,10 @@ module.exports = {
         }), undefined, { event: 'memberNickname' });
       }
       const timeout = entry.changes.find((c) => c.key === 'communication_disabled_until');
+      // Timeout retiré par un tiers : la sanction en base n'est plus en vigueur.
+      if (timeout && !isBot && !timeout.new) {
+        client.services.moderation?.liftedOutside?.(guild.id, entry.targetId, 'timeout', entry.executorId ?? null);
+      }
       if (timeout && !isBot && logging.wouldLog(guild.id, 'moderation', { event: 'manualBan' })) {
         const until = timeout.new ? Date.parse(timeout.new) : null;
         const user = await memberUser(client, guild, entry.targetId);

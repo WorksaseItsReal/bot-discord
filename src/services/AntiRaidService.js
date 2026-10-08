@@ -1,5 +1,6 @@
 'use strict';
 
+const { PermissionFlagsBits } = require('discord.js');
 const { SlidingWindow } = require('../utils/rate');
 const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
 const { createLogger } = require('../core/logger');
@@ -24,6 +25,23 @@ function newAccountAction(cfg) {
   if (NEW_ACCOUNT_ACTIONS.has(cfg?.newAccountAction)) return cfg.newAccountAction;
   return cfg?.action === 'ban' ? 'ban' : 'kick';
 }
+
+/**
+ * Un ban dont la cible a rejoint le serveur il y a moins de 10 minutes (ou pendant
+ * une vague détectée depuis) n'est pas compté comme destructeur : un modérateur qui
+ * bannit des raiders ne doit pas être sanctionné par l'AntiRaid.
+ */
+const RECENT_JOIN_MS = 10 * 60_000;
+/** Plafond d'arrivants récents mémorisés par serveur (mémoire bornée pendant un raid). */
+const MAX_RECENT_JOINERS = 5_000;
+/** Permissions qu'un exécutant « dépouillé » ne doit plus avoir (sinon la sanction a échoué). */
+const DANGEROUS_PERMISSIONS = Object.freeze([
+  PermissionFlagsBits.Administrator,
+  PermissionFlagsBits.ManageRoles,
+  PermissionFlagsBits.ManageChannels,
+  PermissionFlagsBits.BanMembers,
+  PermissionFlagsBits.ManageGuild,
+]);
 
 const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements' };
 const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
@@ -66,6 +84,38 @@ class AntiRaidService {
      */
     this.lastTrigger = new Map();
     this.lastWindowPrune = Date.now();
+    /**
+     * Arrivants récents par serveur (id → instant d'arrivée, ou de la vague qui les a
+     * signalés) : exemption des bans de raiders dans la détection destructrice.
+     * @type {Map<string, Map<string, number>>}
+     */
+    this.recentJoiners = new Map();
+  }
+
+  /** Mémorise un arrivant (ordre d'insertion = du plus ancien au plus récent). */
+  #rememberJoin(guildId, userId, at = Date.now()) {
+    let m = this.recentJoiners.get(guildId);
+    if (!m) {
+      m = new Map();
+      this.recentJoiners.set(guildId, m);
+    }
+    m.delete(userId);
+    m.set(userId, at);
+    // Purge des plus anciens (expirés ou au-delà du plafond).
+    for (const [id, t] of m) {
+      if (m.size <= MAX_RECENT_JOINERS && at - t < RECENT_JOIN_MS) break;
+      m.delete(id);
+    }
+  }
+
+  /**
+   * true si l'utilisateur est un arrivant récent : arrivée connue (`joinedAt`) ou
+   * mémorisée depuis moins de 10 minutes (arrivée ou vague d'arrivées).
+   */
+  isRecentJoiner(guildId, userId, joinedAt = null, now = Date.now()) {
+    if (joinedAt && now - joinedAt < RECENT_JOIN_MS) return true;
+    const at = userId ? this.recentJoiners.get(guildId)?.get(userId) : null;
+    return Boolean(at && now - at < RECENT_JOIN_MS);
   }
 
   /** Oublie les fenêtres d'actions destructrices devenues vides. */
@@ -115,6 +165,7 @@ class AntiRaidService {
   async handleJoin(member) {
     const cfg = this.config.get(member.guild.id).antiraid;
     if (!cfg?.enabled) return;
+    this.#rememberJoin(member.guild.id, member.id);
     if (this.isWhitelisted(member.guild.id, member.id, [...(member.roles?.cache?.keys() ?? [])])) return;
 
     // Anti-bot : bot ajouté hors whitelist
@@ -139,6 +190,9 @@ class AntiRaidService {
     // Réinitialise la fenêtre : une vague = un déclenchement.
     const joinerIds = entries.map((e) => e.id);
     this.joinWindows.delete(guild.id);
+    // Arrivants de la vague : leur bannissement par un modérateur reste exempté 10 min après la détection.
+    const waveAt = Date.now();
+    for (const id of joinerIds) this.#rememberJoin(guild.id, id, waveAt);
     // En mode kick/ban, les arrivants de la vague sont sanctionnés à chaque
     // déclenchement (le raid continue pendant le cooldown) ; seules l'alerte et
     // le lockdown sont limités à un par cooldown.
@@ -210,15 +264,23 @@ class AntiRaidService {
    * Action destructrice détectée via audit log (suppression salon/rôle, ban…).
    * Alimentée par l'événement `guildAuditLogEntryCreate` (une entrée = une action,
    * pas de double comptage ni de fetch des audit logs par événement).
+   * Aussi appelée par ModerationService après un ban fait via le bot (l'audit log
+   * l'attribue au bot) avec l'identifiant du modérateur.
    * @param {import('discord.js').Guild} guild
    * @param {string} executorId
    * @param {'channelDelete'|'roleDelete'|'ban'} type
+   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban (exemption des arrivants récents)
    */
-  async handleDestructive(guild, executorId, type) {
+  async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null } = {}) {
     const cfg = this.config.get(guild.id).antiraid;
     if (!cfg?.enabled || !executorId) return;
     if (executorId === this.client.user?.id) return;
     if (executorId === guild.ownerId) return;
+    // Bannir un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
+    if (type === 'ban' && targetId) {
+      const joinedAt = targetJoinedAt ?? guild.members?.cache?.get?.(targetId)?.joinedTimestamp ?? null;
+      if (this.isRecentJoiner(guild.id, targetId, joinedAt)) return;
+    }
     const executor = await guild.members.fetch(executorId).catch(() => null);
     if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [])) return;
 
@@ -238,7 +300,7 @@ class AntiRaidService {
     if (count < limit) return;
 
     w.reset();
-    const punished = await this.#punishExecutor(guild, executorId, cfg, type);
+    const outcome = await this.#punishExecutor(guild, executorId, cfg, type);
     await this.alert(guild, {
       tone: 'danger',
       icon: '🚨',
@@ -248,7 +310,8 @@ class AntiRaidService {
       fields: [
         field(ICONS.user, 'Auteur', executor ? userLine(executor.user) : `<@${executorId}>`),
         field('💣', 'Type', `${DESTRUCTIVE_LABELS[type] ?? type} ×**${count}**`),
-        field(ICONS.shield, 'Sanction', punished ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)'),
+        field(ICONS.shield, 'Sanction', outcome.ok ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)'),
+        outcome.note ? wide(ICONS.warning, 'Attention', outcome.note) : null,
       ],
       footer: `ID : ${executorId}`,
     });
@@ -256,8 +319,9 @@ class AntiRaidService {
 
   /** @returns {Promise<boolean>} true si le membre a été expulsé/banni */
   async #punishNewMember(member, reason, cfg) {
+    let ban = false;
     try {
-      const ban = newAccountAction(cfg) === 'ban';
+      ban = newAccountAction(cfg) === 'ban';
       if (ban) {
         this.#markBan(member.guild.id, member.id);
         await member.ban({ reason });
@@ -278,30 +342,57 @@ class AntiRaidService {
       });
       return true;
     } catch (e) {
+      // Échec : l'événement guildBanAdd ne viendra pas du bot, la marque est retirée.
+      if (ban) this.client.services?.moderation?.unmarkBotAction?.('ban', member.guild.id, member.id);
       logger.debug('punishNewMember', e?.message);
       return false;
     }
   }
 
-  /** @returns {Promise<boolean>} true si une sanction a été appliquée */
+  /**
+   * Sanctionne l'auteur d'actions destructrices.
+   * « strip » n'est un succès que si au moins un rôle a été retiré ET qu'aucun rôle
+   * restant (non modifiable par le bot, ou @everyone) ne confère de permission dangereuse.
+   * @returns {Promise<{ ok: boolean, note?: string }>}
+   */
   async #punishExecutor(guild, executorId, cfg, type) {
     const member = await guild.members.fetch(executorId).catch(() => null);
-    if (!member) return false;
-    try {
-      if (cfg.punishExecutor === 'ban') {
+    if (!member) return { ok: false };
+    const reason = `AntiRaid: ${type} massif`;
+    if (cfg.punishExecutor === 'ban') {
+      try {
         this.#markBan(guild.id, member.id);
-        await member.ban({ reason: `AntiRaid: ${type} massif` });
-        return true;
+        await member.ban({ reason });
+        return { ok: true };
+      } catch (e) {
+        this.client.services?.moderation?.unmarkBotAction?.('ban', guild.id, member.id);
+        logger.debug('punishExecutor', e?.message);
+        return { ok: false, note: 'Le bannissement de l\'auteur a échoué (rôle trop élevé ou permission manquante).' };
       }
-      if (cfg.punishExecutor === 'strip') {
-        const removable = member.roles.cache.filter((r) => r.id !== guild.id && r.editable);
-        await member.roles.remove(removable, `AntiRaid: ${type} massif`);
-        return true;
-      }
-    } catch (e) {
-      logger.debug('punishExecutor', e?.message);
     }
-    return false;
+    if (cfg.punishExecutor === 'strip') {
+      const roles = member.roles.cache.filter((r) => r.id !== guild.id);
+      const removable = roles.filter((r) => r.editable);
+      const remaining = [...roles.filter((r) => !r.editable).values()];
+      const everyone = guild.roles?.everyone ?? guild.roles?.cache?.get?.(guild.id);
+      if (everyone) remaining.push(everyone);
+      if (!removable.size) return { ok: false, note: 'Aucun rôle n\'a pu être retiré (rôles trop élevés ou gérés).' };
+      try {
+        await member.roles.remove(removable, reason);
+      } catch (e) {
+        logger.debug('punishExecutor', e?.message);
+        return { ok: false, note: 'Le retrait des rôles a échoué (permission ou hiérarchie).' };
+      }
+      const dangerous = remaining.filter((r) => r.permissions?.any?.(DANGEROUS_PERMISSIONS));
+      if (dangerous.length) {
+        return {
+          ok: false,
+          note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${dangerous.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)).join(', ')}.`,
+        };
+      }
+      return { ok: true };
+    }
+    return { ok: false };
   }
 
   /** @returns {Promise<number|null>} salons verrouillés (null si le service est indisponible) */
@@ -358,4 +449,4 @@ function waveSummary({ punished, skipped, capped }) {
   return parts.join(' · ');
 }
 
-module.exports = { AntiRaidService, newAccountAction, waveSummary, MAX_WAVE_PUNISH };
+module.exports = { AntiRaidService, newAccountAction, waveSummary, MAX_WAVE_PUNISH, RECENT_JOIN_MS, DANGEROUS_PERMISSIONS };

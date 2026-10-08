@@ -29,7 +29,7 @@ module.exports = {
     .addChannelOption((o) => o.setName('salon').setDescription('Salon (par défaut: actuel)').addChannelTypes(...LOCK_CHANNEL_TYPES)),
 
   async execute(interaction, client) {
-    const channel = channelForCommand(interaction);
+    const channel = channelForCommand(interaction, 'salon', { overwrites: true });
     await client.services.lockdown.lockChannel(channel, interaction.member, `Lock par ${interaction.user.tag}`);
     await interaction.reply(render(channel, interaction.user, interaction.user.id));
   },
@@ -38,7 +38,7 @@ module.exports = {
     /** cmd:lock:run:<channelId>:<ownerId> — « Verrouiller » (inverse de /unlock). */
     async run(interaction, client, [channelId, ownerId]) {
       requirePermission(interaction, 'ManageChannels');
-      const channel = await channelForButton(interaction, channelId);
+      const channel = await channelForButton(interaction, channelId, { overwrites: true });
       await client.services.lockdown.lockChannel(channel, interaction.member, `Lock par ${interaction.user.tag}`);
       await interaction.update(render(channel, interaction.user, ownerId));
     },

@@ -3,7 +3,8 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { serverLockCard } = require('../../services/LockdownService');
-const { assertAdmin } = require('../../services/ModerationService');
+const { assertAdmin, requirePermission } = require('../../services/ModerationService');
+const { confirm } = require('../../utils/confirmation');
 
 /** Carte « Serveur verrouillé » + bouton inverse « Tout déverrouiller ». */
 function render(count, moderator, ownerId) {
@@ -24,7 +25,15 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction, client) {
-    await interaction.deferReply();
+    // Comme Discord : modifier les permissions des salons exige « Gérer les salons » et « Gérer les rôles ».
+    requirePermission(interaction, 'ManageChannels');
+    requirePermission(interaction, 'ManageRoles');
+    if (client.services.config?.get(interaction.guild.id)?.moderation?.confirmDangerous) {
+      const ok = await confirm(interaction, { description: 'Verrouiller **tous** les salons écrits du serveur ?', confirmLabel: 'Tout verrouiller' });
+      if (!ok) return;
+    } else {
+      await interaction.deferReply();
+    }
     const n = await client.services.lockdown.enable(interaction.guild, interaction.member, `Lockall par ${interaction.user.tag}`);
     await interaction.editReply(render(n, interaction.user, interaction.user.id));
   },

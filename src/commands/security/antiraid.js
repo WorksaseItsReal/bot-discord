@@ -496,6 +496,7 @@ function simulate(c, perms, { alertChannelOk = true } = {}) {
   if (needsKick && !can(PermissionFlagsBits.KickMembers)) warnings.push('Il me manque **Expulser des membres**.');
   if (needsBan && !can(PermissionFlagsBits.BanMembers)) warnings.push('Il me manque **Bannir des membres**.');
   if (c.action === 'lockdown' && !can(PermissionFlagsBits.ManageChannels)) warnings.push('Il me manque **Gérer les salons** (lockdown).');
+  if (c.action === 'lockdown' && !can(PermissionFlagsBits.ManageRoles)) warnings.push('Il me manque **Gérer les rôles** (lockdown : permissions des salons).');
   if (destructive.length && c.punishExecutor === 'strip' && !can(PermissionFlagsBits.ManageRoles)) warnings.push('Il me manque **Gérer les rôles** (retrait des rôles).');
   if (destructive.length && !can(PermissionFlagsBits.ViewAuditLog)) warnings.push('Il me manque **Voir les logs du serveur** (détection des destructions).');
   if (!alertChannelOk) warnings.push('Le salon d\'alerte est introuvable.');
