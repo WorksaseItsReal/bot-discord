@@ -443,16 +443,16 @@ test('formulaire du message : enregistrement validé, variables inconnues signal
   await assert.rejects(bienvenue.buttons.editsubmit(i, client, ['leave']), { name: 'UserError' });
 });
 
-test('rôles automatiques : refus (Administrateur, géré, au-dessus) et avertissement (permissions sensibles)', async () => {
+test('rôles automatiques : refus (Administrateur, géré, au-dessus, permissions de modération)', async () => {
   const { client, guild, config } = world();
   let payload;
-  const i = admin(guild, { update: async (p) => (payload = p), values: [ROLE.member, ROLE.admin, ROLE.managed, ROLE.high, ROLE.mod, GUILD] });
+  // L'auteur a un rôle plus haut que les rôles proposés (contrôle de hiérarchie de l'auteur).
+  const i = admin(guild, { member: { roles: { highest: { position: 20 } } }, update: async (p) => (payload = p), values: [ROLE.member, ROLE.admin, ROLE.managed, ROLE.high, ROLE.mod, GUILD] });
   await bienvenue.buttons.roles(i, client, ['humans']);
-  assert.deepEqual(config.get(guild.id).welcome.autoRoles.humans, [ROLE.member, ROLE.mod]);
+  assert.deepEqual(config.get(guild.id).welcome.autoRoles.humans, [ROLE.member], 'rôle de modération désormais refusé (plus seulement signalé)');
   const desc = json(payload.embeds[0]).description;
   assert.match(desc, /Refusé/);
-  assert.match(desc, /Attention/);
-  assert.match(desc, /Gérer les messages/);
+  assert.match(desc, /modération ou d'administration/);
   await assert.rejects(bienvenue.buttons.roles(i, client, ['autre']), { name: 'UserError' });
   await assert.rejects(bienvenue.buttons.vrole({ ...i, values: [ROLE.admin] }, client), /Administrateur/);
   await bienvenue.buttons.vrole({ ...i, values: [ROLE.verified] }, client);

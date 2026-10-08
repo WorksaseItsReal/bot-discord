@@ -15,7 +15,6 @@ const {
 } = require('discord.js');
 const { card, field, wide, ICONS, code, subtext, bullets, status, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { truncate } = require('../../utils/embeds');
-const { parentOverwrites } = require('../../services/TempVoiceService');
 const tv = require('../../utils/tempVoice');
 const { UserError } = require('../../core/errors');
 
@@ -349,6 +348,16 @@ function pickedIds(interaction, max = 10) {
 const mentions = (ids) => ids.map((id) => `<@${id}>`).join(', ');
 
 /** Réponse au menu éphémère + mise à jour du panneau du salon. */
+/**
+ * Panneau mis à jour après une action (bouton du panneau, réponse différée).
+ * Salon disparu entre-temps (`panel()` renvoie null) : simple avertissement éphémère.
+ */
+async function replyPanel(interaction, ctx, notice) {
+  const payload = ctx.service.panel(ctx.channel, notice);
+  if (payload) return interaction.editReply(payload);
+  return interaction.followUp?.({ embeds: [status.warn('Ce salon n\'est plus un vocal temporaire actif.')], ephemeral: true }).catch(() => {});
+}
+
 async function settlePicker(interaction, ctx, message, notice) {
   await interaction.editReply({ embeds: [status.ok(message)], components: [] });
   await ctx.service.refreshPanel(ctx.channel, notice).catch(() => {});
@@ -392,6 +401,7 @@ module.exports = {
     if (sub === 'setup') {
       const hub = interaction.options.getChannel('hub');
       const category = interaction.options.getChannel('categorie');
+      if (client.services.tempVoice.record?.(hub.id)) throw new UserError('Un vocal temporaire ne peut pas servir de salon créateur.');
       config.update(guildId, { tempVoice: { enabled: true, hubChannelId: hub.id, categoryId: category?.id ?? null } });
       return interaction.reply({
         ...statusPanel(client, interaction.guild, { notice: `${ICONS.success} **Vocaux temporaires activés.**` }),
@@ -471,7 +481,7 @@ module.exports = {
       client.services.config.update(interaction.guildId, { tempVoice: { categoryId: id } });
       await interaction.update(salonsView(client, interaction.guild, id ? `${ICONS.success} Les vocaux seront créés dans <#${id}>.` : `${ICONS.success} Les vocaux seront créés dans la catégorie du salon créateur.`));
     },
-    /** Crée le salon « ➕ Créer un vocal » (permissions de la catégorie conservées). */
+    /** Crée le salon « ➕ Créer un vocal » (permissions héritées de la catégorie, sans overwrite explicite). */
     async createhub(interaction, client) {
       guard(interaction);
       const cfg = tvConfig(client, interaction.guildId);
@@ -482,7 +492,6 @@ module.exports = {
         name: '➕ Créer un vocal',
         type: ChannelType.GuildVoice,
         parent: parent?.id ?? null,
-        permissionOverwrites: parentOverwrites(parent),
         reason: `Salon créateur des vocaux temporaires (par ${interaction.user.tag ?? interaction.user.id})`,
       });
       client.services.config.update(interaction.guildId, { tempVoice: { hubChannelId: channel.id, enabled: true } });
@@ -536,7 +545,7 @@ module.exports = {
       const on = target(value);
       await interaction.deferUpdate();
       await ctx.service.setAccess(ctx.channel, 'lock', on, interaction.user.id);
-      await interaction.editReply(ctx.service.panel(ctx.channel, on ? `${ICONS.lock} Salon **verrouillé** par ${interaction.user} : les membres présents gardent l'accès.` : `${ICONS.unlock} Salon **déverrouillé** par ${interaction.user}.`));
+      await replyPanel(interaction, ctx, on ? `${ICONS.lock} Salon **verrouillé** par ${interaction.user} : les membres présents gardent l'accès.` : `${ICONS.unlock} Salon **déverrouillé** par ${interaction.user}.`);
     },
     /** cmd:tempvoice:hide:<on|off> */
     async hide(interaction, client, [value]) {
@@ -544,7 +553,7 @@ module.exports = {
       const on = target(value);
       await interaction.deferUpdate();
       await ctx.service.setAccess(ctx.channel, 'hide', on, interaction.user.id);
-      await interaction.editReply(ctx.service.panel(ctx.channel, on ? `${ICONS.hidden} Salon **masqué** par ${interaction.user}.` : `${ICONS.visible} Salon de nouveau **visible**.`));
+      await replyPanel(interaction, ctx, on ? `${ICONS.hidden} Salon **masqué** par ${interaction.user}.` : `${ICONS.visible} Salon de nouveau **visible**.`);
     },
     async rename(interaction, client) {
       const ctx = controlContext(interaction, client);
@@ -559,7 +568,7 @@ module.exports = {
       const notice = queued
         ? `${ICONS.loading} Discord limite les renommages (${tv.RENAME_LIMIT} toutes les 10 minutes) : le nom **${name}** sera appliqué dès que possible.`
         : `✏️ Salon renommé en **${name}**.`;
-      await interaction.editReply(ctx.service.panel(ctx.channel, notice));
+      await replyPanel(interaction, ctx, notice);
     },
     async limit(interaction, client) {
       const ctx = controlContext(interaction, client);
@@ -570,7 +579,7 @@ module.exports = {
       const limit = tv.parseLimit(textField(interaction, 'limit'));
       await interaction.deferUpdate();
       await ctx.service.setLimit(ctx.channel, limit, interaction.user.id);
-      await interaction.editReply(ctx.service.panel(ctx.channel, `${ICONS.members} Limite : **${limit ? `${limit} places` : 'illimitée'}**.`));
+      await replyPanel(interaction, ctx, `${ICONS.members} Limite : **${limit ? `${limit} places` : 'illimitée'}**.`);
     },
     /** Réclamer un salon dont le propriétaire est parti (tout membre connecté). */
     async claim(interaction, client) {
@@ -580,7 +589,7 @@ module.exports = {
       if (!ctx.channel.members?.has?.(interaction.user.id)) throw new UserError('Rejoignez ce salon vocal pour pouvoir le réclamer.');
       await interaction.deferUpdate();
       await ctx.service.claim(ctx.channel, interaction.user.id);
-      await interaction.editReply(ctx.service.panel(ctx.channel, `${ICONS.owner} ${interaction.user} a réclamé le salon et en est le nouveau propriétaire.`));
+      await replyPanel(interaction, ctx, `${ICONS.owner} ${interaction.user} a réclamé le salon et en est le nouveau propriétaire.`);
     },
     /** Expulser : menu des membres connectés. */
     async kick(interaction, client) {
@@ -669,7 +678,7 @@ module.exports = {
       if (!Number.isInteger(kbps)) throw new UserError('Débit invalide.');
       await interaction.deferUpdate();
       await ctx.service.setBitrate(ctx.channel, kbps);
-      await interaction.editReply(ctx.service.panel(ctx.channel, `🎚️ Débit : **${kbps} kb/s**.`));
+      await replyPanel(interaction, ctx, `🎚️ Débit : **${kbps} kb/s**.`);
     },
     /** Menu de la région RTC. */
     async region(interaction, client) {
@@ -678,7 +687,7 @@ module.exports = {
       if (region !== 'auto' && !tv.REGION_IDS.has(region)) throw new UserError('Région inconnue.');
       await interaction.deferUpdate();
       await ctx.service.setRegion(ctx.channel, region);
-      await interaction.editReply(ctx.service.panel(ctx.channel, `🌍 Région : **${tv.regionLabel(region === 'auto' ? null : region)}**.`));
+      await replyPanel(interaction, ctx, `🌍 Région : **${tv.regionLabel(region === 'auto' ? null : region)}**.`);
     },
   },
 };

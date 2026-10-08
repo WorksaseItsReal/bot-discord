@@ -46,10 +46,17 @@ test('TempVoice : overwrites de la catégorie hérités + overwrite du propriét
   assert.deepEqual(inheritedOverwrites(null, 'owner').map((o) => o.id), ['owner']);
 });
 
-test('TempVoice : le salon créé reçoit les overwrites de la catégorie du hub', async () => {
+test('TempVoice : le salon créé hérite de la catégorie du hub (sans overwrites explicites), puis le propriétaire est ajouté', async () => {
   const created = [];
+  const edits = [];
   const category = { id: 'cat', type: ChannelType.GuildCategory, permissionOverwrites: { cache: new Collection([['g', ow('g', OverwriteType.Role, 0n, PermissionFlagsBits.ViewChannel)]]) } };
-  const channel = { id: 'new', members: new Collection(), send: async () => {} };
+  // Discord copie les overwrites de la catégorie quand la création n'en passe pas.
+  const channel = {
+    id: 'new',
+    members: new Collection(),
+    send: async () => {},
+    permissionOverwrites: { cache: new Collection([['g', ow('g', OverwriteType.Role, 0n, PermissionFlagsBits.ViewChannel)]]), edit: async (id, options, extra) => edits.push({ id, options, type: extra?.type }), delete: async () => {} },
+  };
   const guild = {
     id: 'g',
     channels: { cache: new Collection([['cat', category]]), create: async (opts) => { created.push(opts); return channel; } },
@@ -60,7 +67,10 @@ test('TempVoice : le salon créé reçoit les overwrites de la catégorie du hub
   await service.handleVoiceUpdate({ channelId: null, guild }, { channelId: 'hub', guild, member, id: 'u', channel: { parentId: 'cat' } });
   assert.equal(created.length, 1);
   assert.equal(created[0].parent, 'cat');
-  assert.deepEqual(created[0].permissionOverwrites.map((o) => o.id), ['g', 'u']);
+  assert.equal(created[0].permissionOverwrites, undefined, 'héritage côté Discord : aucun overwrite copié à la main');
+  assert.deepEqual(edits.map((e) => e.id), ['u'], 'seul l\'overwrite du propriétaire est ajouté');
+  assert.deepEqual(edits[0].options, { ViewChannel: true, Connect: true });
+  assert.equal(edits[0].type, OverwriteType.Member);
 });
 
 // ---------------------------------------------------------------- sauvegardes
