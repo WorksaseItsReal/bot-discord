@@ -8,6 +8,7 @@ const { discordTimestamp } = require('../utils/time');
 const { LABELS: PERMISSION_LABELS } = require('../utils/permissionNames');
 const { UserError } = require('../core/errors');
 const { logCard } = require('./LoggingService');
+const { applyRoles } = require('../utils/memberRoles');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('welcome');
@@ -31,6 +32,8 @@ const SILENCE_MS = 10 * 60_000;
 /** Après une alerte de vague d'arrivées, les départs des arrivants récents sont tus. */
 const RAID_QUIET_MS = 2 * 60_000;
 const RAID_RECENT_JOIN_MS = 5 * 60_000;
+/** Purge des entrées expirées (défis, échecs, silences) au plus une fois par minute. */
+const PRUNE_INTERVAL_MS = 60_000;
 
 /** Permissions nécessaires dans un salon d'accueil ou de vérification. */
 const CHANNEL_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
@@ -289,6 +292,10 @@ class WelcomeService {
     this.failures = new Map();
     /** @type {Map<string, number>} membres sanctionnés par l'AntiRaid → fin du silence */
     this.silenced = new Map();
+    /** @type {Map<string, number>} serveurs en pleine vague sanctionnée par l'AntiRaid → fin du silence */
+    this.waves = new Map();
+    /** @type {Map<Map<string, any>, number>} dernière purge de chaque table */
+    this.lastPrune = new Map();
   }
 
   settings(guildId) {
@@ -297,8 +304,11 @@ class WelcomeService {
 
   // ------------------------------------------------------------ défis anti-robot
 
+  /** Retire les entrées expirées d'une table (au plus une fois par minute et par table). */
   #prune(map, keep) {
-    if (map.size < 500) return;
+    const now = this.now();
+    if (now - (this.lastPrune.get(map) ?? 0) < PRUNE_INTERVAL_MS) return;
+    this.lastPrune.set(map, now);
     for (const [k, v] of map) if (!keep(v)) map.delete(k);
   }
 
@@ -385,19 +395,55 @@ class WelcomeService {
    */
   async handleJoin(member, { raid } = {}) {
     if (raid?.punished) {
-      const now = this.now();
-      this.#prune(this.silenced, (t) => t > now);
-      this.silenced.set(`${member.guild.id}:${member.id}`, now + SILENCE_MS);
+      this.silence(member.guild.id, member.id);
       return { skipped: 'antiraid' };
     }
     if (member.pending) return { skipped: 'pending' };
     return this.welcome(member);
   }
 
-  /** Écran d'adhésion accepté (pending → false) : l'accueil a lieu maintenant. */
+  /**
+   * Tait le départ d'un membre pendant 10 minutes. Synchrone : l'AntiRaid l'appelle
+   * JUSTE AVANT d'expulser / bannir, car guildMemberRemove arrive avant que
+   * handleJoin ne reçoive le résultat de la sanction.
+   */
+  silence(guildId, userId) {
+    const now = this.now();
+    this.#prune(this.silenced, (t) => t > now);
+    this.silenced.set(`${guildId}:${userId}`, now + SILENCE_MS);
+  }
+
+  /**
+   * Vague d'arrivées en cours de sanction (≈ 2 minutes) : les départs des arrivants
+   * récents sont tus. Synchrone, appelé par l'AntiRaid avant de sanctionner la vague.
+   */
+  silenceWave(guildId) {
+    const now = this.now();
+    this.#prune(this.waves, (t) => t > now);
+    this.waves.set(guildId, now + RAID_QUIET_MS);
+  }
+
+  /**
+   * Écran d'adhésion accepté (pending → false) : l'accueil a lieu maintenant.
+   * Ancien membre partiel (absent du cache, ex. après un redémarrage) : son ancien
+   * `pending` est inconnu. Il est accueilli s'il est arrivé il y a moins de 24 h et
+   * n'a encore aucun des rôles d'arrivée (sinon, en mode « retrait », il échapperait
+   * à la vérification). Sans rôle d'arrivée configuré, rien ne permet de savoir s'il
+   * a déjà été accueilli : on s'abstient (pas de message de bienvenue en double).
+   */
   async handleScreeningPassed(oldMember, newMember) {
-    if (oldMember?.pending !== true || newMember?.pending !== false) return null;
-    return this.welcome(newMember);
+    if (newMember?.pending !== false) return null;
+    if (oldMember?.pending === true) return this.welcome(newMember);
+    if (oldMember?.partial && this.#missedWelcome(newMember)) return this.welcome(newMember);
+    return null;
+  }
+
+  /** Membre récent qui n'a reçu aucun des rôles d'arrivée (accueil manqué). */
+  #missedWelcome(member) {
+    const joined = member?.joinedTimestamp;
+    if (!member?.guild || member.user?.bot || !joined || this.now() - joined >= DAY_MS) return false;
+    const expected = this.assignable(member.guild, joinRoles(this.settings(member.guild.id), member));
+    return expected.length > 0 && !expected.some((id) => member.roles?.cache?.has(id));
   }
 
   /** Rôles automatiques, message de bienvenue et MP. */
@@ -408,12 +454,10 @@ class WelcomeService {
 
     const roles = this.assignable(guild, joinRoles(cfg, member)).filter((id) => !member.roles?.cache?.has(id)).slice(0, MAX_AUTO_ROLES);
     if (roles.length) {
-      try {
-        await member.roles.add(roles, 'Rôles automatiques (arrivée)');
-        result.roles = roles;
-      } catch (e) {
-        logger.debug(`Rôles automatiques sur ${guild.id} :`, e?.message);
-      }
+      // Un rôle à la fois : un PATCH de liste effacerait le rôle Muted remis juste avant.
+      const { added } = await applyRoles(member, { add: roles }, 'Rôles automatiques (arrivée)', (id, e) =>
+        logger.debug(`Rôle automatique ${id} sur ${guild.id} :`, e?.message));
+      result.roles = added;
     }
 
     if (member.user?.bot) return result;
@@ -447,6 +491,8 @@ class WelcomeService {
       this.silenced.delete(key);
       if (until > now) return true;
     }
+    const recent = Boolean(member.joinedTimestamp && now - member.joinedTimestamp < RAID_RECENT_JOIN_MS);
+    if (recent && (this.waves.get(member.guild.id) ?? 0) > now) return true;
     const alertAt = this.client?.services?.antiraid?.joinAlertAt?.get?.(member.guild.id);
     return Boolean(alertAt && now - alertAt < RAID_QUIET_MS && member.joinedTimestamp && now - member.joinedTimestamp < RAID_RECENT_JOIN_MS);
   }
@@ -490,15 +536,17 @@ class WelcomeService {
       throw new UserError('Je ne peux pas gérer le rôle de vérification : prévenez un administrateur (mon rôle doit être placé au-dessus).');
     }
     const plan = verifyRoles(cfg);
-    const add = this.assignable(guild, plan.add).filter((id) => !member.roles.cache.has(id));
-    const remove = plan.remove.filter((id) => member.roles.cache.has(id));
-    try {
-      if (add.length) await member.roles.add(add, 'Vérification réussie');
-      if (remove.length) await member.roles.remove(remove, 'Vérification réussie');
-    } catch (e) {
-      logger.debug(`Vérification sur ${guild.id} :`, e?.message);
-      throw new UserError('Je n\'ai pas pu mettre à jour vos rôles. Prévenez un administrateur.');
-    }
+    const wanted = this.assignable(guild, plan.add).filter((id) => !member.roles.cache.has(id));
+    const unwanted = plan.remove.filter((id) => member.roles.cache.has(id));
+    // Un rôle à la fois (routes par rôle) : un PATCH de liste annulerait l'appel précédent.
+    // Le rôle de vérification d'abord : s'il échoue, rien d'autre n'est touché.
+    const isKey = (id) => id === v.roleId;
+    const log = (id, e) => logger.debug(`Vérification sur ${guild.id} (rôle ${id}) :`, e?.message);
+    const key = await applyRoles(member, { add: wanted.filter(isKey), remove: unwanted.filter(isKey) }, 'Vérification réussie', log);
+    if (key.failed.length) throw new UserError('Je n\'ai pas pu mettre à jour vos rôles. Prévenez un administrateur.');
+    const rest = await applyRoles(member, { add: wanted.filter((id) => !isKey(id)), remove: unwanted.filter((id) => !isKey(id)) }, 'Vérification réussie', log);
+    const add = [...key.added, ...rest.added];
+    const remove = [...key.removed, ...rest.removed];
     const user = member.user;
     const embed = logCard({
       category: 'members',

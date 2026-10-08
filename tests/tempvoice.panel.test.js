@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Collection, ChannelType, OverwriteType, PermissionFlagsBits: P, PermissionsBitField } = require('discord.js');
+const { Collection, ChannelType, OverwriteType, PermissionFlagsBits: P, PermissionsBitField, PermissionOverwrites } = require('discord.js');
 const { memoryDb } = require('./db.helper');
 const { GuildConfigRepository } = require('../src/database/repositories/GuildConfigRepository');
 const { TempVoiceRepository } = require('../src/database/repositories/TempVoiceRepository');
@@ -72,6 +72,16 @@ function fakeVoice(guild, data) {
       set: async (list) => {
         ch.permissionOverwrites.cache = overwriteCache(list);
       },
+      // Comme discord.js : fusion avec l'overwrite en cache, PUT d'un seul overwrite.
+      edit: async (id, options, { type } = {}) => {
+        ch.overwriteCalls = (ch.overwriteCalls ?? 0) + 1;
+        const existing = ch.permissionOverwrites.cache.get(id);
+        const { allow, deny } = PermissionOverwrites.resolveOverwriteOptions(options, existing ?? {});
+        ch.permissionOverwrites.cache.set(id, { id, type: type ?? existing?.type, allow, deny });
+      },
+      delete: async (id) => {
+        ch.permissionOverwrites.cache.delete(id);
+      },
     },
     setName: async (name) => {
       if (ch.renameHang) return new Promise(() => {});
@@ -112,7 +122,13 @@ function fakeGuild({ premiumTier = 0 } = {}) {
     channels: { cache: new Collection() },
     members: { me: { id: ME, permissions: perm(PermissionsBitField.All) }, cache: new Collection() },
   };
-  guild.channels.create = async (data) => fakeVoice(guild, data);
+  // Comme Discord : sans overwrites explicites, le salon hérite de ceux de sa catégorie.
+  guild.channels.create = async (data) => {
+    const parent = data.parent ? guild.channels.cache.get(data.parent) : null;
+    const inherited = data.permissionOverwrites ?? tv.snapshot(parent);
+    guild.created = [...(guild.created ?? []), data];
+    return fakeVoice(guild, { ...data, permissionOverwrites: inherited });
+  };
   // Catégorie privée : @everyone ne voit pas, le rôle membre voit et rejoint, le staff aussi.
   const category = fakeVoice(guild, {
     id: CAT,
@@ -408,7 +424,8 @@ test('service : expulsion protégée, bannissement, réclamation et transfert', 
   ch.members.delete(OWNER);
   await w.service.claim(ch, MOD);
   assert.equal(w.repo.get(ch.id).owner_id, MOD);
-  assert.ok(ch.permissionOverwrites.cache.get(MOD).allow.has(P.MoveMembers));
+  assert.ok(ch.permissionOverwrites.cache.get(MOD).allow.has(P.Connect), 'nouveau propriétaire : droits du propriétaire');
+  assert.ok(!ch.permissionOverwrites.cache.get(MOD).allow.has(P.MoveMembers), 'mais jamais Déplacer des membres');
   assert.ok(!ch.permissionOverwrites.cache.get(OWNER).allow.has(P.MoveMembers));
   await assert.rejects(w.service.transfer(ch, BOB), /connecté/);
 });

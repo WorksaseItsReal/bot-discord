@@ -65,8 +65,8 @@ function fakeMember(guild, id, { roles = [], position = 1, bot = false } = {}) {
     roles: {
       cache,
       highest: { position },
-      add: async (ids) => ids.forEach((r) => cache.set(r, guild.roles.cache.get(r))),
-      remove: async (ids) => ids.forEach((r) => cache.delete(r)),
+      add: async (ids) => [].concat(ids).forEach((r) => cache.set(r, guild.roles.cache.get(r))),
+      remove: async (ids) => [].concat(ids).forEach((r) => cache.delete(r)),
     },
     send: async (p) => m.dms.push(p),
     displayAvatarURL: () => 'https://cdn.discordapp.com/embed/avatars/0.png',

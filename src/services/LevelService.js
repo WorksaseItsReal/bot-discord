@@ -5,6 +5,7 @@ const { card, field, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { MAX_XP } = require('../database/repositories/LevelRepository');
 const { createLogger } = require('../core/logger');
+const { applyRoles } = require('../utils/memberRoles');
 
 const logger = createLogger('levels');
 
@@ -308,9 +309,11 @@ class LevelService {
     const has = (id) => member.roles.cache.has(id);
     const add = plan.eligible.filter((id) => !has(id) && LevelService.assignable(guild, id));
     const drop = (full ? plan.ineligible : cfg.stackRewards === false ? plan.lower : []).filter((id) => has(id) && LevelService.assignable(guild, id));
-    if (add.length) await member.roles.add(add, `Récompense de niveau ${level}`).catch((err) => logger.debug('Ajout de récompense :', err?.message));
-    if (drop.length) await member.roles.remove(drop, `Niveau ${level} : récompense mise à jour`).catch((err) => logger.debug('Retrait de récompense :', err?.message));
-    return { added: add, removed: drop };
+    // Un rôle à la fois (routes par rôle) : un PATCH de liste pour le retrait annulerait l'ajout.
+    const log = (action) => (id, err) => logger.debug(`${action} de la récompense ${id} :`, err?.message);
+    const { added } = await applyRoles(member, { add }, `Récompense de niveau ${level}`, log('Ajout'));
+    const { removed } = await applyRoles(member, { remove: drop }, `Niveau ${level} : récompense mise à jour`, log('Retrait'));
+    return { added, removed };
   }
 
   // ------------------------------------------------------------ annonces

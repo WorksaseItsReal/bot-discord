@@ -21,9 +21,12 @@ const MAX_USER_LIMIT = 99;
 const DEFAULT_TEMPLATE = 'Vocal de {pseudo}';
 const FALLBACK_NAME = 'Vocal temporaire';
 
-/** Droits du propriétaire sur son vocal (le renommage passe par le panneau, filtré). */
-const OWNER_PERMISSIONS = PermissionFlagsBits.ViewChannel | PermissionFlagsBits.Connect | PermissionFlagsBits.MoveMembers;
-/** Droits « de gestion » retirés à l'ancien propriétaire lors d'un transfert. */
+/**
+ * Droits du propriétaire sur son vocal. Ni renommage natif (le panneau filtre les noms),
+ * ni « Déplacer des membres » : expulser passe par le panneau, qui protège le staff.
+ */
+const OWNER_PERMISSIONS = PermissionFlagsBits.ViewChannel | PermissionFlagsBits.Connect;
+/** Droits « de gestion » retirés à l'ancien propriétaire lors d'un transfert (y compris ceux d'anciennes versions). */
 const OWNER_ONLY = PermissionFlagsBits.MoveMembers | PermissionFlagsBits.ManageChannels;
 /** Rôles et membres « staff » : jamais verrouillés dehors, jamais expulsés par un simple propriétaire. */
 const STAFF_PERMISSIONS = [PermissionFlagsBits.Administrator, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.MoveMembers];
@@ -212,6 +215,44 @@ function permitOverwrites(list, ids) {
   return ids.reduce((acc, id) => setBits(acc, id, OverwriteType.Member, { allow: PermissionFlagsBits.Connect | PermissionFlagsBits.ViewChannel }), list);
 }
 
+/** État d'un droit dans un overwrite : true (accordé), false (refusé), null (neutre). */
+const bitState = (o, bit) => (o && o.allow & bit ? true : o && o.deny & bit ? false : null);
+
+/**
+ * Options de `permissionOverwrites.edit` pour passer de `current` à `next`
+ * (seuls les droits qui changent : { Connect: false, ViewChannel: null… }). Pur.
+ * @param {{ allow: bigint, deny: bigint }|undefined} current
+ * @param {{ allow: bigint, deny: bigint }} next
+ */
+function overwriteOptions(current, next) {
+  const out = {};
+  const seen = new Set();
+  for (const [name, bit] of Object.entries(PermissionFlagsBits)) {
+    if (seen.has(bit)) continue; // alias déprécié d'un même droit
+    seen.add(bit);
+    const to = bitState(next, bit);
+    if (bitState(current, bit) !== to) out[name] = to;
+  }
+  return out;
+}
+
+/**
+ * Changements ciblés pour passer des overwrites `current` à `desired` :
+ * un `edit` par overwrite modifié, un `delete` par overwrite disparu. Pur.
+ * @returns {{ edits: Array<{ id: string, type: number, options: object, allow: bigint, deny: bigint }>, deletes: string[] }}
+ */
+function overwriteChanges(current, desired) {
+  const before = new Map(current.map((o) => [o.id, o]));
+  const edits = [];
+  for (const o of desired) {
+    const cur = before.get(o.id);
+    if (cur && cur.allow === o.allow && cur.deny === o.deny) continue;
+    edits.push({ id: o.id, type: o.type, options: overwriteOptions(cur, o), allow: o.allow, deny: o.deny });
+  }
+  const kept = new Set(desired.map((o) => o.id));
+  return { edits, deletes: current.filter((o) => !kept.has(o.id)).map((o) => o.id) };
+}
+
 /** Membres bannis / autorisés d'après les overwrites (hors propriétaire). Pur. */
 function memberLists(list, ownerId) {
   const members = list.filter((o) => o.type === OverwriteType.Member && o.id !== ownerId);
@@ -350,6 +391,8 @@ module.exports = {
   banOverwrites,
   permitOverwrites,
   memberLists,
+  overwriteOptions,
+  overwriteChanges,
   maxBitrate,
   bitrateChoices,
   regionLabel,

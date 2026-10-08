@@ -32,6 +32,7 @@ const {
   messagePayload,
   panelCard,
 } = require('../../services/WelcomeService');
+const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { UserError } = require('../../core/errors');
 
 /**
@@ -75,8 +76,12 @@ const NAV = [
 ];
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
+/** Serveurs dont le panneau de vérification est en cours de publication (anti double clic). */
+const publishing = new Set();
 const cfgOf = (client, guildId) => client.services.config.get(guildId).welcome;
 const onOff = (on) => (on ? '🟢 Activé' : '🔴 Désactivé');
+/** Panneau de vérification publié et son salon toujours là (cache). */
+const panelPublished = (guild, v) => Boolean(v.panelMessageId && v.panelChannelId && (!guild.channels?.cache || guild.channels.cache.has(v.panelChannelId)));
 const homeButton = () => actionButton({ command: 'bienvenue', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
 
 function navRow(current) {
@@ -131,7 +136,7 @@ function homeView(client, guild, notice) {
     cfg.join.enabled && join !== 'ok' ? `👋 Bienvenue : ${CHANNEL_STATE[join][1].toLowerCase()}.` : null,
     cfg.leave.enabled && leave !== 'ok' ? `🚪 Départ : ${CHANNEL_STATE[leave][1].toLowerCase()}.` : null,
     [...cfg.autoRoles.humans, ...cfg.autoRoles.bots].some((id) => roleIssue(guild.roles?.cache?.get(id), guild)) ? `${ICONS.role} Certains rôles automatiques ne peuvent pas être attribués.` : null,
-    v.enabled && !v.panelMessageId ? `${ICONS.shield} Vérification active, mais le panneau n'est pas publié.` : null,
+    v.enabled && !panelPublished(guild, v) ? `${ICONS.shield} Vérification active, mais le panneau n'est pas publié.` : null,
   ].filter(Boolean);
   const on = [cfg.join.enabled, cfg.leave.enabled, v.enabled].filter(Boolean).length;
   return {
@@ -228,7 +233,7 @@ function rolesView(client, guild, notice) {
           notice ? `${notice}\n` : null,
           `Rôles donnés à l'arrivée : jusqu'à **${MAX_AUTO_ROLES}** pour les humains et **${MAX_AUTO_ROLES}** pour les bots.`,
           v.enabled ? `${ICONS.shield} La vérification est active : les rôles humains sont donnés **après la vérification**.` : null,
-          subtext('Mon rôle doit être au-dessus de ces rôles. Les rôles gérés, @everyone et les rôles Administrateur sont refusés.'),
+          subtext('Ces rôles doivent être sous mon rôle et sous le vôtre. Les rôles gérés, @everyone et ceux qui confèrent des permissions de modération ou d\'administration sont refusés.'),
         ],
         fields: [
           wide(ICONS.members, `Humains (${humans.length}/${MAX_AUTO_ROLES})`, humans.length ? humans.map((id) => roleLine(guild, id)).join('\n') : '*Aucun*'),
@@ -251,7 +256,7 @@ function verifyView(client, guild, notice) {
   const role = v.roleId ? guild.roles?.cache?.get(v.roleId) : null;
   const issue = v.roleId && guild.roles?.cache ? roleIssue(role, guild) : null;
   const state = channelState(guild, v.channelId);
-  const panel = v.panelMessageId && v.panelChannelId ? `https://discord.com/channels/${guild.id}/${v.panelChannelId}/${v.panelMessageId}` : null;
+  const panel = panelPublished(guild, v) ? `https://discord.com/channels/${guild.id}/${v.panelChannelId}/${v.panelMessageId}` : null;
   const removeMode = v.mode === 'remove';
   return {
     embeds: [
@@ -401,6 +406,46 @@ function textChannel(interaction, id) {
   return ch;
 }
 
+/**
+ * Raison pour laquelle l'auteur ne peut pas choisir ce rôle (rôle automatique ou de
+ * vérification), ou null. En plus des limites du bot (roleIssue) : aucune permission
+ * de modération / d'administration, et le rôle doit être sous le rôle le plus haut de
+ * l'auteur (sauf propriétaire du serveur) — sinon « Gérer le serveur » suffirait à se
+ * faire donner un rôle plus puissant (en revenant avec un autre compte, par exemple).
+ */
+function roleRefusal(interaction, role) {
+  const guild = interaction.guild;
+  const issue = roleIssue(role, guild);
+  if (issue) return issue;
+  if (role.permissions?.any && hasForbiddenPermissions(role)) return 'il confère des permissions de modération ou d\'administration';
+  if (interaction.user.id !== guild.ownerId && role.position >= (interaction.member?.roles?.highest?.position ?? 0)) {
+    return 'il est au-dessus (ou au niveau) de votre rôle le plus haut';
+  }
+  return null;
+}
+
+/**
+ * Panneau de vérification supprimé (salon ou message) : ses champs sont vidés pour
+ * que le tableau de bord ne l'affiche plus comme publié. Le salon est vérifié dans
+ * le cache ; le message, dans le cache puis par une requête (seule une erreur
+ * « inconnu » le déclare supprimé : une permission manquante ne vide rien).
+ */
+async function syncPanel(client, guild) {
+  const v = cfgOf(client, guild.id).verification;
+  if (!v.panelMessageId) return;
+  const channel = v.panelChannelId ? guild.channels?.cache?.get(v.panelChannelId) : null;
+  let gone = !channel;
+  if (channel && !channel.messages?.cache?.has?.(v.panelMessageId) && typeof channel.messages?.fetch === 'function') {
+    const err = await channel.messages.fetch(v.panelMessageId).then(() => null, (e) => e);
+    gone = err?.code === 10008 || err?.code === 10003;
+  }
+  if (gone) client.services.config.update(guild.id, { welcome: { verification: { panelChannelId: null, panelMessageId: null } } });
+}
+
+/** Vues qui affichent l'état du panneau de vérification. */
+const PANEL_VIEWS = new Set(['home', 'verify']);
+const viewName = (view) => String(view ?? 'home').split(/[:.]/)[0];
+
 const channelNotice = (guild, id, label) => {
   if (!id) return `${ICONS.success} ${label} : salon retiré.`;
   return channelState(guild, id) === 'noperm'
@@ -445,6 +490,7 @@ module.exports = {
 
   async execute(interaction, client) {
     guard(interaction);
+    await syncPanel(client, interaction.guild).catch(() => {});
     await interaction.reply({ ...render(client, interaction.guild, 'home'), ephemeral: true });
   },
 
@@ -452,11 +498,14 @@ module.exports = {
     /** Menu de navigation. */
     async nav(interaction, client) {
       guard(interaction);
-      await interaction.update(render(client, interaction.guild, interaction.values?.[0] ?? 'home'));
+      const view = interaction.values?.[0] ?? 'home';
+      if (PANEL_VIEWS.has(viewName(view))) await syncPanel(client, interaction.guild).catch(() => {});
+      await interaction.update(render(client, interaction.guild, view));
     },
     /** cmd:bienvenue:go:<vue> */
     async go(interaction, client, [view]) {
       guard(interaction);
+      if (PANEL_VIEWS.has(viewName(view))) await syncPanel(client, interaction.guild).catch(() => {});
       await interaction.update(render(client, interaction.guild, view ?? 'home'));
     },
     /** cmd:bienvenue:set:<réglage>:<on|off> ou set:verification.mode:<add|remove> — valeur cible explicite. */
@@ -571,7 +620,7 @@ module.exports = {
       for (const id of (interaction.values ?? []).slice(0, MAX_AUTO_ROLES)) {
         if (!/^\d{17,20}$/.test(id)) continue;
         const role = guild.roles.cache.get(id);
-        const issue = roleIssue(role, guild);
+        const issue = roleRefusal(interaction, role);
         if (issue) {
           refused.push(`<@&${id}> : ${issue}`);
           continue;
@@ -600,7 +649,7 @@ module.exports = {
       } else {
         if (!/^\d{17,20}$/.test(id)) throw new UserError('Rôle invalide.');
         const role = guild.roles.cache.get(id);
-        const issue = roleIssue(role, guild);
+        const issue = roleRefusal(interaction, role);
         if (issue) throw new UserError(`Ce rôle ne peut pas servir à la vérification : ${issue}.`);
         client.services.config.update(interaction.guildId, { welcome: { verification: { roleId: id } } });
         const danger = dangerousPermissions(role);
@@ -641,18 +690,27 @@ module.exports = {
       if (issue) throw new UserError(`Le rôle de vérification est inutilisable : ${issue}.`);
       const state = channelState(guild, v.channelId);
       if (state !== 'ok') throw new UserError(state === 'unset' ? 'Choisissez d\'abord le salon du panneau.' : CHANNEL_HINTS[state]);
-      await interaction.deferUpdate();
-      const channel = guild.channels.cache.get(v.channelId);
-      const message = await channel.send({
-        embeds: [panelCard(guild, v)],
-        components: buttonRows(actionButton({ command: 'bienvenue', action: 'verify', label: 'Me vérifier', emoji: ICONS.success, style: ButtonStyle.Success })),
-        allowedMentions: { parse: [] },
-      });
-      // Ancien panneau du bot : supprimé pour éviter les doublons.
-      if (v.panelMessageId && v.panelMessageId !== message.id) {
-        await guild.channels.cache.get(v.panelChannelId)?.messages?.delete?.(v.panelMessageId).catch(() => {});
+      // Double clic : une seule publication à la fois par serveur (sinon deux panneaux, dont un orphelin).
+      if (publishing.has(guild.id)) throw new UserError('Le panneau est déjà en cours de publication : patientez un instant.');
+      publishing.add(guild.id);
+      let channel;
+      try {
+        await interaction.deferUpdate();
+        channel = guild.channels.cache.get(v.channelId);
+        const message = await channel.send({
+          embeds: [panelCard(guild, v)],
+          components: buttonRows(actionButton({ command: 'bienvenue', action: 'verify', label: 'Me vérifier', emoji: ICONS.success, style: ButtonStyle.Success })),
+          allowedMentions: { parse: [] },
+        });
+        // Ancien panneau du bot (relu après l'envoi) : supprimé pour éviter les doublons.
+        const previous = cfgOf(client, interaction.guildId).verification;
+        if (previous.panelMessageId && previous.panelMessageId !== message.id) {
+          await guild.channels.cache.get(previous.panelChannelId)?.messages?.delete?.(previous.panelMessageId).catch(() => {});
+        }
+        client.services.config.update(interaction.guildId, { welcome: { verification: { panelChannelId: channel.id, panelMessageId: message.id } } });
+      } finally {
+        publishing.delete(guild.id);
       }
-      client.services.config.update(interaction.guildId, { welcome: { verification: { panelChannelId: channel.id, panelMessageId: message.id } } });
       const notice = [
         `${ICONS.success} Panneau publié dans ${channel}.`,
         v.enabled ? null : `${ICONS.warning} La vérification est **désactivée** : activez-la pour que le bouton fonctionne.`,

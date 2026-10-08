@@ -1,11 +1,14 @@
 'use strict';
 
 const { ChannelType, PermissionFlagsBits, OverwriteType } = require('discord.js');
-const { card, field, ICONS, bullets } = require('../utils/ui');
+const { card, field, ICONS, bullets, status } = require('../utils/ui');
 const { CooldownManager } = require('../core/cooldowns');
 const { UserError } = require('../core/errors');
+const { createLogger } = require('../core/logger');
 const { discordTimestamp } = require('../utils/time');
 const tv = require('../utils/tempVoice');
+
+const logger = createLogger('tempvoice');
 
 const { OWNER_PERMISSIONS } = tv;
 
@@ -28,10 +31,10 @@ function parentOverwrites(parent) {
 }
 
 /**
- * Overwrites d'un nouveau vocal temporaire : ceux de la catégorie parente
- * (sinon un `permissionOverwrites` explicite les remplacerait, et un vocal créé
- * dans une catégorie privée deviendrait public) + celui du propriétaire, fusionné
- * avec un éventuel overwrite existant pour lui. Pur.
+ * Overwrites attendus sur un vocal créé dans `parent` : ceux de la catégorie + celui
+ * du propriétaire, fusionné avec un éventuel overwrite existant pour lui. Pur.
+ * (La création, elle, ne passe plus d'overwrites : le salon hérite de la catégorie
+ * côté Discord, puis seul l'overwrite du propriétaire est ajouté.)
  * @param {{ permissionOverwrites?: { cache?: Map<string, any> } }|null|undefined} parent
  * @param {string} ownerId
  */
@@ -57,6 +60,12 @@ function withTimeout(promise, ms, fallback) {
   return Promise.race([promise, new Promise((resolve) => (timer = setTimeout(() => resolve(fallback), ms)))]).finally(() => clearTimeout(timer));
 }
 
+/** Salon inconnu (déjà supprimé). */
+const isUnknownChannel = (err) => err?.code === 10003;
+
+/** Membres humains connectés (un bot de musique seul ne garde pas le salon en vie). */
+const humanCount = (channel) => [...(channel?.members?.values?.() ?? [])].filter((m) => !m.user?.bot).length;
+
 const isRateLimit = (err) => err?.status === 429 || err?.name === 'RateLimitError' || /rate ?limit/i.test(err?.message ?? '');
 
 /**
@@ -80,6 +89,53 @@ class TempVoiceService {
     this.hubCooldowns = new CooldownManager();
     /** Horodatages des renommages par salon (limite Discord : 2 / 10 min). */
     this.renames = new Map();
+    /** Avertissements « cooldown » déjà envoyés (un MP par fenêtre, pas de spam). */
+    this.cooldownNotices = new CooldownManager();
+    /** File d'attente par salon : les actions du panneau sur un même vocal s'exécutent une par une. */
+    this.locks = new Map();
+  }
+
+  /**
+   * Exécute `fn` quand les actions précédentes sur ce salon sont terminées
+   * (réussies ou non). La file est retirée de la Map dès qu'elle est vide.
+   */
+  #withLock(channelId, fn) {
+    const previous = this.locks.get(channelId) ?? Promise.resolve();
+    const run = previous.then(() => fn());
+    const tail = run.then(() => {}, () => {});
+    this.locks.set(channelId, tail);
+    tail.then(() => {
+      if (this.locks.get(channelId) === tail) this.locks.delete(channelId);
+    });
+    return run;
+  }
+
+  /**
+   * Applique des overwrites par changements ciblés (un `edit` / `delete` par overwrite
+   * modifié) au lieu de remplacer toute la liste : une action ne peut plus effacer celle
+   * d'une autre. Le cache est mis à jour aussitôt (discord.js ne le fait qu'à la
+   * réception de l'événement) pour que l'action suivante de la file parte du bon état.
+   */
+  async #applyOverwrites(channel, desired, reason) {
+    const manager = channel.permissionOverwrites;
+    const { edits, deletes } = tv.overwriteChanges(tv.snapshot(channel), desired);
+    for (const e of edits) {
+      await manager.edit(e.id, e.options, { type: e.type, reason });
+      if (typeof manager._add === 'function') manager._add({ id: e.id, type: e.type, allow: String(e.allow), deny: String(e.deny) });
+    }
+    for (const id of deletes) {
+      await manager.delete(id, reason);
+      manager.cache?.delete?.(id);
+    }
+  }
+
+  /** Prévient un membre : MP, sinon message (avec mention) dans le chat du salon `fallback`. */
+  async #notify(member, fallback, text) {
+    const embeds = [status.warn(text, 'Vocaux temporaires')];
+    const dm = typeof member?.send === 'function' ? await member.send({ embeds }).then(() => true, () => false) : false;
+    if (!dm && typeof fallback?.send === 'function') {
+      await fallback.send({ content: `<@${member.id}>`, embeds, allowedMentions: { users: [member.id] } }).catch(() => {});
+    }
   }
 
   /** Réagit à un changement d'état vocal (join/leave). */
@@ -90,9 +146,18 @@ class TempVoiceService {
     // Création : arrivée dans le hub
     if (cfg?.enabled && cfg.hubChannelId && newState.channelId === cfg.hubChannelId && oldState.channelId !== newState.channelId) {
       const userId = newState.member?.id ?? newState.id;
-      // En cooldown : le membre reste dans le hub, aucun salon n'est créé.
-      if (!this.hubCooldowns.hit(`${guild.id}:${userId}`, HUB_COOLDOWN_MS)) {
-        await this.#createFor(newState, cfg).catch(() => {});
+      const key = `${guild.id}:${userId}`;
+      const wait = this.hubCooldowns.hit(key, HUB_COOLDOWN_MS);
+      if (!wait) {
+        await this.#createFor(newState, cfg).catch(async (err) => {
+          logger.warn(`Création d'un vocal temporaire impossible sur ${guild.id} :`, err?.message);
+          if (newState.member) {
+            await this.#notify(newState.member, newState.channel, 'Je n\'ai pas pu créer votre vocal temporaire. Prévenez un administrateur : il me manque sans doute des permissions dans la catégorie.');
+          }
+        });
+      } else if (newState.member && !this.cooldownNotices.hit(key, HUB_COOLDOWN_MS)) {
+        // En cooldown : le membre reste dans le hub, aucun salon n'est créé (un seul avertissement par fenêtre).
+        await this.#notify(newState.member, newState.channel, `Vous venez de créer un vocal : patientez **${Math.ceil(wait / 1000)} s**, puis rejoignez à nouveau le salon créateur.`);
       }
     }
 
@@ -101,10 +166,13 @@ class TempVoiceService {
       const record = this.tempVoice.get(oldState.channelId);
       if (record) {
         const channel = oldState.guild.channels.cache.get(oldState.channelId);
-        if (channel && channel.members.size === 0) {
-          this.tempVoice.delete(oldState.channelId);
-          this.renames.delete(oldState.channelId);
-          await channel.delete().catch(() => {});
+        if (channel && humanCount(channel) === 0) {
+          // La ligne n'est oubliée qu'une fois le salon réellement supprimé (sinon il resterait orphelin).
+          const deleted = await channel.delete().then(() => true, (err) => isUnknownChannel(err));
+          if (deleted) {
+            this.tempVoice.delete(oldState.channelId);
+            this.renames.delete(oldState.channelId);
+          }
         } else if (channel && record.owner_id === (oldState.member?.id ?? oldState.id)) {
           // Le propriétaire est parti : le panneau propose de réclamer le salon.
           await this.refreshPanel(channel, `🙋 <@${record.owner_id}> est parti : un membre connecté peut **réclamer** le salon.`).catch(() => {});
@@ -143,21 +211,31 @@ class TempVoiceService {
     const category = cfg.categoryId && guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? cfg.categoryId : null;
     const parentId = category || state.channel?.parentId || null;
     const parent = parentId ? guild.channels.cache.get(parentId) : null;
-    let permissionOverwrites = inheritedOverwrites(parent, member.id);
-    if (locked) {
-      permissionOverwrites = tv.accessOverwrites(permissionOverwrites, {
-        flag: PermissionFlagsBits.Connect,
-        on: true,
-        guildId: guild.id,
-        parent: parentOverwrites(parent),
-        roles: guild.roles?.cache,
-        keep: [member.id],
-      });
-    }
-    const options = { name, type: ChannelType.GuildVoice, parent: parentId, permissionOverwrites };
+    // Aucun `permissionOverwrites` explicite : Discord copie ceux de la catégorie. En les
+    // passant nous-mêmes, la création échouait (50013) dès qu'un droit copié n'était pas
+    // détenu par le bot (ou Gérer les rôles en overwrite, sans Administrateur).
+    const options = { name, type: ChannelType.GuildVoice, parent: parentId };
     if (userLimit) options.userLimit = userLimit;
     const channel = await guild.channels.create(options);
     this.tempVoice.create(channel.id, guild.id, member.id, { locked });
+    // Puis l'overwrite du propriétaire (et le verrou mémorisé), changements ciblés.
+    const ownerReady = await this.#withLock(channel.id, async () => {
+      let desired = tv.setBits(tv.snapshot(channel), member.id, OverwriteType.Member, { allow: OWNER_PERMISSIONS });
+      if (locked) {
+        desired = tv.accessOverwrites(desired, {
+          flag: PermissionFlagsBits.Connect,
+          on: true,
+          guildId: guild.id,
+          parent: parentOverwrites(parent),
+          roles: guild.roles?.cache,
+          keep: [member.id],
+        });
+      }
+      await this.#applyOverwrites(channel, desired, 'Vocal temporaire : droits du propriétaire');
+    }).then(() => true, (err) => {
+      logger.warn(`Droits du propriétaire non appliqués sur le vocal ${channel.id} (${guild.id}) :`, err?.message);
+      return false;
+    });
     try {
       await member.voice.setChannel(channel);
     } catch {
@@ -169,6 +247,9 @@ class TempVoiceService {
     // Panneau de contrôle dans le chat textuel du vocal (facultatif).
     if (cfg.panel !== false) await this.postPanel(channel, { mention: true }).catch(() => {});
     else if (typeof channel.send === 'function') await channel.send({ embeds: [this.welcomeCard(member, channel)] }).catch(() => {});
+    if (!ownerReady) {
+      await this.#notify(member, channel, `Votre vocal <#${channel.id}> est créé, mais je n'ai pas pu vous y donner vos droits de propriétaire${locked ? ' ni le verrouiller' : ''}. Le panneau de contrôle fonctionne ; prévenez un administrateur si le problème persiste.`);
+    }
   }
 
   // -------------------------------------------------------------- panneau
@@ -204,8 +285,9 @@ class TempVoiceService {
     const record = this.record(channel.id);
     if (!record?.panel_message_id || !channel.messages?.fetch) return false;
     const message = await channel.messages.fetch(record.panel_message_id).catch(() => null);
-    if (!message) return false;
-    await message.edit({ ...this.panel(channel, notice), content: null });
+    const payload = message ? this.panel(channel, notice) : null;
+    if (!payload) return false;
+    await message.edit({ ...payload, content: null });
     return true;
   }
 
@@ -236,14 +318,16 @@ class TempVoiceService {
    * @param {'lock'|'hide'} kind
    */
   async setAccess(channel, kind, on, actorId) {
-    const record = this.record(channel.id);
-    if (!record) throw new UserError('Ce salon n\'est plus un vocal temporaire.');
-    const flag = kind === 'lock' ? PermissionFlagsBits.Connect : PermissionFlagsBits.ViewChannel;
-    const { current, parent } = this.#overwrites(channel);
-    const list = tv.accessOverwrites(current, { flag, on, guildId: channel.guild.id, parent, roles: channel.guild.roles?.cache, keep: this.#keep(channel, record) });
-    await channel.permissionOverwrites.set(list, `Vocal temporaire : ${kind === 'lock' ? (on ? 'verrouillé' : 'déverrouillé') : on ? 'masqué' : 'affiché'}`);
-    this.tempVoice.setState?.(channel.id, kind === 'lock' ? { locked: on } : { hidden: on });
-    if (kind === 'lock') this.#remember(channel, actorId, { locked: on });
+    return this.#withLock(channel.id, async () => {
+      const record = this.record(channel.id);
+      if (!record) throw new UserError('Ce salon n\'est plus un vocal temporaire.');
+      const flag = kind === 'lock' ? PermissionFlagsBits.Connect : PermissionFlagsBits.ViewChannel;
+      const { current, parent } = this.#overwrites(channel);
+      const list = tv.accessOverwrites(current, { flag, on, guildId: channel.guild.id, parent, roles: channel.guild.roles?.cache, keep: this.#keep(channel, record) });
+      await this.#applyOverwrites(channel, list, `Vocal temporaire : ${kind === 'lock' ? (on ? 'verrouillé' : 'déverrouillé') : on ? 'masqué' : 'affiché'}`);
+      this.tempVoice.setState?.(channel.id, kind === 'lock' ? { locked: on } : { hidden: on });
+      if (kind === 'lock') this.#remember(channel, actorId, { locked: on });
+    });
   }
 
   /**
@@ -314,33 +398,45 @@ class TempVoiceService {
     for (const id of ok) {
       const member = channel.members?.get?.(id);
       if (!member) continue;
-      await member.voice.disconnect('Expulsé du vocal temporaire');
-      done.push(id);
+      // Un échec (membre parti entre-temps…) n'interrompt pas les autres ; seuls les expulsés sont annoncés.
+      const kicked = await member.voice.disconnect('Expulsé du vocal temporaire').then(() => true, () => false);
+      if (kicked) done.push(id);
     }
     return { done, refused };
   }
 
   /** Bannit du salon (Connect refusé) et déconnecte les bannis présents. */
   async ban(channel, ids, { actorId, staff }) {
-    const record = this.record(channel.id);
-    const { ok, refused } = this.#targets(channel, ids.filter((id) => id !== actorId), { staff, record });
-    if (ok.length) {
-      await channel.permissionOverwrites.set(tv.banOverwrites(tv.snapshot(channel), ok), 'Vocal temporaire : membres bannis du salon');
-      for (const id of ok) await channel.members?.get?.(id)?.voice?.disconnect('Banni du vocal temporaire').catch(() => {});
-    }
-    return { done: ok, refused };
+    return this.#withLock(channel.id, async () => {
+      const record = this.record(channel.id);
+      if (!record) throw new UserError('Ce salon n\'est plus un vocal temporaire.');
+      const { ok, refused } = this.#targets(channel, ids.filter((id) => id !== actorId), { staff, record });
+      if (ok.length) {
+        await this.#applyOverwrites(channel, tv.banOverwrites(tv.snapshot(channel), ok), 'Vocal temporaire : membres bannis du salon');
+        for (const id of ok) await channel.members?.get?.(id)?.voice?.disconnect('Banni du vocal temporaire').catch(() => {});
+      }
+      return { done: ok, refused };
+    });
   }
 
   /** Autorise (voir + rejoindre, même verrouillé ; lève un bannissement). */
   async permit(channel, ids) {
     const me = channel.guild.members?.me?.id;
     const ok = [...new Set(ids)].filter((id) => tv.SNOWFLAKE.test(id) && id !== me);
-    if (ok.length) await channel.permissionOverwrites.set(tv.permitOverwrites(tv.snapshot(channel), ok), 'Vocal temporaire : membres autorisés');
-    return { done: ok, refused: [] };
+    if (!ok.length) return { done: ok, refused: [] };
+    return this.#withLock(channel.id, async () => {
+      await this.#applyOverwrites(channel, tv.permitOverwrites(tv.snapshot(channel), ok), 'Vocal temporaire : membres autorisés');
+      return { done: ok, refused: [] };
+    });
   }
 
   /** Transfère la propriété à un membre connecté. */
   async transfer(channel, toId) {
+    return this.#withLock(channel.id, () => this.#transfer(channel, toId));
+  }
+
+  /** Transfert (appelé dans la file du salon : l'enregistrement est relu ici). */
+  async #transfer(channel, toId) {
     const record = this.record(channel.id);
     if (!record) throw new UserError('Ce salon n\'est plus un vocal temporaire.');
     if (!tv.SNOWFLAKE.test(toId ?? '')) throw new UserError('Membre invalide.');
@@ -348,19 +444,21 @@ class TempVoiceService {
     const target = channel.members?.get?.(toId);
     if (!target) throw new UserError('Le nouveau propriétaire doit être connecté à ce salon.');
     if (target.user?.bot) throw new UserError('Un bot ne peut pas être propriétaire d\'un vocal.');
-    await channel.permissionOverwrites.set(tv.transferOverwrites(tv.snapshot(channel), record.owner_id, toId), 'Vocal temporaire : transfert de propriété');
+    await this.#applyOverwrites(channel, tv.transferOverwrites(tv.snapshot(channel), record.owner_id, toId), 'Vocal temporaire : transfert de propriété');
     this.tempVoice.setOwner?.(channel.id, toId);
     return record.owner_id;
   }
 
-  /** Réclame un salon dont le propriétaire est parti. */
+  /** Réclame un salon dont le propriétaire est parti (deux réclamations simultanées : la seconde est refusée). */
   async claim(channel, memberId) {
-    const record = this.record(channel.id);
-    if (!record) throw new UserError('Ce salon n\'est plus un vocal temporaire.');
-    if (record.owner_id === memberId) throw new UserError('Vous êtes déjà propriétaire de ce salon.');
-    if (channel.members?.has?.(record.owner_id)) throw new UserError(`Le propriétaire <@${record.owner_id}> est toujours connecté : demandez-lui un transfert.`);
-    if (!channel.members?.has?.(memberId)) throw new UserError('Rejoignez ce salon vocal pour pouvoir le réclamer.');
-    return this.transfer(channel, memberId);
+    return this.#withLock(channel.id, async () => {
+      const record = this.record(channel.id);
+      if (!record) throw new UserError('Ce salon n\'est plus un vocal temporaire.');
+      if (record.owner_id === memberId) throw new UserError('Vous êtes déjà propriétaire de ce salon.');
+      if (channel.members?.has?.(record.owner_id)) throw new UserError(`Le propriétaire <@${record.owner_id}> est toujours connecté : demandez-lui un transfert.`);
+      if (!channel.members?.has?.(memberId)) throw new UserError('Rejoignez ce salon vocal pour pouvoir le réclamer.');
+      return this.#transfer(channel, memberId);
+    });
   }
 
   // -------------------------------------------------------------- divers
@@ -375,7 +473,7 @@ class TempVoiceService {
       description: [
         `Bienvenue ${member} ! Ce salon est à vous : il sera supprimé automatiquement dès qu'il sera vide.`,
         '',
-        bullets(['Déplacez ou déconnectez les membres si besoin.']),
+        bullets(['Invitez qui vous voulez : le salon vit tant que quelqu\'un y est connecté.']),
       ],
       fields: [field(ICONS.owner, 'Propriétaire', `${member}`), field(ICONS.voice, 'Salon', `${channel}`)],
       footer: 'Vocaux temporaires',
@@ -408,10 +506,12 @@ class TempVoiceService {
         dropped += 1;
         continue;
       }
-      if (channel.members?.size === 0) {
-        this.tempVoice.delete(record.channel_id);
-        await channel.delete('Vocal temporaire vide').catch(() => {});
-        deleted += 1;
+      if (humanCount(channel) === 0) {
+        const ok = await channel.delete('Vocal temporaire vide').then(() => true, (err) => isUnknownChannel(err));
+        if (ok) {
+          this.tempVoice.delete(record.channel_id);
+          deleted += 1;
+        }
       }
     }
     return { deleted, dropped };
