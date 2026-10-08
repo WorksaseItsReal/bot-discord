@@ -6,15 +6,28 @@ const { paginate } = require('../../utils/pagination');
 
 const PER_PAGE = 20;
 
+/**
+ * Nombre de membres en cache par rôle, en UNE passe sur les membres
+ * (Role#members refiltre tout le cache à chaque appel : O(rôles × membres)). Pur.
+ * @returns {Map<string, number>}
+ */
+function countMembersByRole(guild) {
+  const counts = new Map();
+  for (const member of guild.members?.cache?.values?.() ?? []) {
+    for (const roleId of member.roles?.cache?.keys?.() ?? []) counts.set(roleId, (counts.get(roleId) ?? 0) + 1);
+  }
+  return counts;
+}
+
 /** Pages de la liste des rôles (triés du plus haut au plus bas). Pur. */
-function buildPages(guild, roles) {
+function buildPages(guild, roles, counts = countMembersByRole(guild)) {
   const managed = roles.filter((r) => r.managed).length;
   const hoisted = roles.filter((r) => r.hoist).length;
   const pages = [];
   for (let i = 0; i < roles.length; i += PER_PAGE) {
     const lines = roles.slice(i, i + PER_PAGE).map((r, j) => {
       const tags = [r.managed ? ICONS.bot : '', r.hoist ? ICONS.status : '', r.mentionable ? '🔔' : ''].filter(Boolean).join(' ');
-      return `\`${String(i + j + 1).padStart(3, ' ')}\` ${r}${tags ? `  ${tags}` : ''} · ${r.members?.size ?? 0}`;
+      return `\`${String(i + j + 1).padStart(3, ' ')}\` ${r}${tags ? `  ${tags}` : ''} · ${counts.get(r.id) ?? 0}`;
     });
     pages.push(
       card({
@@ -37,6 +50,7 @@ function buildPages(guild, roles) {
 
 module.exports = {
   buildPages,
+  countMembersByRole,
   data: new SlashCommandBuilder().setName('roles').setDescription('Liste les rôles du serveur.'),
   async execute(interaction) {
     const guild = interaction.guild;

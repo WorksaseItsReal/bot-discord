@@ -8,6 +8,7 @@ const { permissionLabel } = require('../../utils/permissionNames');
 const { card, field, wide, ICONS, subtext, buttonRows } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 const { inviteButton } = require('../utility/invite');
+const { DEFAULT_COOLDOWN_MS } = require('../../events/interactionCreate');
 
 /**
  * /help interactif : accueil avec toutes les catégories, menu déroulant pour
@@ -164,6 +165,14 @@ function chunkFields(icon, label, lines) {
   return out;
 }
 
+/** Délai entre deux utilisations : celui de la commande, sinon le délai par défaut du routeur. */
+function cooldownLabel(cmd) {
+  const ms = cmd.cooldown ?? DEFAULT_COOLDOWN_MS;
+  if (!ms) return 'Aucun';
+  const s = ms / 1000;
+  return `\`${Number.isInteger(s) ? s : s.toFixed(1).replace('.', ',')} s\`${cmd.cooldown == null ? ' (par défaut)' : ''}`;
+}
+
 function commandDetailEmbed(cmd) {
   const data = cmd.data.toJSON();
   const options = data.options || [];
@@ -171,7 +180,7 @@ function commandDetailEmbed(cmd) {
   const fields = [
     field(ICONS.category, 'Catégorie', `${meta.emoji} ${meta.label}`),
     field(ICONS.mail, 'En message privé', cmd.guildOnly === false ? 'Oui' : 'Non'),
-    field(ICONS.duration, 'Délai', cmd.cooldown ? `\`${Math.round(cmd.cooldown / 1000)} s\`` : 'Aucun'),
+    field(ICONS.duration, 'Délai', cooldownLabel(cmd)),
   ];
   if (data.default_member_permissions) {
     const perms = new PermissionsBitField(BigInt(data.default_member_permissions)).toArray().map(permissionLabel);
@@ -201,6 +210,7 @@ function commandDetailEmbed(cmd) {
 }
 
 module.exports.commandDetailEmbed = commandDetailEmbed;
+module.exports.cooldownLabel = cooldownLabel;
 module.exports.homeEmbed = homeEmbed;
 module.exports.categoryEmbed = categoryEmbed;
 module.exports.groupByCategory = groupByCategory;

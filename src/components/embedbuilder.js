@@ -2,7 +2,7 @@
 
 const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const { status, TONES, ICONS, linkButton, buttonRows } = require('../utils/ui');
-const { isHttpUrl } = require('../commands/utility/embed');
+const { validateEmbedInput } = require('../commands/utility/embed');
 const { parseColor } = require('../utils/projectFormat');
 const { UserError } = require('../core/errors');
 
@@ -29,7 +29,7 @@ module.exports = {
     const description = interaction.fields.getTextInputValue('description');
     const color = interaction.fields.getTextInputValue('color');
     const image = interaction.fields.getTextInputValue('image')?.trim();
-    if (image && !isHttpUrl(image)) throw new UserError('L\'URL de l\'image doit commencer par `http://` ou `https://`.');
+    validateEmbedInput({ title, description, image });
     if (title) embed.setTitle(title);
     embed.setDescription(description);
     embed.setColor(parseColor(color) ?? TONES.brand);

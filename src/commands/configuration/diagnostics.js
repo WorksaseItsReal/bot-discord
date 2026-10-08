@@ -4,19 +4,17 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { truncate, progressBar } = require('../../utils/embeds');
 const { card, wide, subtext, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+const { permissionLabel } = require('../../utils/permissionNames');
+const { INVITE_PERMISSIONS } = require('../utility/invite');
 
-const RECOMMENDED_PERMS = [
-  ['Voir les salons', PermissionFlagsBits.ViewChannel],
-  ['Envoyer des messages', PermissionFlagsBits.SendMessages],
-  ['Intégrer des liens', PermissionFlagsBits.EmbedLinks],
-  ['Bannir des membres', PermissionFlagsBits.BanMembers],
-  ['Expulser des membres', PermissionFlagsBits.KickMembers],
-  ['Exclure temporairement', PermissionFlagsBits.ModerateMembers],
-  ['Gérer les messages', PermissionFlagsBits.ManageMessages],
-  ['Gérer les rôles', PermissionFlagsBits.ManageRoles],
-  ['Gérer les salons', PermissionFlagsBits.ManageChannels],
-  ['Voir les logs d\'audit', PermissionFlagsBits.ViewAuditLog],
-];
+/** Libellés propres au diagnostic (sinon : libellé français commun). */
+const PERM_LABELS = { ModerateMembers: 'Exclure temporairement', ViewAuditLog: 'Voir les logs d\'audit' };
+
+/** Permissions contrôlées = exactement celles demandées à l'invitation (/invite). */
+const RECOMMENDED_PERMS = INVITE_PERMISSIONS.map((name) => [PERM_LABELS[name] ?? permissionLabel(name), PermissionFlagsBits[name]]);
+
+/** Le salon « Créer un vocal » : il suffit de le voir, de s'y connecter et d'en déplacer les membres. */
+const HUB_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.MoveMembers];
 
 /** Niveau d'un contrôle → pastille. Seuls ok / warn / fail comptent dans le score. */
 const LEVEL = Object.freeze({ ok: ICONS.success, warn: ICONS.warning, fail: ICONS.error, info: ICONS.info });
@@ -48,11 +46,12 @@ function analyze(guild, cfg) {
   if (me) {
     const above = guild.roles.cache.filter((r) => r.position > me.roles.highest.position).size;
     hierarchy.checks.push(
-      above <= 1
+      above === 0
         ? { level: 'ok', text: `Mon rôle ${me.roles.highest} est en haut de la liste` }
-        : { level: 'warn', text: `**${above}** rôles au-dessus du mien : je ne peux pas modérer leurs membres`, tip: 'Remontez mon rôle dans **Paramètres du serveur › Rôles**.' },
+        : { level: 'warn', text: `**${above}** rôle${above > 1 ? 's' : ''} au-dessus du mien : je ne peux pas modérer leurs membres`, tip: 'Remontez mon rôle dans **Paramètres du serveur › Rôles**.' },
     );
   }
+  for (const [id, label, cmd, assign] of roleRefs(cfg)) hierarchy.checks.push(roleCheck(guild, me, id, label, cmd, assign));
   groups.push(hierarchy);
 
   // 3) Salons de logs
@@ -73,11 +72,18 @@ function analyze(guild, cfg) {
     [cfg.tickets?.logChannel, 'Transcripts des tickets', '/tickets'],
     [cfg.tickets?.panelChannelId, 'Panneau des tickets', '/tickets'],
     [cfg.modmail?.categoryId, 'Catégorie du modmail', '/modmail'],
+    [cfg.modmail?.logChannel, 'Transcripts du modmail', '/modmail'],
     [cfg.suggestions?.channelId, 'Salon des suggestions', '/suggestion'],
-    [cfg.tempVoice?.enabled ? cfg.tempVoice.hubChannelId : null, 'Salon « Créer un vocal »', '/tempvoice'],
     [cfg.projects?.channelId, 'Salon des projets', '/projet config'],
+    [cfg.welcome?.join?.channelId, 'Salon de bienvenue', '/bienvenue'],
+    [cfg.welcome?.leave?.channelId, 'Salon des départs', '/bienvenue'],
+    [cfg.welcome?.verification?.channelId, 'Salon de vérification', '/bienvenue'],
+    [cfg.levels?.announce?.mode === 'channel' ? cfg.levels.announce.channelId : null, 'Annonces de niveau', '/niveaux'],
   ];
   for (const [id, label, cmd] of refs) if (id) modules.checks.push(channelCheck(guild, me, id, label, cmd));
+  if (cfg.tempVoice?.enabled && cfg.tempVoice.hubChannelId) {
+    modules.checks.push(channelCheck(guild, me, cfg.tempVoice.hubChannelId, 'Salon « Créer un vocal »', '/tempvoice', { perms: HUB_PERMS, need: 'voir, me connecter et déplacer des membres' }));
+  }
   if (cfg.antiraid?.enabled && !cfg.antiraid.alertChannel) {
     modules.checks.push({ level: 'warn', text: 'AntiRaid actif sans salon d\'alerte', tip: 'Définissez un salon d\'alerte : `/antiraid` › **Alertes**.' });
   }
@@ -86,17 +92,51 @@ function analyze(guild, cfg) {
   return groups;
 }
 
-/** Vérifie qu'un salon configuré existe encore et que je peux y écrire. */
-function channelCheck(guild, me, id, label, command) {
+/**
+ * Vérifie qu'un salon configuré existe encore et que j'y ai les permissions utiles
+ * (par défaut : écrire et intégrer des liens, contrôlé seulement sur un salon textuel).
+ */
+function channelCheck(guild, me, id, label, command, { perms: required = WRITE_PERMS, need = 'écrire et intégrer des liens' } = {}) {
   const channel = guild.channels.cache.get(id);
   if (!channel) return { level: 'fail', text: `${label} : salon introuvable (supprimé ?)`, tip: `Reconfigurez **${label}** avec \`${command}\`.` };
-  if (channel.isTextBased?.() && me) {
+  const applies = required !== WRITE_PERMS || channel.isTextBased?.();
+  if (applies && me && typeof channel.permissionsFor === 'function') {
     const perms = channel.permissionsFor(me);
-    if (perms && !perms.has(WRITE_PERMS)) {
-      return { level: 'warn', text: `${label} : ${channel} · accès refusé`, tip: `Autorisez-moi à écrire et intégrer des liens dans ${channel}.` };
+    if (perms && !perms.has(required)) {
+      return { level: 'warn', text: `${label} : ${channel} · accès refusé`, tip: `Autorisez-moi à ${need} dans ${channel}.` };
     }
   }
   return { level: 'ok', text: `${label} : ${channel}` };
+}
+
+/**
+ * Rôles référencés par la configuration : [id, libellé, commande, attribué par le bot ?].
+ * Les rôles que j'attribue doivent être sous mon rôle le plus haut ; les rôles staff
+ * servent seulement aux permissions des salons (pas de contrainte de hiérarchie).
+ */
+function roleRefs(cfg) {
+  const out = [];
+  const w = cfg.welcome || {};
+  for (const id of w.autoRoles?.humans || []) out.push([id, 'Rôle auto (membres)', '/bienvenue', true]);
+  for (const id of w.autoRoles?.bots || []) out.push([id, 'Rôle auto (bots)', '/bienvenue', true]);
+  if (w.verification?.roleId) out.push([w.verification.roleId, 'Rôle de vérification', '/bienvenue', true]);
+  for (const r of cfg.levels?.rewards || []) if (r?.roleId) out.push([r.roleId, `Récompense niveau ${r.level}`, '/niveaux', true]);
+  if (cfg.moderation?.mutedRoleId) out.push([cfg.moderation.mutedRoleId, 'Rôle muet', '/settings moderation', true]);
+  const support = new Set([...(cfg.tickets?.supportRoleIds || []), cfg.tickets?.supportRoleId].filter(Boolean));
+  for (const id of support) out.push([id, 'Rôle staff des tickets', '/tickets', false]);
+  if (cfg.logs?.staffRoleId) out.push([cfg.logs.staffRoleId, 'Rôle staff des logs', '/logs', false]);
+  if (cfg.modmail?.staffRoleId) out.push([cfg.modmail.staffRoleId, 'Rôle staff du modmail', '/modmail', false]);
+  return out;
+}
+
+/** Vérifie qu'un rôle configuré existe encore (et, si je l'attribue, qu'il est sous mon rôle le plus haut). */
+function roleCheck(guild, me, id, label, command, assign) {
+  const role = guild.roles.cache.get(id);
+  if (!role) return { level: 'fail', text: `${label} : rôle introuvable (supprimé ?)`, tip: `Reconfigurez **${label}** avec \`${command}\`.` };
+  if (assign && me?.roles?.highest && role.position >= me.roles.highest.position) {
+    return { level: 'warn', text: `${label} : ${role} · au-dessus de mon rôle`, tip: `Placez mon rôle au-dessus de ${role} pour que je puisse l'attribuer.` };
+  }
+  return { level: 'ok', text: `${label} : ${role}` };
 }
 
 /** Score (0-100) : un avertissement compte pour moitié, une erreur pour zéro. */
@@ -153,6 +193,7 @@ module.exports = {
   category: 'configuration',
   analyze,
   score,
+  RECOMMENDED_PERMS,
   data: new SlashCommandBuilder()
     .setName('diagnostics')
     .setDescription('Analyse la configuration du serveur et détecte les problèmes.')

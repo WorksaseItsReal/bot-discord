@@ -117,8 +117,9 @@ function evaluate(input) {
       return v;
     }
     if (t.type === 'id') {
-      if (t.value in CONSTANTS) return CONSTANTS[t.value];
-      const fn = FUNCTIONS[t.value];
+      // hasOwn : « constructor », « toString », « __proto__ »… ne sont ni des constantes ni des fonctions.
+      if (Object.hasOwn(CONSTANTS, t.value)) return CONSTANTS[t.value];
+      const fn = Object.hasOwn(FUNCTIONS, t.value) ? FUNCTIONS[t.value] : null;
       if (!fn) throw new CalcError(`Fonction inconnue : « ${t.value} ».`);
       if (!isOp('(')) throw new CalcError(`Parenthèse attendue après « ${t.value} ».`);
       next();

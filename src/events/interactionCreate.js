@@ -236,3 +236,4 @@ async function reportError(client, interaction, err, source) {
 module.exports.reportError = reportError;
 module.exports.withDeleteButton = withDeleteButton;
 module.exports.componentExistsOnMessage = componentExistsOnMessage;
+module.exports.DEFAULT_COOLDOWN_MS = DEFAULT_COOLDOWN_MS;

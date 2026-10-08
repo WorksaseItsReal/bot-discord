@@ -5,11 +5,29 @@ const { brandFooter } = require('./embeds');
 const { ICONS, deleteButton } = require('./ui');
 
 /**
- * Pagination interactive à partir d'une liste de pages (EmbedBuilder[]).
+ * Source de pages construites à la demande (et mémorisées) : `paginate` n'appelle
+ * `build(i)` que pour les pages réellement affichées.
+ * @param {number} length nombre de pages
+ * @param {(index: number) => import('discord.js').EmbedBuilder} build
+ * @returns {{ length: number, at: (index: number) => import('discord.js').EmbedBuilder }}
+ */
+function lazyPages(length, build) {
+  const cache = new Map();
+  return {
+    length,
+    at(index) {
+      if (!cache.has(index)) cache.set(index, build(index));
+      return cache.get(index);
+    },
+  };
+}
+
+/**
+ * Pagination interactive à partir d'une liste de pages (EmbedBuilder[] ou `lazyPages`).
  * Gère les boutons précédent/suivant et désactive les composants à la fin.
  *
  * @param {import('discord.js').RepliableInteraction} interaction
- * @param {import('discord.js').EmbedBuilder[]} pages
+ * @param {import('discord.js').EmbedBuilder[] | ReturnType<typeof lazyPages>} pages
  * @param {{ timeout?: number, ephemeral?: boolean }} [opts]
  */
 async function paginate(interaction, pages, opts = {}) {
@@ -44,12 +62,15 @@ async function paginate(interaction, pages, opts = {}) {
     return rows;
   };
 
-  // Conserve le texte de pied de page propre à chaque page et y ajoute « Page x/y ».
-  const baseFooters = pages.map((p) => p.data?.footer?.text?.split(' • ').slice(1).join(' • ') || '');
+  // Conserve le texte de pied de page propre à chaque page (lu avant la première
+  // modification, page par page) et y ajoute « Page x/y ».
+  const baseFooters = new Map();
   const render = () => {
-    const extra = baseFooters[index] ? `${baseFooters[index]} • ` : '';
-    const footer = pages.length > 1 ? `${extra}Page ${index + 1}/${pages.length}` : baseFooters[index] || undefined;
-    return { embeds: [pages[index].setFooter(brandFooter(footer))], components: controls() };
+    const page = pages.at(index);
+    if (!baseFooters.has(index)) baseFooters.set(index, page.data?.footer?.text?.split(' • ').slice(1).join(' • ') || '');
+    const base = baseFooters.get(index);
+    const footer = pages.length > 1 ? `${base ? `${base} • ` : ''}Page ${index + 1}/${pages.length}` : base || undefined;
+    return { embeds: [page.setFooter(brandFooter(footer))], components: controls() };
   };
 
   const message = interaction.deferred || interaction.replied
@@ -92,4 +113,4 @@ async function editPrompt(interaction, message, payload) {
   }
 }
 
-module.exports = { paginate, editPrompt };
+module.exports = { paginate, editPrompt, lazyPages };
