@@ -232,7 +232,7 @@ async function publishTo(interaction, service, project, channel) {
   service.assertCanEdit(project, interaction.member);
   if (!channel?.isTextBased?.()) throw new UserError('Choisissez un salon textuel.');
   // La personne doit elle-même pouvoir écrire dans le salon visé.
-  if (!channel.permissionsFor?.(interaction.member)?.has(PermissionFlagsBits.SendMessages)) {
+  if (!channel.permissionsFor?.(interaction.member)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
     throw new UserError(`Vous ne pouvez pas envoyer de messages dans ${channel}.`);
   }
   await interaction.deferReply({ ephemeral: true });

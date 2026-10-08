@@ -5,7 +5,8 @@ const { truncate } = require('../utils/embeds');
 const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
-const { fetchChannelHistory, channelGone, TRANSCRIPT_MAX } = require('./TicketService');
+// transcriptLine : partagée avec les tickets (les messages ModMail sont surtout des cartes).
+const { fetchChannelHistory, channelGone, createInCategory, transcriptLine, TRANSCRIPT_MAX } = require('./TicketService');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('modmail');
@@ -25,23 +26,6 @@ function attachmentsList(message) {
   return list.slice(0, 10).map((a) => `[${truncate(a.name ?? 'fichier', 60)}](${a.url})`).join('\n');
 }
 
-/**
- * Une ligne de transcript : les messages ModMail sont surtout des cartes
- * (messages relayés, réponses du staff), on reprend donc leur en-tête et leur texte. Pur.
- */
-function transcriptLine(m) {
-  const parts = [];
-  if (m.content) parts.push(m.content);
-  for (const e of m.embeds ?? []) {
-    const head = [e.author?.name ?? e.data?.author?.name, e.title ?? e.data?.title].filter(Boolean).join(' — ');
-    const body = e.description ?? e.data?.description;
-    parts.push(`[${head || 'embed'}]${body ? ` ${body.replace(/\s+/g, ' ')}` : ''}`);
-  }
-  const files = m.attachments?.size ? [...m.attachments.values()].map((a) => a.url) : [];
-  if (files.length) parts.push(`[pièces jointes : ${files.join(', ')}]`);
-  const at = new Date(m.createdTimestamp ?? Date.now()).toISOString();
-  return `[${at}] ${m.author?.tag ?? m.author?.username ?? 'inconnu'}: ${parts.join(' ')}`;
-}
 
 /** Transcript texte d'une conversation ModMail. Pur. */
 function buildTranscript(thread, channel, history) {
@@ -134,7 +118,30 @@ class ModmailService {
     this.#noGuildUntil.set(userId, now + NO_GUILD_TTL_MS);
   }
 
+  /**
+   * Relaie le DM ; en cas d'échec (salon impossible à créer, catégorie pleine,
+   * permissions…), le membre est prévenu que son message n'est pas parti, puis
+   * l'erreur remonte (journalisée par l'événement messageCreate).
+   */
   async #handleUserDM(message) {
+    try {
+      await this.#relay(message);
+    } catch (err) {
+      await message
+        .reply({
+          embeds: [
+            status.warn(
+              'Votre message n\'a pas pu être transmis au staff à cause d\'un problème côté serveur. Réessayez dans quelques minutes.',
+              'Message non transmis',
+            ),
+          ],
+        })
+        .catch(() => {});
+      throw err;
+    }
+  }
+
+  async #relay(message) {
     const userId = message.author.id;
     let guild = null;
     let channel = null;
@@ -143,9 +150,13 @@ class ModmailService {
     const thread = this.modmail.getOpenByUser(userId);
     if (thread) {
       guild = this.client.guilds.cache.get(thread.guild_id) ?? null;
-      channel = guild ? await guild.channels.fetch(thread.channel_id).catch(() => null) : null;
+      channel = guild ? guild.channels.cache?.get?.(thread.channel_id) ?? (await guild.channels.fetch(thread.channel_id).catch(() => null)) : null;
       if (!channel) {
-        // Salon supprimé (ou serveur quitté) : on ferme la ligne périmée.
+        // Seul un salon CONFIRMÉ supprimé (10003) ou un serveur quitté ferme la
+        // conversation : une erreur transitoire ne doit pas en ouvrir une seconde.
+        if (guild && !(await channelGone(guild, thread.channel_id))) {
+          throw new Error(`Salon ModMail ${thread.channel_id} momentanément inaccessible (conversation #${thread.id}).`);
+        }
         this.modmail.close(thread.channel_id);
         guild = null;
       }
@@ -184,7 +195,8 @@ class ModmailService {
         overwrites.push({ id: staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
       }
       const parent = cfg.categoryId && guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? cfg.categoryId : null;
-      channel = await guild.channels.create({
+      // Catégorie pleine (50 salons) : conversation créée hors catégorie plutôt que perdue.
+      channel = await createInCategory(guild, {
         name: `modmail-${message.author.username}`.slice(0, 90),
         type: ChannelType.GuildText,
         parent,
@@ -195,6 +207,8 @@ class ModmailService {
       const member = await guild.members.fetch(userId).catch(() => null);
       await channel.send({
         content: staffRoleId ? `<@&${staffRoleId}>` : undefined,
+        // Le client n'autorise que les mentions d'utilisateurs par défaut : le rôle staff doit être explicite.
+        allowedMentions: { roles: staffRoleId && staffRoleId !== guild.id ? [staffRoleId] : [] },
         embeds: [this.#openingCard(message.author, member)],
         components: this.controls(),
       });

@@ -181,7 +181,7 @@ test('scheduler : stop() attend la fin du tick en cours', async () => {
 
 test('auto-backup : créateur null (sauvegarde automatique)', async () => {
   const created = [];
-  const guild = { id: 'g1' };
+  const guild = { id: 'g1', available: true };
   const client = {
     user: { id: 'bot' },
     guilds: { cache: new Map([['g1', guild]]) },

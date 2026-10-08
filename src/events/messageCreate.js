@@ -4,6 +4,7 @@ const { ChannelType } = require('discord.js');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('automod');
+const modmailLogger = createLogger('modmail');
 
 module.exports = {
   name: 'messageCreate',
@@ -13,7 +14,8 @@ module.exports = {
 
     // DM -> ModMail
     if (!message.guild || message.channel?.type === ChannelType.DM) {
-      await client.services.modmail.handleUserDM(message).catch(() => {});
+      // Le membre est déjà prévenu par le service ; l'erreur reste visible dans les logs.
+      await client.services.modmail.handleUserDM(message).catch((err) => modmailLogger.warn(`Relais ModMail impossible (utilisateur ${message.author?.id}) :`, err?.message ?? err));
       return;
     }
 

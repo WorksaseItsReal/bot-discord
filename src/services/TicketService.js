@@ -9,6 +9,48 @@ const { UserError } = require('../core/errors');
 
 /** Nombre maximal de messages repris dans un transcript. */
 const TRANSCRIPT_MAX = 1000;
+/** Délai minimal entre deux ouvertures de ticket d'un même membre (évite les boucles qui pinguent le staff). */
+const OPEN_COOLDOWN_MS = 60_000;
+/** Mention de transcript : les fichiers ne sont pas copiés, seuls leurs liens figurent. */
+const ATTACHMENTS_NOTE = 'Les pièces jointes ne sont pas archivées : seuls leurs liens figurent, et ils expirent une fois le salon supprimé.';
+
+/**
+ * Création refusée parce que la catégorie est pleine (50 salons, 50035) ou le
+ * serveur au maximum de salons (30013) : on retente une fois sans catégorie.
+ */
+const PARENT_FULL_CODES = new Set([50035, 30013]);
+
+/**
+ * Crée un salon dans `parent`, puis sans catégorie si celle-ci est pleine.
+ * Partagé par les tickets et le ModMail.
+ * @returns {Promise<import('discord.js').GuildChannel>}
+ */
+async function createInCategory(guild, options) {
+  try {
+    return await guild.channels.create(options);
+  } catch (err) {
+    if (!options.parent || !PARENT_FULL_CODES.has(err?.code)) throw err;
+    return guild.channels.create({ ...options, parent: null });
+  }
+}
+
+/**
+ * Une ligne de transcript : contenu, puis en-tête et texte de chaque embed (les
+ * cartes du bot et les messages relayés sont des embeds), puis liens des pièces jointes. Pur.
+ */
+function transcriptLine(m) {
+  const parts = [];
+  if (m.content) parts.push(m.content);
+  for (const e of m.embeds ?? []) {
+    const head = [e.author?.name ?? e.data?.author?.name, e.title ?? e.data?.title].filter(Boolean).join(' — ');
+    const body = e.description ?? e.data?.description;
+    parts.push(`[${head || 'embed'}]${body ? ` ${body.replace(/\s+/g, ' ')}` : ''}`);
+  }
+  const files = m.attachments?.size ? [...m.attachments.values()].map((a) => a.url) : [];
+  if (files.length) parts.push(`[pièces jointes : ${files.join(', ')}]`);
+  const at = new Date(m.createdTimestamp ?? Date.now()).toISOString();
+  return `[${at}] ${m.author?.tag ?? m.author?.username ?? 'inconnu'}: ${parts.join(' ')}`;
+}
 
 /**
  * Historique d'un salon, du plus ancien au plus récent, en remontant par pages
@@ -109,6 +151,31 @@ class TicketService {
     this.creating = new Set();
     /** Salons de ticket en cours de fermeture. */
     this.closing = new Set();
+    /**
+     * Fermetures en cours (délai avant suppression) : `flush()` les termine
+     * immédiatement à l'arrêt du bot.
+     * @type {Map<string, { flushed: boolean, skip: (() => void) | null, done: Promise<void> | null }>}
+     */
+    this.closeJobs = new Map();
+    /** Dernière ouverture par membre (`guildId:userId` → horodatage). */
+    this.lastOpened = new Map();
+    this.openCooldownMs = OPEN_COOLDOWN_MS;
+  }
+
+  /** Refuse une nouvelle ouverture trop rapprochée de la précédente (boucle ouverture/fermeture). */
+  #assertOpenCooldown(key, now = Date.now()) {
+    const last = this.lastOpened.get(key);
+    if (last && now - last < this.openCooldownMs) {
+      throw new UserError(`Vous venez d'ouvrir un ticket : patientez avant d'en ouvrir un nouveau (${discordTimestamp(last + this.openCooldownMs, 'R')}).`);
+    }
+  }
+
+  #rememberOpened(key, now = Date.now()) {
+    // Mémoire bornée : purge des entrées expirées quand la table grossit.
+    if (this.lastOpened.size >= 1000) {
+      for (const [k, at] of this.lastOpened) if (now - at >= this.openCooldownMs) this.lastOpened.delete(k);
+    }
+    this.lastOpened.set(key, now);
   }
 
   /** Le membre fait-il partie du support (rôle support configuré ou Gérer les salons) ? */
@@ -248,9 +315,12 @@ class TicketService {
   async create(guild, user, { reason = null } = {}) {
     const lockKey = `${guild.id}:${user.id}`;
     if (this.creating.has(lockKey)) throw new UserError('Votre ticket est déjà en cours de création…');
+    this.#assertOpenCooldown(lockKey);
     this.creating.add(lockKey);
     try {
-      return await this.#create(guild, user, reason);
+      const channel = await this.#create(guild, user, reason);
+      this.#rememberOpened(lockKey);
+      return channel;
     } finally {
       this.creating.delete(lockKey);
     }
@@ -278,7 +348,8 @@ class TicketService {
       overwrites.push({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
     }
 
-    const channel = await guild.channels.create({
+    // Catégorie pleine (50 salons) : le ticket est créé hors catégorie plutôt que refusé.
+    const channel = await createInCategory(guild, {
       name: `ticket-${user.username}`.slice(0, 90),
       type: ChannelType.GuildText,
       parent,
@@ -291,8 +362,10 @@ class TicketService {
     this.bumpStat(guild.id, 'opened');
 
     // La mention (hors embed) notifie l'auteur et le support.
+    // Mentions autorisées explicitement (le client n'autorise que les utilisateurs par défaut).
     await channel.send({
       content: [`${user}`, ...staffRoles.map((r) => `<@&${r}>`)].join(' '),
+      allowedMentions: { users: [user.id], roles: staffRoles.filter((id) => id !== guild.id) },
       ...this.welcome(ticket, { user, supportRoleId, supportRoleIds: staffRoles, reason }),
     });
     await this.logging.send(
@@ -372,24 +445,24 @@ class TicketService {
   }
 
   async generateTranscript(channel) {
+    return (await this.#transcript(channel)).content;
+  }
+
+  /** Transcript texte + nombre réel de messages repris (pas de comptage de lignes). */
+  async #transcript(channel) {
     const history = await this.fetchHistory(channel);
-    if (!history) return 'Transcript indisponible.';
+    if (!history) return { content: 'Transcript indisponible.', count: 0 };
     const { messages, truncated } = history;
     const ticket = this.tickets.getByChannel(channel.id);
     const header = [
       `Transcript — #${channel.name ?? channel.id}${ticket ? ` (ticket #${ticket.id})` : ''}`,
       `Généré le ${new Date().toISOString()} · ${messages.length} message(s)`,
       truncated ? `⚠ Transcript tronqué : seuls les ${messages.length} derniers messages sont inclus.` : null,
+      messages.some((m) => m.attachments?.size) ? `⚠ ${ATTACHMENTS_NOTE}` : null,
       '─'.repeat(60),
     ].filter(Boolean);
-    const lines = messages.map((m) => {
-      const extras = [
-        m.embeds?.length ? `[${m.embeds.length} embed(s)]` : null,
-        m.attachments?.size ? `[pièces jointes : ${[...m.attachments.values()].map((a) => a.url).join(', ')}]` : null,
-      ].filter(Boolean);
-      return `[${new Date(m.createdTimestamp).toISOString()}] ${m.author.tag}: ${m.content}${extras.length ? ` ${extras.join(' ')}` : ''}`;
-    });
-    return [...header, ...lines].join('\n');
+    // Embeds (cartes du bot) repris avec leur titre et leur texte, comme le ModMail.
+    return { content: [...header, ...messages.map(transcriptLine)].join('\n'), count: messages.length };
   }
 
   /**
@@ -399,8 +472,7 @@ class TicketService {
   async transcriptPayload(channel) {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
-    const content = await this.generateTranscript(channel);
-    const count = content.split('\n').filter((l) => l.startsWith('[')).length;
+    const { content, count } = await this.#transcript(channel);
     return {
       embeds: [
         card({
@@ -408,7 +480,11 @@ class TicketService {
           section: 'tickets',
           icon: '📄',
           title: `Transcript du ticket #${ticket.id}`,
-          description: ['Voici l\'historique du ticket au format texte.', subtext(`Les ${TRANSCRIPT_MAX} derniers messages au maximum sont inclus.`)],
+          description: [
+            'Voici l\'historique du ticket au format texte.',
+            subtext(`Les ${TRANSCRIPT_MAX} derniers messages au maximum sont inclus.`),
+            subtext(ATTACHMENTS_NOTE),
+          ],
           fields: [
             field(ICONS.user, 'Auteur', `<@${ticket.user_id}>`),
             field(ICONS.count, 'Messages', `**${count}**`),
@@ -431,47 +507,75 @@ class TicketService {
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
     if (this.closing.has(channel.id)) throw new UserError('Ce ticket est déjà en cours de fermeture.');
     this.closing.add(channel.id);
-    try {
-      if (onAccepted) await onAccepted();
-      if (delayMs && typeof channel.send === 'function') {
-        await channel
+    const job = { flushed: false, skip: null, done: null };
+    this.closeJobs.set(channel.id, job);
+    job.done = this.#close(channel, closedBy, ticket, { delayMs, onAccepted }, job).finally(() => {
+      this.closing.delete(channel.id);
+      this.closeJobs.delete(channel.id);
+    });
+    return job.done;
+  }
+
+  /**
+   * Arrêt du bot : termine immédiatement les fermetures en attente (délai de
+   * suppression écourté : transcript archivé, salon supprimé) et les attend.
+   */
+  async flush() {
+    const jobs = [...this.closeJobs.values()];
+    for (const job of jobs) {
+      job.flushed = true;
+      job.skip?.();
+    }
+    await Promise.allSettled(jobs.map((j) => j.done));
+  }
+
+  async #close(channel, closedBy, ticket, { delayMs, onAccepted }, job) {
+    if (onAccepted) await onAccepted();
+    if (delayMs && typeof channel.send === 'function') {
+      await channel
+        .send({
+          embeds: [
+            card({
+              tone: 'neutral',
+              section: 'tickets',
+              icon: ICONS.lock,
+              title: 'Fermeture du ticket',
+              description: [`${closedBy} a fermé ce ticket.`, `Le salon sera supprimé ${discordTimestamp(Date.now() + delayMs, 'R')}.`],
+              footer: 'Le transcript est archivé par le support',
+            }),
+          ],
+        })
+        .catch(() => {});
+    }
+    // Délai écourtable : flush() (arrêt du bot) termine la fermeture tout de suite.
+    if (delayMs && !job.flushed) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, delayMs);
+        job.skip = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+    }
+    const cfg = this.config.get(channel.guild.id).tickets;
+    const transcript = await this.generateTranscript(channel);
+    const closedAt = Date.now();
+    this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
+    this.bumpStat(channel.guild.id, 'closed');
+
+    if (cfg.logChannel) {
+      const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);
+      if (logCh?.isTextBased()) {
+        await logCh
           .send({
-            embeds: [
-              card({
-                tone: 'neutral',
-                section: 'tickets',
-                icon: ICONS.lock,
-                title: 'Fermeture du ticket',
-                description: [`${closedBy} a fermé ce ticket.`, `Le salon sera supprimé ${discordTimestamp(Date.now() + delayMs, 'R')}.`],
-                footer: 'Le transcript est archivé par le support',
-              }),
-            ],
+            embeds: [this.closureCard(ticket, closedBy, closedAt, channel)],
+            files: [{ attachment: Buffer.from(transcript, 'utf8'), name: `ticket-${ticket.id}.txt` }],
           })
           .catch(() => {});
       }
-      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
-      const cfg = this.config.get(channel.guild.id).tickets;
-      const transcript = await this.generateTranscript(channel);
-      const closedAt = Date.now();
-      this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
-      this.bumpStat(channel.guild.id, 'closed');
-
-      if (cfg.logChannel) {
-        const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);
-        if (logCh?.isTextBased()) {
-          await logCh
-            .send({
-              embeds: [this.closureCard(ticket, closedBy, closedAt, channel)],
-              files: [{ attachment: Buffer.from(transcript, 'utf8'), name: `ticket-${ticket.id}.txt` }],
-            })
-            .catch(() => {});
-        }
-      }
-      this.tickets.delete(channel.id);
-      await channel.delete().catch(() => {});
-    } finally {
-      this.closing.delete(channel.id);
     }
+    this.tickets.delete(channel.id);
+    await channel.delete().catch(() => {});
   }
 
   /** Carte d'archive d'un ticket fermé (salon de logs). */
@@ -516,4 +620,16 @@ class TicketService {
   }
 }
 
-module.exports = { TicketService, STATUS_LABELS, TRANSCRIPT_MAX, MAX_REASONS, supportRoles, reasonFromTopic, fetchChannelHistory, channelGone };
+module.exports = {
+  TicketService,
+  STATUS_LABELS,
+  TRANSCRIPT_MAX,
+  MAX_REASONS,
+  OPEN_COOLDOWN_MS,
+  supportRoles,
+  reasonFromTopic,
+  fetchChannelHistory,
+  channelGone,
+  createInCategory,
+  transcriptLine,
+};

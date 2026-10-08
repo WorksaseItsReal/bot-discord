@@ -70,6 +70,9 @@ module.exports = {
         ephemeral: true,
       });
     }
+    // reply / close : staff ModMail uniquement (comme les boutons), même si la
+    // permission par défaut de la commande a été élargie sur le serveur.
+    if (sub === 'reply' || sub === 'close') modmail.assertStaff(interaction.member);
     if (sub === 'reply') {
       await interaction.deferReply({ ephemeral: true });
       await modmail.reply(interaction.channel, interaction.user, interaction.options.getString('message'));

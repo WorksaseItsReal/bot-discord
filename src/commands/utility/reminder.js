@@ -9,6 +9,8 @@ const { UserError } = require('../../core/errors');
 
 const REMINDER_ICON = '⏰';
 const MAX_LISTED = 10;
+/** Rappels en cours au maximum par utilisateur (évite de remplir la base et le planificateur). */
+const MAX_ACTIVE_REMINDERS = 25;
 
 /** Carte « Vos rappels » + un bouton d'annulation par rappel affiché. Pur. */
 function renderList(list, ownerId) {
@@ -47,6 +49,7 @@ function renderList(list, ownerId) {
 module.exports = {
   category: 'utility',
   renderList,
+  MAX_ACTIVE_REMINDERS,
   data: new SlashCommandBuilder()
     .setName('reminder')
     .setDescription('Gère vos rappels.')
@@ -67,6 +70,10 @@ module.exports = {
       const message = interaction.options.getString('message').trim();
       if (!message) throw new UserError('Le message du rappel ne peut pas être vide.');
       if (message.length > 2000) throw new UserError('Le message du rappel est trop long (2000 caractères max).');
+      const active = repo.listByUser(interaction.user.id).length;
+      if (active >= MAX_ACTIVE_REMINDERS) {
+        throw new UserError(`Vous avez déjà **${active}** rappels en cours (maximum ${MAX_ACTIVE_REMINDERS}). Supprimez-en avec \`/reminder list\` avant d'en créer un nouveau.`);
+      }
       const remindAt = Date.now() + ms;
       const id = repo.create({ guildId: interaction.guildId, channelId: interaction.channelId, userId: interaction.user.id, message, remindAt });
       return interaction.reply({

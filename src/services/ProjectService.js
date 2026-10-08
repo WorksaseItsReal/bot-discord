@@ -217,6 +217,13 @@ class ProjectService {
 
   transfer(project, newOwnerId) {
     if (newOwnerId === project.ownerId) throw new UserError('Ce membre est déjà responsable du projet.');
+    // L'ancien responsable rejoint l'équipe à la place du nouveau : la limite doit rester respectée.
+    const members = this.repo.members(project.id);
+    const promoted = members.some((m) => m.userId === newOwnerId);
+    const alreadyMember = members.some((m) => m.userId === project.ownerId);
+    if (!promoted && !alreadyMember && members.length >= LIMITS.members) {
+      throw new UserError(`L'équipe est complète (${LIMITS.members} membres) : l'ancien responsable ne pourrait pas la rejoindre. Retirez d'abord un membre.`);
+    }
     this.repo.removeMember(project.id, newOwnerId);
     this.repo.addMember(project.id, project.ownerId, 'Ancien responsable');
     return this.update(project, { ownerId: newOwnerId });
@@ -322,6 +329,17 @@ class ProjectService {
     }, 2_000);
     timer.unref?.();
     this.pendingRefresh.set(projectId, timer);
+  }
+
+  /**
+   * Arrêt du bot : exécute tout de suite les rafraîchissements programmés
+   * (sinon la fiche publiée reste périmée) et annule leurs minuteurs.
+   */
+  async flush() {
+    const ids = [...this.pendingRefresh.keys()];
+    for (const id of ids) clearTimeout(this.pendingRefresh.get(id));
+    this.pendingRefresh.clear();
+    await Promise.allSettled(ids.map((id) => this.refreshPublished(id).catch((err) => logger.warn(`Rafraîchissement du projet ${id} à l'arrêt :`, err?.message))));
   }
 
   async refreshPublished(projectId) {

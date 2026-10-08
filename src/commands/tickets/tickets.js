@@ -19,6 +19,7 @@ const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { supportRoles, MAX_REASONS } = require('../../services/TicketService');
 const { UserError } = require('../../core/errors');
+const { describeApiError } = require('../../core/apiErrors');
 
 /**
  * /tickets : tableau de bord unique (éphémère) de configuration des tickets.
@@ -59,9 +60,11 @@ function slug(label) {
 
 /**
  * « 🛠️ Support technique | Un bug, un souci » (une ligne par motif) → motifs validés. Pur.
+ * @param {{ hasEmoji?: (id: string) => boolean }} [opts] hasEmoji : emoji personnalisé utilisable
+ *   par le bot (sinon la publication du panneau échoue avec « Invalid emoji »)
  * @returns {Array<{ value: string, label: string, emoji: string|null, description: string|null }>}
  */
-function parseReasons(text) {
+function parseReasons(text, { hasEmoji } = {}) {
   const out = [];
   const used = new Set();
   for (const raw of String(text ?? '').split('\n')) {
@@ -69,6 +72,10 @@ function parseReasons(text) {
     if (!line) continue;
     const m = line.match(EMOJI_RE);
     const emoji = m ? m[1] : null;
+    const customId = emoji?.match(/:(\d{17,20})>$/)?.[1];
+    if (customId && hasEmoji && !hasEmoji(customId)) {
+      throw new UserError(`Emoji inconnu ${emoji} : je ne peux utiliser que les emojis des serveurs où je suis présent. Choisissez un emoji standard ou de ce serveur.`);
+    }
     const rest = (m ? m[2] : line).trim();
     const [labelPart, ...descParts] = rest.split('|');
     const label = labelPart.trim();
@@ -83,6 +90,22 @@ function parseReasons(text) {
   }
   if (out.length > MAX_REASONS) throw new UserError(`${MAX_REASONS} motifs maximum.`);
   return out;
+}
+
+/**
+ * Message d'échec de publication du panneau : la vraie cause (emoji invalide,
+ * texte trop long…) plutôt qu'un message générique sur les permissions. Pur.
+ */
+function publishFailure(channel, err) {
+  const { friendly, code } = describeApiError(err);
+  const permission = code === 50001 || code === 50013;
+  if (!err || permission) {
+    return `${ICONS.error} Je ne peux pas écrire dans ${channel} : il me faut **Voir le salon**, **Envoyer des messages** et **Intégrer des liens**.`;
+  }
+  const raw = truncate(String(err?.message ?? err).replace(/\s+/g, ' '), 300);
+  // 50035 (formulaire invalide) : le détail de Discord nomme le champ fautif (ex : emoji).
+  const detail = !friendly ? raw : code === 50035 ? `${friendly} — ${raw}` : friendly;
+  return `${ICONS.error} Publication du panneau refusée par Discord dans ${channel} : ${detail}${code ? ` (code ${code})` : ''}`;
 }
 
 /** Inverse de parseReasons (préremplissage du formulaire). Pur. */
@@ -414,6 +437,7 @@ module.exports = {
   render,
   parseReasons,
   reasonsToText,
+  publishFailure,
   data: new SlashCommandBuilder()
     .setName('tickets')
     .setDescription('Ouvre le tableau de bord des tickets : salons, staff, panneau, motifs, statistiques.')
@@ -527,19 +551,24 @@ module.exports = {
         const payload = client.services.tickets.panel(guild);
         let message = null;
         let updated = false;
+        let failure = null;
+        const remember = (err) => {
+          failure = err;
+          return null;
+        };
         if (cfg.panelMessageId) {
           const existing = await channel.messages?.fetch?.(cfg.panelMessageId).catch(() => null);
           if (existing?.edit) {
-            message = await existing.edit(payload).catch(() => null);
+            message = await existing.edit(payload).catch(remember);
             updated = Boolean(message);
           }
         }
-        if (!message) message = await channel.send(payload).catch(() => null);
+        if (!message) message = await channel.send(payload).catch(remember);
         if (message?.id) {
           client.services.config.update(interaction.guildId, { tickets: { panelMessageId: message.id } });
           notice = `${ICONS.success} Panneau ${updated ? 'mis à jour' : 'publié'} dans ${channel}.`;
         } else {
-          notice = `${ICONS.error} Je ne peux pas écrire dans ${channel} : il me faut **Voir le salon**, **Envoyer des messages** et **Intégrer des liens**.`;
+          notice = publishFailure(channel, failure);
         }
       }
       await interaction.editReply(render(client, guild, 'home', notice));
@@ -551,7 +580,8 @@ module.exports = {
     },
     async reasonssubmit(interaction, client) {
       guard(interaction);
-      const reasons = parseReasons(textValue(interaction, 'reasons'));
+      // Emoji personnalisé inconnu du bot : refusé ici, sinon la publication du panneau échouerait.
+      const reasons = parseReasons(textValue(interaction, 'reasons'), { hasEmoji: (id) => Boolean(client.emojis?.cache?.has(id)) });
       // Tableau : ConfigService le remplace en entier.
       client.services.config.update(interaction.guildId, { tickets: { reasons } });
       await interaction.update(reasonsView(client, interaction.guild, `${ICONS.success} ${reasons.length} motif(s) enregistré(s). Republiez le panneau pour l'appliquer.`));
