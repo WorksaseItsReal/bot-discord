@@ -195,6 +195,7 @@ class ModmailService {
       const member = await guild.members.fetch(userId).catch(() => null);
       await channel.send({
         content: staffRoleId ? `<@&${staffRoleId}>` : undefined,
+        allowedMentions: { roles: staffRoleId && staffRoleId !== guild.id ? [staffRoleId] : [] },
         embeds: [this.#openingCard(message.author, member)],
         components: this.controls(),
       });

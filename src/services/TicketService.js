@@ -293,6 +293,7 @@ class TicketService {
     // La mention (hors embed) notifie l'auteur et le support.
     await channel.send({
       content: [`${user}`, ...staffRoles.map((r) => `<@&${r}>`)].join(' '),
+      allowedMentions: { users: [user.id], roles: staffRoles.filter((id) => id !== guild.id) },
       ...this.welcome(ticket, { user, supportRoleId, supportRoleIds: staffRoles, reason }),
     });
     await this.logging.send(
