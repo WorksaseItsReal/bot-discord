@@ -36,9 +36,11 @@ test('liens masqués : texte affichant un autre domaine que la cible → +3 avec
   const r = phishingScore('[discord.com/gift](https://evil.ru)');
   assert.ok(r.score >= 3);
   assert.ok(r.reasons.some((x) => /lien masqué.*discord\.com.*evil\.ru/.test(x)), r.reasons.join(' | '));
-  assert.deepEqual(maskedLinks('[www.steamcommunity.com](<https://steamcommunity.com.evil.ru/trade>)'), [{ shown: 'steamcommunity.com', host: 'steamcommunity.com.evil.ru' }]);
-  // Seul, le lien masqué atteint le seuil par défaut de l'anti-arnaques.
-  assert.ok(phishingScore('[site.com](https://autre-site.net/x)').score >= 3);
+  assert.deepEqual(maskedLinks('[www.steamcommunity.com](<https://steamcommunity.com.evil.ru/trade>)'), [{ shown: 'steamcommunity.com', host: 'steamcommunity.com.evil.ru', strong: true }]);
+  // Seul, un lien masqué affichant une marque usurpée atteint le seuil par défaut de l'anti-arnaques ;
+  // un texte quelconque vers un autre site (miroir, raccourci) n'est qu'un indice faible (review 2).
+  assert.ok(phishingScore('[discord.com](https://autre-site.net/x)').score >= 3);
+  assert.equal(phishingScore('[site.com](https://autre-site.net/x)').score, 1);
 });
 
 test('liens masqués : texte libre, même domaine ou cible officielle → rien', () => {
@@ -227,7 +229,8 @@ test('quarantaine : timeout 1 j, messages récents supprimés partout, log d\'al
   assert.equal(category, 'automod');
   const e = embed.toJSON();
   assert.match(e.title, /quarantaine/);
-  assert.match(e.fields.find((f) => f.name.includes('Messages supprimés')).value, /\*\*3\*\* · 2 salon/);
+  // Le salon du message déclencheur compte aussi (review 2) : C1 + C2 + C3.
+  assert.match(e.fields.find((f) => f.name.includes('Messages supprimés')).value, /\*\*3\*\* · 3 salon/);
   assert.deepEqual(ids(components), [`cmd:automod:qlift:${U}`, `cmd:automod:qban:${U}`, `cmd:sanctions:history:${U}`]);
   for (const id of ids(components).filter((x) => x.startsWith('cmd:automod:'))) assert.equal(typeof automod.buttons[id.split(':')[2]], 'function');
   assert.equal(w.events.stats(G, 0).byAction[0].action, 'quarantine');
@@ -264,6 +267,8 @@ function dashboardWorld() {
   const target = {
     id: U,
     isCommunicationDisabled: () => true,
+    // Fin du timeout de 10 min posé par realLog : « Faux positif » ne lève que celui-là.
+    communicationDisabledUntilTimestamp: Date.now() + 10 * 60_000,
     roles: { cache: new Collection(), add: async (list) => calls.rolesAdded.push(...list) },
   };
   guild.members.fetch = async (id) => (id === U ? target : null);
@@ -435,8 +440,10 @@ test('lever la quarantaine : timeout retiré et rôles relus dans le log rendus 
   await automod.buttons.qlift(i, w.client, [U]);
   assert.equal(w.calls.removeTimeout.length, 1);
   assert.deepEqual(w.calls.rolesAdded, [R1], 'R2 est au-dessus du modérateur');
-  assert.ok(out.edits[0].components[0].components[0].disabled);
+  // R2 n'a pas pu être rendu : le bouton reste actif et R2 est listé (review 2).
+  assert.equal(out.edits.length, 0, 'bouton non figé');
   assert.equal(out.followUps[0].ephemeral, true);
+  assert.match(json(out.followUps[0].embeds[0]).description, new RegExp(`au-dessus de votre rôle.*<@&${R2}>`));
   await assert.rejects(automod.buttons.qlift(fakeInteraction(w, { message, permissions: perms('ManageMessages') }).i, w.client, [U]), { name: 'UserError' });
   await assert.rejects(automod.buttons.qlift(fakeInteraction(w, { message, permissions: perms('ModerateMembers') }).i, w.client, ['../x']), { name: 'UserError' });
 });

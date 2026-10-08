@@ -27,6 +27,7 @@ const { TempVoiceRepository } = require('../database/repositories/TempVoiceRepos
 const { LockRepository } = require('../database/repositories/LockRepository');
 const { ProjectRepository } = require('../database/repositories/ProjectRepository');
 const { AutomodEventRepository } = require('../database/repositories/AutomodEventRepository');
+const { AutomodQuarantineRepository } = require('../database/repositories/AutomodQuarantineRepository');
 const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { LevelRepository } = require('../database/repositories/LevelRepository');
 const { ConfigService } = require('../services/ConfigService');
@@ -97,6 +98,7 @@ class GadgetClient extends Client {
       locks: new LockRepository(db),
       projects: new ProjectRepository(db),
       automodEvents: new AutomodEventRepository(db),
+      automodQuarantines: new AutomodQuarantineRepository(db),
       modNotes: new ModNoteRepository(db),
       levels: new LevelRepository(db),
     };
@@ -111,7 +113,7 @@ class GadgetClient extends Client {
       moderation,
       strikes,
       scheduler: new SchedulerService({ client: this, sanctions: this.repositories.sanctions, reminders: this.repositories.reminders }),
-      automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents }),
+      automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents, quarantines: this.repositories.automodQuarantines }),
       antiraid: new AntiRaidService({ client: this, config: configService, logging }),
       lockdown: new LockdownService({ locks: this.repositories.locks, logging }),
       tickets: new TicketService({ tickets: this.repositories.tickets, config: configService, logging }),

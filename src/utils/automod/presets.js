@@ -76,7 +76,8 @@ const PRESETS = {
         antiFlood: on({ limit: 6, windowSeconds: 10, action: 'timeout', duration: '5m' }),
         antiLink: on({ action: 'delete' }),
         antiInvite: on({ action: 'warn' }),
-        antiPhishing: on({ threshold: 2, action: 'timeout', duration: '7d' }),
+        // Seuil 3 : un indice faible isolé (lien masqué vers un miroir, « discord.de » dans une phrase) ne suffit pas.
+        antiPhishing: on({ threshold: 3, action: 'timeout', duration: '7d' }),
         antiCrossChannel: on({ channels: 3, windowSeconds: 90, minLength: 20, action: 'timeout', duration: '1d' }),
         antiMassMention: on({ limit: 4, action: 'timeout', duration: '1h' }),
         antiCaps: on({ percent: 70, minLength: 10, action: 'delete' }),

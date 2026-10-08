@@ -116,6 +116,20 @@ class LoggingService {
     return exp > Date.now();
   }
 
+  /**
+   * Suppression groupée faite par le bot (ex. purge d'une quarantaine, déjà journalisée) :
+   * vrai si TOUS les messages ont été marqués, et les marques sont alors consommées.
+   * Sinon (purge manuelle, mélange), rien n'est consommé et la suppression est journalisée.
+   * @param {Iterable<string>} messageIds
+   */
+  allSuppressed(messageIds) {
+    const ids = [...messageIds];
+    const now = Date.now();
+    if (!ids.length || !ids.every((id) => (this.suppressed.get(id) ?? 0) > now)) return false;
+    for (const id of ids) this.suppressed.delete(id);
+    return true;
+  }
+
   /** Ce log serait-il envoyé ? (évite un appel coûteux, ex : audit log, quand il est désactivé) */
   wouldLog(guildId, category, ctx = {}) {
     return shouldLog(this.config.get(guildId), category, ctx);
