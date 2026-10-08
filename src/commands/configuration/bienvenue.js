@@ -413,11 +413,22 @@ function textChannel(interaction, id) {
  * l'auteur (sauf propriétaire du serveur) — sinon « Gérer le serveur » suffirait à se
  * faire donner un rôle plus puissant (en revenant avec un autre compte, par exemple).
  */
-function roleRefusal(interaction, role) {
+/** Permissions refusées même pour les rôles automatiques des BOTS (les autres sont seulement signalées). */
+const BOT_ROLE_FORBIDDEN = [
+  PermissionFlagsBits.Administrator, PermissionFlagsBits.ManageGuild, PermissionFlagsBits.ManageRoles,
+  PermissionFlagsBits.ManageChannels, PermissionFlagsBits.BanMembers, PermissionFlagsBits.KickMembers,
+  PermissionFlagsBits.ManageWebhooks,
+];
+
+function roleRefusal(interaction, role, { bots = false } = {}) {
   const guild = interaction.guild;
   const issue = roleIssue(role, guild);
   if (issue) return issue;
-  if (role.permissions?.any && hasForbiddenPermissions(role)) return 'il confère des permissions de modération ou d\'administration';
+  // Rôles des bots : un rôle « Bots » a souvent Gérer les messages ou Déplacer des membres
+  // (bots de musique, de modération) — seules les permissions vraiment puissantes sont refusées.
+  if (bots) {
+    if (role.permissions?.any?.(BOT_ROLE_FORBIDDEN)) return 'il confère des permissions d\'administration';
+  } else if (role.permissions?.any && hasForbiddenPermissions(role)) return 'il confère des permissions de modération ou d\'administration';
   if (interaction.user.id !== guild.ownerId && role.position >= (interaction.member?.roles?.highest?.position ?? 0)) {
     return 'il est au-dessus (ou au niveau) de votre rôle le plus haut';
   }
@@ -436,7 +447,9 @@ async function syncPanel(client, guild) {
   const channel = v.panelChannelId ? guild.channels?.cache?.get(v.panelChannelId) : null;
   let gone = !channel;
   if (channel && !channel.messages?.cache?.has?.(v.panelMessageId) && typeof channel.messages?.fetch === 'function') {
-    const err = await channel.messages.fetch(v.panelMessageId).then(() => null, (e) => e);
+    // Borné : cette vérification précède la réponse à l'interaction (délai de 3 s).
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 1500).unref?.());
+    const err = await Promise.race([channel.messages.fetch(v.panelMessageId).then(() => null, (e) => e), timeout]);
     gone = err?.code === 10008 || err?.code === 10003;
   }
   if (gone) client.services.config.update(guild.id, { welcome: { verification: { panelChannelId: null, panelMessageId: null } } });
@@ -620,7 +633,7 @@ module.exports = {
       for (const id of (interaction.values ?? []).slice(0, MAX_AUTO_ROLES)) {
         if (!/^\d{17,20}$/.test(id)) continue;
         const role = guild.roles.cache.get(id);
-        const issue = roleRefusal(interaction, role);
+        const issue = roleRefusal(interaction, role, { bots: target === 'bots' });
         if (issue) {
           refused.push(`<@&${id}> : ${issue}`);
           continue;

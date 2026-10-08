@@ -315,6 +315,13 @@ class TicketService {
   async create(guild, user, { reason = null } = {}) {
     const lockKey = `${guild.id}:${user.id}`;
     if (this.creating.has(lockKey)) throw new UserError('Votre ticket est déjà en cours de création…');
+    // « Ticket déjà ouvert » est plus utile que « patientez » : contrôlé avant le délai anti-boucle.
+    const cfg = this.config.get(guild.id).tickets;
+    const max = cfg.maxPerUser || 1;
+    const open = this.tickets.countOpenByUser(guild.id, user.id);
+    if (open >= max) {
+      throw new UserError(`Vous avez déjà **${open}** ticket(s) ouvert(s) (limite : ${max}). Terminez-en un avant d'en ouvrir un nouveau.`);
+    }
     this.#assertOpenCooldown(lockKey);
     this.creating.add(lockKey);
     try {

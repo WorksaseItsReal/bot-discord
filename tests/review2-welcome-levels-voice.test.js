@@ -205,9 +205,10 @@ test('/bienvenue rôles automatiques : permissions sensibles et rôles au niveau
   assert.match(desc, /modération ou d'administration/);
   assert.match(desc, /votre rôle le plus haut/);
 
-  // Rôles des bots : mêmes contrôles.
-  await bienvenue.buttons.roles(adminI(guild, { values: [ROLE.mod, ROLE.low] }), client, ['bots']);
-  assert.deepEqual(config.get(GUILD).welcome.autoRoles.bots, [ROLE.low]);
+  // Rôles des bots : Gérer les messages (bot de modération/musique) est accepté avec un avertissement,
+  // mais un rôle Administrateur reste refusé ; la hiérarchie de l'auteur s'applique toujours.
+  await bienvenue.buttons.roles(adminI(guild, { values: [ROLE.mod, ROLE.low, ROLE.admin, ROLE.equal] }), client, ['bots']);
+  assert.deepEqual(config.get(GUILD).welcome.autoRoles.bots, [ROLE.mod, ROLE.low]);
 
   // Le propriétaire n'est pas limité par sa hiérarchie (mais toujours par les permissions sensibles).
   await bienvenue.buttons.roles(adminI(guild, { user: { id: OWNER_ID }, member: { roles: { highest: { position: 0 } } }, values: [ROLE.equal, ROLE.mod] }), client, ['humans']);
@@ -311,10 +312,13 @@ test('écran d\'adhésion : ancien membre partiel (redémarrage) accueilli s\'il
   const { ws, cfg, member } = leaveWorld();
   const partial = { partial: true, pending: false };
   cfg.welcome.verification = { enabled: true, roleId: 'unv', mode: 'remove' };
-  const fresh = member('new', { joinedAgo: 3_600_000 });
+  const fresh = member('new', { joinedAgo: 5 * 60_000 });
   const res = await ws.handleScreeningPassed(partial, fresh);
   assert.deepEqual(res?.roles, ['unv'], 'mode retrait : le rôle « non vérifié » est bien donné');
-  assert.equal(await ws.handleScreeningPassed(partial, member('done', { joinedAgo: 3_600_000, roles: ['unv'] })), null, 'déjà accueilli');
+  assert.equal(await ws.handleScreeningPassed(partial, member('new', { joinedAgo: 5 * 60_000 })), null, 'jamais rattrapé deux fois');
+  assert.equal(await ws.handleScreeningPassed(partial, member('done', { joinedAgo: 5 * 60_000, roles: ['unv'] })), null, 'déjà accueilli');
+  assert.equal(await ws.handleScreeningPassed(partial, member('verified', { joinedAgo: 5 * 60_000, roles: ['membre'] })), null, 'a déjà des rôles (vérifié) : pas re-verrouillé');
+  assert.equal(await ws.handleScreeningPassed(partial, member('hour', { joinedAgo: 3_600_000 })), null, 'arrivé il y a plus de 15 min');
   assert.equal(await ws.handleScreeningPassed(partial, member('old', { joinedAgo: 2 * DAY })), null, 'arrivé il y a plus de 24 h');
   assert.equal(await ws.handleScreeningPassed({ partial: false, pending: false }, fresh), null, 'ancien membre connu, non en attente : rien');
   cfg.welcome.verification = {};

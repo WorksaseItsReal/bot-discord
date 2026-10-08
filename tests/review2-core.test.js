@@ -43,5 +43,5 @@ test('arrêt propre : les services avec travail différé sont vidés avant la d
   client.destroy = async () => order.push('destroy');
   client.database = { close: () => order.push('db') };
   await client.shutdown();
-  assert.deepEqual(order, ['scheduler', 'giveaways', 'projects', 'tickets', 'destroy', 'db']);
+  assert.deepEqual(order, ['scheduler', 'tickets', 'giveaways', 'projects', 'destroy', 'db']);
 });

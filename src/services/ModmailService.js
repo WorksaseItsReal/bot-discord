@@ -155,7 +155,13 @@ class ModmailService {
         // Seul un salon CONFIRMÉ supprimé (10003) ou un serveur quitté ferme la
         // conversation : une erreur transitoire ne doit pas en ouvrir une seconde.
         if (guild && !(await channelGone(guild, thread.channel_id))) {
-          throw new Error(`Salon ModMail ${thread.channel_id} momentanément inaccessible (conversation #${thread.id}).`);
+          // Accès perdu au salon (permission retirée, 50001) : sans issue, chaque MP échouerait
+          // indéfiniment. On ferme cette conversation et on en ouvre une nouvelle ailleurs.
+          const err = await guild.channels.fetch(thread.channel_id).then(() => null, (e) => e);
+          if (err?.code !== 50001 && err?.code !== 50013) {
+            throw new Error(`Salon ModMail ${thread.channel_id} momentanément inaccessible (conversation #${thread.id}).`);
+          }
+          logger.warn(`ModMail : accès perdu au salon ${thread.channel_id} (conversation #${thread.id}), nouvelle conversation.`);
         }
         this.modmail.close(thread.channel_id);
         guild = null;

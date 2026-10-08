@@ -54,6 +54,8 @@ function parseWhen(input, timeZone = 'Europe/Paris', now = Date.now()) {
   // « 14h » (sans minutes) → « 14h00 », seul ou après une date.
   const asTime = str.replace(/(^|[\sT])(\d{1,2})h$/i, '$1$2h00');
   const local = parseLocalDateTime(asTime, timeZone, now);
+  // Heure seule déjà passée aujourd'hui (« 9h » à 15 h) : c'est la prochaine occurrence, demain.
+  if (local != null && local < now && /^\d{1,2}(?:h\d{0,2}|:\d{2})$/i.test(str)) return local + 86_400_000;
   if (local != null) return local;
   const ms = parseDuration(str);
   return ms ? now + ms : null;

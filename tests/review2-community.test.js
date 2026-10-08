@@ -513,7 +513,7 @@ test('ModMail : création impossible → le membre est prévenu et l\'erreur rem
 });
 
 test('ModMail : salon momentanément inaccessible → la conversation n\'est pas fermée', async () => {
-  const { repo, service, replies, dm } = modmailWorld({ fetchChannel: async () => { throw apiError(50001, 'Missing Access'); } });
+  const { repo, service, replies, dm } = modmailWorld({ fetchChannel: async () => { throw apiError(500, 'Internal Server Error'); } });
   repo.create({ guildId: 'g', userId: A, channelId: 'old' });
   await assert.rejects(service.handleUserDM(dm()), /inaccessible/);
   assert.ok(repo.getOpenByUser(A), 'conversation toujours ouverte');
@@ -524,6 +524,12 @@ test('ModMail : salon momentanément inaccessible → la conversation n\'est pas
   gone.repo.create({ guildId: 'g', userId: A, channelId: 'old' });
   await gone.service.handleUserDM(gone.dm());
   assert.equal(gone.repo.getOpenByUser(A).channel_id, 'chan');
+
+  // Revue 3 — accès perdu au salon (50001) : sans issue sinon, une nouvelle conversation s'ouvre.
+  const lost = modmailWorld({ fetchChannel: async () => { throw apiError(50001, 'Missing Access'); } });
+  lost.repo.create({ guildId: 'g', userId: A, channelId: 'old' });
+  await lost.service.handleUserDM(lost.dm());
+  assert.equal(lost.repo.getOpenByUser(A).channel_id, 'chan');
 });
 
 // ---------------------------------------------------------------- 13. permissions revérifiées

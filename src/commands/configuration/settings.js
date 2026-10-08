@@ -3,6 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { progressBar } = require('../../utils/embeds');
 const { card, field, wide, blank, subtext, status, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { UserError } = require('../../core/errors');
 const { parseDuration } = require('../../utils/time');
 
@@ -230,7 +231,7 @@ function renderModeration(cfg) {
  * (`moderation.*` et `strikes.*`). Valide le rôle muet et les paliers (UserError).
  * @returns {{ patch: object, edited: Set<string> }}
  */
-function readModerationOptions(interaction) {
+function readModerationOptions(interaction, client) {
   const { options, guild } = interaction;
   const moderation = {};
   const strikes = {};
@@ -253,7 +254,7 @@ function readModerationOptions(interaction) {
   }
   const role = options.getRole('role_muet');
   if (role) {
-    assertMutedRole(guild, role);
+    assertMutedRole(interaction, client, guild.roles?.cache?.get(role.id) ?? role);
     moderation.mutedRoleId = role.id;
     edited.add('role_muet');
   }
@@ -264,12 +265,29 @@ function readModerationOptions(interaction) {
 }
 
 /** Le rôle muet doit être attribuable par le bot (ni @everyone, ni géré, sous mon rôle le plus haut). */
-function assertMutedRole(guild, role) {
+function assertMutedRole(interaction, client, role) {
+  const guild = interaction.guild;
   if (role.id === guild.id) throw new UserError('@everyone ne peut pas servir de rôle muet.');
   if (role.managed) throw new UserError(`${role} est géré par une intégration : il ne peut pas servir de rôle muet.`);
   const highest = guild.members?.me?.roles?.highest;
   if (highest && role.position >= highest.position) {
     throw new UserError(`${role} est au-dessus de mon rôle le plus haut : je ne pourrais pas l'attribuer. Remontez mon rôle ou choisissez un rôle plus bas.`);
+  }
+  // Chaque /mute donnera ce rôle à la cible : il ne doit conférer AUCUNE permission en plus
+  // de @everyone (sinon /mute devient un moyen d'attribuer un rôle de modération).
+  const everyone = guild.roles?.everyone?.permissions?.bitfield ?? 0n;
+  const extra = BigInt(role.permissions?.bitfield ?? 0n) & ~BigInt(everyone);
+  if (extra !== 0n || (role.permissions?.any && hasForbiddenPermissions(role))) {
+    throw new UserError(`${role} donne des permissions supplémentaires : un rôle muet ne doit en avoir aucune. Choisissez un rôle dédié.`);
+  }
+  if (interaction.user?.id !== guild.ownerId && role.position >= (interaction.member?.roles?.highest?.position ?? 0)) {
+    throw new UserError(`${role} est au-dessus (ou au niveau) de votre rôle le plus haut.`);
+  }
+  // Ses refus seront posés dans tous les salons : il ne doit pas être porté par des membres non muets.
+  const muted = new Set((client.services.moderation?.sanctions?.listActiveByType?.(guild.id, 'mute') ?? []).map((r) => r.user_id));
+  const holders = [...(role.members?.values?.() ?? [])].filter((m) => !m.user?.bot && !muted.has(m.id));
+  if (holders.length) {
+    throw new UserError(`${role} est déjà porté par **${holders.length}** membre(s) non muet(s) : ils seraient tous réduits au silence. Choisissez un rôle dédié.`);
   }
 }
 
@@ -367,7 +385,7 @@ module.exports = {
     }
 
     if (sub === 'moderation') {
-      const { patch, edited } = readModerationOptions(interaction);
+      const { patch, edited } = readModerationOptions(interaction, client);
       if (!Object.keys(patch).length) {
         return interaction.reply({
           embeds: [status.warn('Aucune option fournie. Précisez au moins une option : `dm_sanction`, `confirmation`, `raison_obligatoire`, `strikes`, `paliers` ou `role_muet`.', 'Rien à modifier')],

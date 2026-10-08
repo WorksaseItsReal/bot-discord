@@ -23,6 +23,8 @@ const logger = createLogger('welcome');
  */
 
 const DAY_MS = 86_400_000;
+/** Repli « accueil manqué » après un redémarrage : seulement pour une arrivée de moins de 15 min. */
+const MISSED_WELCOME_MS = 15 * 60 * 1000;
 const MAX_AUTO_ROLES = 10;
 const CHALLENGE_TTL_MS = 5 * 60_000;
 const MAX_FAILURES = 5;
@@ -294,6 +296,8 @@ class WelcomeService {
     this.silenced = new Map();
     /** @type {Map<string, number>} serveurs en pleine vague sanctionnée par l'AntiRaid → fin du silence */
     this.waves = new Map();
+    /** @type {Map<string, number>} membres déjà rattrapés par le repli « accueil manqué » */
+    this.missed = new Map();
     /** @type {Map<Map<string, any>, number>} dernière purge de chaque table */
     this.lastPrune = new Map();
   }
@@ -443,12 +447,25 @@ class WelcomeService {
     return null;
   }
 
-  /** Membre récent qui n'a reçu aucun des rôles d'arrivée (accueil manqué). */
+  /**
+   * Accueil manqué (écran d'adhésion accepté pendant un redémarrage) : avec Partials.GuildMember,
+   * N'IMPORTE QUELLE mise à jour d'un membre hors cache arrive avec un ancien membre partiel.
+   * Pour ne pas réaccueillir (ni re-verrouiller) un membre déjà vérifié, le repli est limité :
+   * arrivée très récente, aucun rôle du tout, une seule fois par membre.
+   */
   #missedWelcome(member) {
     const joined = member?.joinedTimestamp;
-    if (!member?.guild || member.user?.bot || !joined || this.now() - joined >= DAY_MS) return false;
+    if (!member?.guild || member.user?.bot || !joined || this.now() - joined >= MISSED_WELCOME_MS) return false;
+    const key = `${member.guild.id}:${member.id}`;
+    if (this.missed.has(key)) return false;
+    const roles = member.roles?.cache;
+    const hasAnyRole = roles ? [...roles.keys()].some((id) => id !== member.guild.id) : true;
+    if (hasAnyRole) return false;
     const expected = this.assignable(member.guild, joinRoles(this.settings(member.guild.id), member));
-    return expected.length > 0 && !expected.some((id) => member.roles?.cache?.has(id));
+    if (!expected.length) return false;
+    this.#prune(this.missed, (t) => t > this.now());
+    this.missed.set(key, this.now() + MISSED_WELCOME_MS);
+    return true;
   }
 
   /** Rôles automatiques, message de bienvenue et MP. */

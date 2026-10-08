@@ -222,9 +222,12 @@ class GadgetClient extends Client {
       logger.warn('Arrêt du suivi des niveaux :', err?.message);
     }
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
-    for (const name of ['giveaways', 'projects', 'tickets']) {
+    // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
+    // pour rester sous le garde-fou d'arrêt.
+    for (const name of ['tickets', 'giveaways', 'projects']) {
       try {
-        await this.services?.[name]?.flush?.();
+        const flush = this.services?.[name]?.flush?.();
+        if (flush) await Promise.race([flush, new Promise((r) => setTimeout(r, 3000).unref?.())]);
       } catch (err) {
         logger.warn(`Vidage du service ${name} :`, err?.message);
       }

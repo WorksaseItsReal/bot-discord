@@ -183,12 +183,14 @@ class SchedulerService {
       // findDue() est lu une fois par tick : la sanction a pu changer pendant les appels
       // réseau précédents (levée, remplacée, prolongée). On relit la ligne avant d'agir.
       if (!this.#stillDue(s)) continue;
-      // Un ban définitif actif existe (converti pendant le tick, ou données anciennes) :
-      // on ne débannit pas, seule la ligne temporaire est close.
-      // Seul un ban posé APRÈS ce tempban le remplace : une ligne « ban » plus ancienne restée
-      // active (levée hors du bot) ne doit pas rendre le tempban définitif sans prévenir.
-      if (this.sanctions.listActive?.(s.guild_id, s.user_id)?.some((r) => r.type === 'ban' && r.created_at >= s.created_at)) {
+      // Un ban définitif actif existe (converti pendant le tick, ou données anciennes) : par
+      // prudence on ne débannit pas (on ne sait pas lequel des deux tient côté Discord), seule
+      // la ligne temporaire est close — et le staff est PRÉVENU, il peut /unban si la ligne
+      // « ban » était périmée.
+      const permanent = this.sanctions.listActive?.(s.guild_id, s.user_id)?.find((r) => r.type === 'ban');
+      if (permanent) {
         this.sanctions.deactivateActive(s.guild_id, s.user_id, 'tempban', { by: null, reason: 'Remplacé par un bannissement définitif' });
+        await this.#logExpiry(guild, s, 'unban', `Le bannissement temporaire de <@${s.user_id}> est arrivé à échéance, mais un **bannissement définitif** (\`#${permanent.id}\`) est enregistré : il reste banni. Utilisez \`/unban\` si ce bannissement définitif n'a plus lieu d'être.`).catch(() => {});
         continue;
       }
       const moderation = this.client.services?.moderation;

@@ -5,7 +5,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Collection, PermissionFlagsBits, ButtonStyle } = require('discord.js');
+const { Collection, PermissionFlagsBits, PermissionsBitField, ButtonStyle } = require('discord.js');
 const { defaultGuildConfig } = require('../src/config/defaults');
 const { ConfigService } = require('../src/services/ConfigService');
 const { StrikeService } = require('../src/services/StrikeService');
@@ -85,6 +85,8 @@ function moderationInteraction(guild, values) {
     calls,
     guild,
     guildId: guild.id,
+    user: { id: 'admin' },
+    member: { roles: { highest: { position: 4 } } },
     options: {
       getSubcommand: () => 'moderation',
       getBoolean: (n) => (n in values ? values[n] : null),
@@ -129,6 +131,16 @@ test('settings moderation : rôle muet refusé s\'il est au-dessus du bot, gér�
     await assert.rejects(settings.execute(moderationInteraction(guild, { role_muet: guild.roles.cache.get(r) }), client), re);
   }
   await assert.rejects(settings.execute(moderationInteraction(guild, { paliers: '3=explode' }), client), /action inconnue/);
+  // Revue 3 : un rôle muet ne doit donner aucune permission, ni être porté par des membres non muets,
+  // ni être au niveau de l'auteur (sinon /mute devient un moyen d'attribuer un rôle).
+  const g2 = fakeGuild({ roleList: [
+    role('mod', 2, { permissions: new PermissionsBitField(['KickMembers']) }),
+    role('worn', 2, { members: new Collection([['u1', { id: 'u1', user: { bot: false } }]]) }),
+    role('peer', 4),
+  ] });
+  for (const [r, re] of [['mod', /permissions supplémentaires/], ['worn', /non muet/], ['peer', /votre rôle le plus haut/]]) {
+    await assert.rejects(settings.execute(moderationInteraction(g2, { role_muet: g2.roles.cache.get(r) }), client), re, r);
+  }
   assert.equal(config.get('g1').moderation.mutedRoleId, null, 'rien écrit');
   const none = moderationInteraction(guild, {});
   await settings.execute(none, client);
@@ -322,4 +334,11 @@ test('calc : les noms hérités d\'Object.prototype ne sont ni constantes ni fon
   }
   assert.equal(evaluate('pi * 0'), 0);
   assert.equal(evaluate('sqrt(16)'), 4);
+});
+
+test('revue 3 — /timestamp : une heure seule déjà passée vise le lendemain', () => {
+  const now = Date.parse('2026-10-08T13:00:00Z'); // 15 h à Paris
+  assert.equal(new Date(timestamp.parseWhen('9h', 'Europe/Paris', now)).toISOString(), '2026-10-09T07:00:00.000Z');
+  assert.equal(new Date(timestamp.parseWhen('16h', 'Europe/Paris', now)).toISOString(), '2026-10-08T14:00:00.000Z');
+  assert.equal(timestamp.parseWhen('+2h', 'Europe/Paris', now), now + 2 * 3_600_000);
 });
