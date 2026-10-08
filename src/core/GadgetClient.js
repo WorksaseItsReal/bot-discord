@@ -56,7 +56,9 @@ const logger = createLogger('client');
  */
 class GadgetClient extends Client {
   constructor() {
-    super({ intents, partials });
+    // Défense en profondeur : sans autorisation explicite, aucun message du bot ne peut
+    // notifier @everyone/@here ou un rôle (les envois qui doivent pinguer passent allowedMentions).
+    super({ intents, partials, allowedMentions: { parse: ['users'], repliedUser: false } });
 
     this.config = config;
     this.logger = logger;

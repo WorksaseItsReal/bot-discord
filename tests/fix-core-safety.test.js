@@ -201,3 +201,22 @@ test('cmd 🗑️ : deleteReply d\'abord, message.delete() en secours', async ()
   none.i.message.delete = async () => { throw new Error('Missing Access'); };
   await assert.rejects(cmd.execute(none.i, { commands: new Map() }), { name: 'UserError' });
 });
+
+test('interactionSafety : update tardif après une RÉPONSE modifie le message du bouton, pas la réponse', async () => {
+  const { i, calls } = fakeCommand({ button: true });
+  const edits = [];
+  i.message = { editable: true, flags: { has: () => false }, edit: async (o) => { edits.push(o); return {}; } };
+  hardenInteraction(i);
+  await i.reply({ content: 'Ce bouton a expiré.', flags: MessageFlags.Ephemeral });
+  await i.update({ content: 'vue à jour' });
+  assert.ok(!calls.some(([k]) => k === 'editReply'), 'la carte d\'erreur n\'est pas écrasée');
+  assert.equal(edits.length, 1);
+});
+
+test('interactionSafety : update après deferUpdate passe toujours par editReply', async () => {
+  const { i, calls } = fakeCommand({ button: true });
+  hardenInteraction(i);
+  await i.deferUpdate();
+  await i.update({ content: 'vue à jour' });
+  assert.ok(calls.some(([k]) => k === 'editReply'));
+});

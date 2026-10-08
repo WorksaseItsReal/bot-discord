@@ -60,6 +60,7 @@ class DatabaseManager {
       insert.run(migration.id, migration.name, Date.now());
       return true;
     });
+    assertMigrationIds(migrations);
     for (const migration of migrations) {
       if (applied.has(migration.id)) continue;
       if (run.immediate(migration)) logger.info(`Migration appliquée : #${migration.id} ${migration.name}`);
@@ -76,6 +77,21 @@ class DatabaseManager {
       this.db.close();
       this.db = null;
     }
+  }
+}
+
+/**
+ * Les migrations sont reconnues par leur id : un id réutilisé serait ignoré sans bruit sur
+ * les bases existantes. On exige des ids entiers, uniques et croissants (des trous sont
+ * permis : un numéro sauté reste réservé et ne doit jamais être réutilisé).
+ */
+function assertMigrationIds(list) {
+  let previous = 0;
+  for (const m of list) {
+    if (!Number.isInteger(m.id) || m.id <= previous) {
+      throw new Error(`Migration #${m.id} (${m.name}) : les ids doivent être des entiers uniques et croissants (précédent : #${previous}).`);
+    }
+    previous = m.id;
   }
 }
 

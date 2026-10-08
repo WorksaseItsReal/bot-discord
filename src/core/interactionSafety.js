@@ -196,7 +196,15 @@ function hardenInteraction(interaction) {
     interaction.update = async (raw) => {
       const { options, fetch } = normalizeOptions(raw, { allowEphemeral: false });
       if (state.inflight) await settle();
-      if (acknowledged()) return original.editReply(stripForEdit(options));
+      if (acknowledged()) {
+        // Déjà acquittée par update/deferUpdate : editReply modifie bien le message du composant.
+        if (updateAcked()) return original.editReply(stripForEdit(options));
+        // Acquittée par une RÉPONSE (ex. carte « bouton expiré ») : editReply écraserait cette
+        // réponse au lieu du message du composant. On modifie le message lui-même s'il est à nous.
+        const message = interaction.message;
+        if (message?.editable && !message.flags?.has?.('Ephemeral')) return message.edit(stripForEdit(options)).catch(() => null);
+        return null;
+      }
       const response = await ack('update', false, () => original.update(fetch ? withResponseOption(options) : options));
       return fetch ? response?.resource?.message ?? interaction.message : response;
     };

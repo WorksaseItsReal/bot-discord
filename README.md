@@ -323,7 +323,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 
 ## 🚀 Installation
 
-**Prérequis** : Node.js 20 ou plus récent, et une application Discord créée sur le [Developer Portal](https://discord.com/developers/applications). Aucune base de données à installer : SQLite est embarqué.
+**Prérequis** : Node.js 22 ou plus récent, et une application Discord créée sur le [Developer Portal](https://discord.com/developers/applications). Aucune base de données à installer : SQLite est embarqué.
 
 ```bash
 # 1. Installer les dépendances
@@ -388,7 +388,7 @@ Placez ensuite le rôle du bot **au-dessus** des rôles qu'il doit gérer : Disc
 - **Logs JSON** : `LOG_FORMAT=json` produit une ligne JSON par entrée (Loki, ELK, Datadog…), secrets masqués.
 - **Sauvegardes** : `npm run backup:db` crée une copie cohérente de la base dans `data/backups/` (14 conservées, `DB_BACKUP_KEEP`) ; avec `DB_BACKUP_INTERVAL_HOURS=24`, le bot sauvegarde lui-même chaque jour.
 - **Déploiement des commandes** : `npm run deploy -- --dry-run` affiche ce qui serait envoyé sans rien changer ; `--clear-guild` vide les commandes du serveur de test.
-- **CI** : GitHub Actions lance les tests et le healthcheck sur Node 20 et 22, puis construit l'image Docker, à chaque push.
+- **CI** : GitHub Actions lance les tests et le healthcheck sur Node 22 et 24, puis construit l'image Docker, à chaque push.
 
 ---
 
