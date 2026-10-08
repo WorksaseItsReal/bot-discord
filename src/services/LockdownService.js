@@ -94,6 +94,32 @@ function overwriteState(ow, flag) {
  *    pas été touchés). Pas de portée → traité comme un lockdown (comportement d'avant).
  * @returns {{ scope?: string, perms: Record<string, boolean|null> }}
  */
+/**
+ * Restaure des permissions de @everyone. Si la surcharge résultante est entièrement neutre
+ * (rien d'autorisé, rien de refusé), elle est SUPPRIMÉE au lieu d'être laissée vide (0/0) :
+ * le salon retrouve exactement l'apparence d'origine. Le calcul part du cache AVANT l'appel
+ * (discord.js ne le met à jour qu'à réception de l'événement de la passerelle).
+ */
+async function restoreEveryone(channel, perms, reason) {
+  const everyone = channel.guild.roles.everyone;
+  const current = channel.permissionOverwrites.cache.get(everyone.id);
+  let allow = BigInt(current?.allow?.bitfield ?? 0n);
+  let deny = BigInt(current?.deny?.bitfield ?? 0n);
+  for (const [name, value] of Object.entries(perms)) {
+    const bit = PermissionFlagsBits[name];
+    if (bit == null) continue;
+    allow &= ~bit;
+    deny &= ~bit;
+    if (value === true) allow |= bit;
+    else if (value === false) deny |= bit;
+  }
+  if (allow === 0n && deny === 0n && typeof channel.permissionOverwrites.delete === 'function') {
+    if (current) await channel.permissionOverwrites.delete(everyone, reason);
+    return;
+  }
+  await channel.permissionOverwrites.edit(everyone, perms, { reason });
+}
+
 function normalizeLock(data) {
   if (data?.perms) return { scope: data.scope, perms: { ...data.perms } };
   return { scope: data?.scope, perms: { SendMessages: bitToState(data?.allow, data?.deny) } };
@@ -169,13 +195,12 @@ class LockdownService {
    */
   async unlockChannel(channel, reason) {
     assertOverwritable(channel);
-    const everyone = channel.guild.roles.everyone;
     const saved = this.locks.get(channel.guild.id, channel.id);
     if (saved) {
-      await channel.permissionOverwrites.edit(everyone, normalizeLock(saved.data).perms, { reason });
+      await restoreEveryone(channel, normalizeLock(saved.data).perms, reason);
       this.locks.delete(channel.guild.id, channel.id);
     } else {
-      await channel.permissionOverwrites.edit(everyone, { SendMessages: null }, { reason });
+      await restoreEveryone(channel, { SendMessages: null }, reason);
     }
   }
 
@@ -200,10 +225,9 @@ class LockdownService {
    */
   async unhideChannel(channel, reason) {
     assertOverwritable(channel);
-    const everyone = channel.guild.roles.everyone;
     const saved = this.locks.get(channel.guild.id, channel.id, 'hide');
     const original = saved?.data?.perms?.ViewChannel;
-    await channel.permissionOverwrites.edit(everyone, { ViewChannel: original === true ? true : null }, { reason });
+    await restoreEveryone(channel, { ViewChannel: original === true ? true : null }, reason);
     if (saved) this.locks.delete(channel.guild.id, channel.id, 'hide');
   }
 

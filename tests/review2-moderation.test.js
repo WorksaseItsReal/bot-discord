@@ -734,3 +734,27 @@ test('revue 3 — audit en retard : seul le mute ANTÉRIEUR au retrait manuel es
   assert.equal(repo.get('g1', oldId).revoked_by, 'humain');
   assert.equal(repo.get('g1', newId).active, 1, 'le nouveau mute reste en vigueur');
 });
+
+test('revue 3 — /unlock et /unhide ne laissent pas de surcharge @everyone vide (0/0)', async () => {
+  const { LockdownService } = require('../src/services/LockdownService');
+  const calls = [];
+  const everyone = { id: 'g1' };
+  const make = (deny) => ({
+    id: 'c1',
+    type: ChannelType.GuildText,
+    guild: { id: 'g1', roles: { everyone } },
+    permissionsFor: () => new PermissionsBitField(PermissionsBitField.All),
+    manageable: true,
+    permissionOverwrites: {
+      cache: new Map([['g1', { allow: new PermissionsBitField(0n), deny: new PermissionsBitField(deny) }]]),
+      edit: async (_r, perms) => calls.push(['edit', perms]),
+      delete: async () => calls.push(['delete']),
+    },
+  });
+  const locks = { get: () => null, delete: () => {}, save: () => {} };
+  const service = new LockdownService({ locks, logging: { send: async () => {} } });
+  await service.unlockChannel(make(PermissionsBitField.Flags.SendMessages), 'test');
+  assert.deepEqual(calls.at(-1), ['delete'], 'seul refus retiré : la surcharge disparaît');
+  await service.unlockChannel(make(PermissionsBitField.Flags.SendMessages | PermissionsBitField.Flags.AttachFiles), 'test');
+  assert.equal(calls.at(-1)[0], 'edit', 'un autre réglage reste : simple modification');
+});
