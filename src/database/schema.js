@@ -340,6 +340,33 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 12,
+    name: 'automod_quarantines',
+    up: `
+      -- Quarantaines AutoMod : rôles retirés conservés en base (écrits AVANT le retrait),
+      -- relus à la levée même si le log n'a pas pu être envoyé ou a été tronqué.
+      CREATE TABLE IF NOT EXISTS automod_quarantines (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id      TEXT NOT NULL,
+        user_id       TEXT NOT NULL,
+        roles         TEXT NOT NULL DEFAULT '[]',   -- JSON string[] des rôles retirés
+        timeout_until INTEGER,                      -- fin du timeout posé par la quarantaine
+        event_id      INTEGER,                      -- infraction associée (automod_events)
+        created_at    INTEGER NOT NULL,
+        lifted_at     INTEGER,
+        lifted_by     TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_automod_quarantines_user ON automod_quarantines (guild_id, user_id);
+
+      -- Fin prévue du timeout posé par l'AutoMod : « Faux positif » ne lève que celui-là.
+      ALTER TABLE automod_events ADD COLUMN timeout_until INTEGER;
+      -- Purge horaire du journal (DELETE … WHERE created_at < ?) sans parcours complet.
+      CREATE INDEX IF NOT EXISTS idx_automod_events_created ON automod_events (created_at);
+      -- Menus de rôles retrouvés par message (clic sur un menu).
+      CREATE INDEX IF NOT EXISTS idx_role_menus_message ON role_menus (message_id);
+    `,
+  },
 ];
 
 module.exports = { migrations };

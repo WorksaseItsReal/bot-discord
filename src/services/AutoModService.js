@@ -40,7 +40,7 @@ const POSTED_MAX_MS = 60 * 60 * 1000;
 /** Durée maximale d'un timeout Discord. */
 const MAX_TIMEOUT_MS = 28 * 86_400_000;
 
-/** Nom du champ du log de quarantaine qui mémorise les rôles retirés (relu à la levée). */
+/** Champ du log de quarantaine listant les rôles retirés (relu à la levée pour les quarantaines antérieures à la table automod_quarantines). */
 const QUARANTINE_ROLES_FIELD = 'Rôles retirés';
 
 /** Bouton « Faux positif » d'un log AutoMod (identifiant de l'infraction enregistrée). */
@@ -141,13 +141,15 @@ class AutoModService {
    * @param {import('./ModerationService').ModerationService} deps.moderation
    * @param {import('./StrikeService').StrikeService} [deps.strikes]
    * @param {import('../database/repositories/AutomodEventRepository').AutomodEventRepository} [deps.events]
+   * @param {import('../database/repositories/AutomodQuarantineRepository').AutomodQuarantineRepository} [deps.quarantines]
    */
-  constructor({ config, logging, moderation, strikes, events }) {
+  constructor({ config, logging, moderation, strikes, events, quarantines }) {
     this.config = config;
     this.logging = logging;
     this.moderation = moderation;
     this._strikes = strikes ?? null;
     this.events = events ?? null;
+    this.quarantines = quarantines ?? null;
     /** @type {Map<string, object>} état temporel par membre */
     this.tracker = new Map();
     /** @type {Map<string, number>} dernier avertissement visible par membre */
@@ -367,6 +369,8 @@ class AutoModService {
       if (hk && eligible(hk.minLength ?? 20)) {
         const { same, channels } = spread(hkWin);
         if (channels >= (hk.channels || 3)) {
+          // Oublié après détection (comme le multi-salons) : la copie suivante ne relance pas la quarantaine.
+          state.recent = state.recent.filter((r) => r.fp !== digest);
           hit('antiHacked', 'Compte piraté probable', `même message dans ${channels} salons`, { related: same.filter((r) => r.messageId !== message.id) });
         }
       }
@@ -473,6 +477,14 @@ class AutoModService {
     // Une expulsion empêche tout message ensuite : on prévient le membre AVANT (dans le salon).
     if (action === 'kick') await this.#notify(message, violation, { text: ACTION_LABELS.kick }, notifyCfg, deleted).catch(() => {});
     const outcome = await this.#sanction(message, { action, duration, reason: finalReason });
+    // Fin du timeout réellement posé (0 = aucun) : « Faux positif » ne lèvera que celui-là.
+    if (eventId && action === 'timeout') {
+      try {
+        this.events.setTimeoutUntil?.(guild.id, eventId, outcome.until ?? 0);
+      } catch (err) {
+        logger.warn('Journal AutoMod indisponible :', err?.message);
+      }
+    }
     if (merged) outcome.text = `${ACTION_LABELS.delete} · déjà sanctionné il y a quelques secondes`;
     if (action !== 'kick' && !merged) await this.#notify(message, violation, outcome, notifyCfg, deleted).catch(() => {});
 
@@ -531,29 +543,54 @@ class AutoModService {
     const member = message.member;
     const until = member?.communicationDisabledUntilTimestamp ?? 0;
     let timeout;
+    let timeoutUntil = null; // fin du timeout posé PAR la quarantaine (null : aucun)
     if (until >= Date.now() + ms) timeout = { ok: true, text: `déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:f>` };
     else {
       const res = await this.moderation.timeout(guild, member, me, reason, ms).then((r) => r, () => null);
+      if (res) timeoutUntil = Date.now() + ms;
       timeout = { ok: Boolean(res), text: res ? `Timeout ${fc.duration || formatDuration(ms)}${res?.id ? ` · sanction #${res.id}` : ''}` : 'Timeout impossible (hiérarchie ou permission)' };
     }
 
-    // Rôles retirés (désactivé par défaut) : mémorisés dans le log pour être rendus à la levée.
-    let removedRoles = [];
-    if (fc.removeRoles && member?.roles?.cache) {
-      const removable = [...member.roles.cache.values()].filter((r) => r.id !== guild.id && !r.managed && r.editable !== false);
-      if (removable.length) {
-        const ok = await member.roles.remove(removable.map((r) => r.id), reason).then(() => true, () => false);
-        if (ok) removedRoles = removable.map((r) => r.id);
-      }
-    }
-
+    let eventId = null;
     try {
-      this.events?.add({ guildId: guild.id, userId: message.author.id, filter: 'antiHacked', action: 'quarantine', channelId: message.channel?.id });
+      eventId = this.events?.add({ guildId: guild.id, userId: message.author.id, filter: 'antiHacked', action: 'quarantine', channelId: message.channel?.id }) ?? null;
     } catch (err) {
       logger.warn('Journal AutoMod indisponible :', err?.message);
     }
 
+    // Rôles retirés (désactivé par défaut) : enregistrés en base AVANT le retrait, pour être
+    // rendus à la levée même si le log n'est pas envoyé ou est tronqué.
+    const removable = fc.removeRoles && member?.roles?.cache
+      ? [...member.roles.cache.values()].filter((r) => r.id !== guild.id && !r.managed && r.editable !== false).map((r) => r.id)
+      : [];
+    let quarantineId = null;
+    let stored = !this.quarantines; // sans dépôt (ancien mode) : seul le log garde la trace
+    if (this.quarantines) {
+      try {
+        quarantineId = this.quarantines.add({ guildId: guild.id, userId: message.author.id, roles: removable, timeoutUntil, eventId });
+        stored = true;
+      } catch (err) {
+        logger.warn('Quarantaine non enregistrée :', err?.message);
+      }
+    }
+    let removedRoles = [];
+    let rolesNote = null;
+    if (removable.length && !stored) rolesNote = '*Rôles conservés : enregistrement impossible (base de données).*';
+    else if (removable.length) {
+      const ok = await member.roles.remove(removable, reason).then(() => true, () => false);
+      if (ok) removedRoles = removable;
+      else if (quarantineId) {
+        try {
+          this.quarantines.setRoles(guild.id, quarantineId, []);
+        } catch (err) {
+          logger.debug('Quarantaine : rôles non mis à jour :', err?.message);
+        }
+      }
+    }
+
     const total = purge.count + (deleted ? 1 : 0);
+    // Le salon du message déclencheur compte aussi.
+    const channelCount = new Set([...purge.channelIds, ...(deleted && message.channel?.id ? [message.channel.id] : [])]).size;
     const embed = logCard({
       category: 'automod',
       tone: 'danger',
@@ -570,13 +607,13 @@ class AutoModService {
         field(ICONS.warning, 'Règle', violation.reason),
         field(ICONS.shield, 'Action', timeout.text),
         violation.detail ? wide(ICONS.search, 'Détail', truncate(violation.detail, 1024)) : null,
-        field(ICONS.delete, 'Messages supprimés', `**${total}** · ${purge.channels} salon(s) · ${fc.purgeMinutes ?? 10} dernières min`),
-        fc.removeRoles ? wide(ICONS.role, QUARANTINE_ROLES_FIELD, fitList(removedRoles.map((id) => `<@&${id}>`), 1000) ?? '*Aucun*') : null,
+        field(ICONS.delete, 'Messages supprimés', `**${total}** · ${channelCount} salon(s) · ${fc.purgeMinutes ?? 10} dernières min`),
+        fc.removeRoles ? wide(ICONS.role, QUARANTINE_ROLES_FIELD, rolesNote ?? fitList(removedRoles.map((id) => `<@&${id}>`), 1000) ?? '*Aucun*') : null,
         wide(ICONS.channel, 'Message', message.content ? truncate(message.content, 1024) : '*Aucun contenu texte*'),
       ],
     });
     const components = buttonRows(
-      actionButton({ command: 'automod', action: 'qlift', args: [message.author.id], label: 'Lever la quarantaine', emoji: ICONS.unlock, style: ButtonStyle.Success }),
+      actionButton({ command: 'automod', action: 'qlift', args: quarantineId ? [message.author.id, quarantineId] : [message.author.id], label: 'Lever la quarantaine', emoji: ICONS.unlock, style: ButtonStyle.Success }),
       actionButton({ command: 'automod', action: 'qban', args: [message.author.id], label: 'Bannir', emoji: ICONS.ban, style: ButtonStyle.Danger }),
       historyButton(message.author.id),
     );
@@ -586,7 +623,7 @@ class AutoModService {
   /**
    * Supprime les messages récents d'un membre (suivis en mémoire) dans tous les salons.
    * @param {{ extra?: Array<{ channelId: string, messageId: string }>, exclude?: string[] }} [opts]
-   * @returns {Promise<{ count: number, channels: number }>}
+   * @returns {Promise<{ count: number, channels: number, channelIds: string[] }>}
    */
   async purgeRecent(guild, userId, windowMs, { extra = [], exclude = [] } = {}) {
     const state = this.tracker.get(this.#key(guild.id, userId));
@@ -600,7 +637,7 @@ class AutoModService {
       byChannel.get(p.channelId).push(p.messageId);
     }
     let count = 0;
-    let channels = 0;
+    const channelIds = [];
     for (const [channelId, ids] of byChannel) {
       const ch = guild.channels?.cache?.get(channelId);
       if (!ch?.messages) continue;
@@ -612,13 +649,13 @@ class AutoModService {
       // Suppression unitaire : un seul message, ou suppression groupée refusée.
       if (!n) for (const id of ids) n += await ch.messages.delete(id).then(() => 1, () => 0);
       count += n;
-      if (n) channels += 1;
+      if (n) channelIds.push(channelId);
     }
     if (state?.posted) state.posted = state.posted.filter((p) => !skip.has(p.messageId));
-    return { count, channels };
+    return { count, channels: channelIds.length, channelIds };
   }
 
-  /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean }} */
+  /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean, until?: number }} (until : fin du timeout posé) */
   async #sanction(message, { action, duration, reason }) {
     const guild = message.guild;
     const me = guild.members.me;
@@ -634,6 +671,7 @@ class AutoModService {
       return {
         timedOut: Boolean(res),
         kicked: false,
+        until: res ? Date.now() + ms : 0,
         text: res ? `${ACTION_LABELS.timeout} (${duration || formatDuration(ms)})${res?.id ? ` · sanction #${res.id}` : ''}` : `${ACTION_LABELS.delete} · timeout impossible`,
       };
     }

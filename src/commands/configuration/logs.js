@@ -135,8 +135,8 @@ function homeView(client, guild, notice) {
       navRow('home'),
       ...buttonRows(
         on
-          ? actionButton({ command: 'logs', action: 'toggle', label: 'Tout mettre en pause', emoji: '⏸️', style: ButtonStyle.Danger })
-          : actionButton({ command: 'logs', action: 'toggle', label: 'Réactiver les logs', emoji: '▶️', style: ButtonStyle.Success }),
+          ? actionButton({ command: 'logs', action: 'toggle', args: ['off'], label: 'Tout mettre en pause', emoji: '⏸️', style: ButtonStyle.Danger })
+          : actionButton({ command: 'logs', action: 'toggle', args: ['on'], label: 'Réactiver les logs', emoji: '▶️', style: ButtonStyle.Success }),
         actionButton({ command: 'logs', action: 'go', args: ['setup'], label: 'Création automatique', emoji: '⚡', style: ButtonStyle.Primary }),
         repairable(client, guild).length
           ? actionButton({ command: 'logs', action: 'repair', label: 'Réparer', emoji: '🛠️', style: ButtonStyle.Success })
@@ -207,8 +207,8 @@ function categoryView(client, guild, key, notice) {
       ),
       ...buttonRows(
         paused
-          ? actionButton({ command: 'logs', action: 'pause', args: [key], label: 'Reprendre', emoji: '▶️', style: ButtonStyle.Success })
-          : actionButton({ command: 'logs', action: 'pause', args: [key], label: 'Mettre en pause', emoji: '⏸️' }),
+          ? actionButton({ command: 'logs', action: 'pause', args: [key, 'off'], label: 'Reprendre', emoji: '▶️', style: ButtonStyle.Success })
+          : actionButton({ command: 'logs', action: 'pause', args: [key, 'on'], label: 'Mettre en pause', emoji: '⏸️' }),
         channelId ? actionButton({ command: 'logs', action: 'test', args: [key], label: 'Tester', emoji: '🧪', style: ButtonStyle.Primary }) : null,
         homeButton(),
       ),
@@ -340,7 +340,7 @@ function optionsView(client, guild, notice) {
       navRow('options'),
       new ActionRowBuilder().addComponents(menu),
       ...buttonRows(
-        actionButton({ command: 'logs', action: 'bots', label: bots ? 'Journaliser les bots' : 'Ignorer les bots', emoji: '🤖' }),
+        actionButton({ command: 'logs', action: 'bots', args: [bots ? 'on' : 'off'], label: bots ? 'Journaliser les bots' : 'Ignorer les bots', emoji: '🤖' }),
         homeButton(),
       ),
     ],
@@ -381,6 +381,16 @@ async function sendTest(client, guild, key, actor) {
   }
 }
 
+/**
+ * Valeur voulue par un interrupteur « on/off » (celle AFFICHÉE sur le bouton : un double clic
+ * ou un vieux message ne réinverse pas). Anciens boutons sans valeur : inversion.
+ */
+function target(state, current) {
+  if (state === 'on') return true;
+  if (state === 'off') return false;
+  return !current;
+}
+
 module.exports = {
   category: 'configuration',
   cooldown: 3_000,
@@ -405,12 +415,12 @@ module.exports = {
       guard(interaction);
       await interaction.update(render(client, interaction.guild, view ?? 'home'));
     },
-    /** Interrupteur global. */
-    async toggle(interaction, client) {
+    /** cmd:logs:toggle:<on|off> — interrupteur global (valeur cible). */
+    async toggle(interaction, client, [state]) {
       guard(interaction);
-      const on = full(client, interaction.guildId).logs?.enabled !== false;
-      client.services.config.update(interaction.guildId, { logs: { enabled: !on } });
-      await interaction.update(render(client, interaction.guild, 'home', `${ICONS.success} Logs ${on ? 'mis en pause' : 'réactivés'}.`));
+      const enabled = target(state, full(client, interaction.guildId).logs?.enabled !== false);
+      client.services.config.update(interaction.guildId, { logs: { enabled } });
+      await interaction.update(render(client, interaction.guild, 'home', `${ICONS.success} Logs ${enabled ? 'réactivés' : 'mis en pause'}.`));
     },
     /** cmd:logs:channel:<catégorie> — sélecteur de salon. */
     async channel(interaction, client, [key]) {
@@ -442,12 +452,12 @@ module.exports = {
       client.services.config.update(interaction.guildId, { logs: { disabledEvents: [...others, ...all.filter((e) => !chosen.has(e))] } });
       await interaction.update(categoryView(client, interaction.guild, key, `${ICONS.success} ${chosen.size} événement(s) journalisé(s) sur ${all.length}.`));
     },
-    /** cmd:logs:pause:<catégorie> */
-    async pause(interaction, client, [key]) {
+    /** cmd:logs:pause:<catégorie>:<on|off> — on : mettre en pause, off : reprendre (valeur cible). */
+    async pause(interaction, client, [key, state]) {
       guard(interaction);
       if (!LOG_CATEGORIES[key]) throw new UserError('Catégorie de logs inconnue.');
       const set = new Set(full(client, interaction.guildId).logs?.disabledCategories ?? []);
-      const paused = !set.has(key);
+      const paused = target(state, set.has(key));
       paused ? set.add(key) : set.delete(key);
       client.services.config.update(interaction.guildId, { logs: { disabledCategories: [...set] } });
       await interaction.update(categoryView(client, interaction.guild, key, `${ICONS.success} Catégorie ${paused ? 'mise en pause (le salon est conservé)' : 'réactivée'}.`));
@@ -538,12 +548,12 @@ module.exports = {
       client.services.config.update(interaction.guildId, { logs: { ignoredChannels: ids } });
       await interaction.update(optionsView(client, interaction.guild, `${ICONS.success} ${ids.length} salon(s) ignoré(s).`));
     },
-    /** Messages des bots : ignorés / journalisés. */
-    async bots(interaction, client) {
+    /** cmd:logs:bots:<on|off> — on : journaliser les messages des bots, off : les ignorer (valeur cible). */
+    async bots(interaction, client, [state]) {
       guard(interaction);
-      const ignore = full(client, interaction.guildId).logs?.ignoreBots !== false;
-      client.services.config.update(interaction.guildId, { logs: { ignoreBots: !ignore } });
-      await interaction.update(optionsView(client, interaction.guild, `${ICONS.success} Messages des bots ${ignore ? 'journalisés' : 'ignorés'}.`));
+      const logBots = target(state, full(client, interaction.guildId).logs?.ignoreBots === false);
+      client.services.config.update(interaction.guildId, { logs: { ignoreBots: !logBots } });
+      await interaction.update(optionsView(client, interaction.guild, `${ICONS.success} Messages des bots ${logBots ? 'journalisés' : 'ignorés'}.`));
     },
   },
 };

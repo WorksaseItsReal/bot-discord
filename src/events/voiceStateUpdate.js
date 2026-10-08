@@ -12,19 +12,22 @@ module.exports = {
     const member = newState.member || oldState.member;
     if (!member || member.user.bot) return;
     const user = member.user;
+    // Salon supprimé entre-temps (hors cache) : mention par identifiant plutôt que « null ».
+    const before = oldState.channel ?? (oldState.channelId ? `<#${oldState.channelId}>` : '—');
+    const after = newState.channel ?? (newState.channelId ? `<#${newState.channelId}>` : '—');
 
     let log = null;
     if (!oldState.channelId && newState.channelId) {
-      log = { event: 'voiceJoin', tone: 'success', title: 'Connexion vocale', description: `${user} a rejoint ${newState.channel}.`, fields: [field(ICONS.voice, 'Salon', `${newState.channel}`)] };
+      log = { event: 'voiceJoin', tone: 'success', title: 'Connexion vocale', description: `${user} a rejoint ${after}.`, fields: [field(ICONS.voice, 'Salon', `${after}`)] };
     } else if (oldState.channelId && !newState.channelId) {
-      log = { event: 'voiceLeave', tone: 'neutral', title: 'Déconnexion vocale', description: `${user} a quitté ${oldState.channel}.`, fields: [field(ICONS.voice, 'Salon', `${oldState.channel}`)] };
+      log = { event: 'voiceLeave', tone: 'neutral', title: 'Déconnexion vocale', description: `${user} a quitté ${before}.`, fields: [field(ICONS.voice, 'Salon', `${before}`)] };
     } else if (oldState.channelId !== newState.channelId) {
       log = {
         event: 'voiceMove',
         tone: 'info',
         title: 'Changement de salon vocal',
-        description: `${user} est passé de ${oldState.channel} à ${newState.channel}.`,
-        fields: [field('⬅️', 'Avant', `${oldState.channel}`), field('➡️', 'Après', `${newState.channel}`)],
+        description: `${user} est passé de ${before} à ${after}.`,
+        fields: [field('⬅️', 'Avant', `${before}`), field('➡️', 'Après', `${after}`)],
       };
     }
     if (!log) return;

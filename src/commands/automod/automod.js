@@ -187,7 +187,8 @@ const splitItems = (text) => String(text ?? '').split(/[,\n;]+/).map((s) => s.tr
 /** Normalise un domaine saisi (« https://www.Site.com/x » → « site.com »). */
 function cleanDomain(input) {
   const d = String(input ?? '').trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/[/?#].*$/, '');
-  if (!/^[a-z0-9.-]+\.[a-z]{2,24}$/.test(d)) throw new UserError(`Domaine invalide : « ${truncate(input, 40)} ». Exemple : \`youtube.com\`.`);
+  // 253 caractères : longueur maximale d'un nom de domaine.
+  if (d.length > 253 || !/^[a-z0-9.-]+\.[a-z]{2,24}$/.test(d)) throw new UserError(`Domaine invalide : « ${truncate(input, 40)} ». Exemple : \`youtube.com\`.`);
   return d;
 }
 
@@ -853,10 +854,13 @@ function safeDomain(host) {
   }
 }
 
+/** Au-delà, un correctif n'est pas proposé (la vue « Faux positif » doit tenir dans 1024 caractères). */
+const MAX_FIX_LENGTH = 80;
+
 /**
  * Correctifs à proposer après un faux positif : domaines du message à autoriser
  * (filtres de liens) ou mots de la liste qui l'ont bloqué (mots interdits). Pur.
- * @returns {Array<{ kind: 'domain'|'word', value: string }>} 4 au plus
+ * @returns {Array<{ kind: 'domain'|'word', value: string }>} 4 au plus, de 80 caractères au plus
  */
 function fixSuggestions(cfg, filter, content) {
   if (!content) return [];
@@ -869,7 +873,7 @@ function fixSuggestions(cfg, filter, content) {
     }
   }
   if (filter === 'badWords') for (const w of matchingWords(content, cfg.filters?.badWords?.words, 4)) out.push({ kind: 'word', value: w });
-  return out.slice(0, 4);
+  return out.filter((fx) => fx.value.length <= MAX_FIX_LENGTH).slice(0, 4);
 }
 
 /** Correctifs relus dans la vue « Faux positif » (écrite par le bot), dans l'ordre des boutons. Pur. */
@@ -947,42 +951,88 @@ function restoredMessageCard(guild, content) {
   });
 }
 
-/** Lève un timeout via ModerationService (permission et hiérarchie du cliqueur). @returns {Promise<string>} */
-async function liftTimeout(interaction, client, userId, reason) {
+/** Écart toléré entre la fin du timeout enregistrée et celle que Discord renvoie. */
+const TIMEOUT_TOLERANCE_MS = 60_000;
+
+/**
+ * Lève un timeout via ModerationService (permission et hiérarchie du cliqueur).
+ * `expectedUntil` : fin du timeout posé par l'AutoMod (0 = aucun posé) ; un autre timeout
+ * en cours (posé entre-temps par un modérateur) n'est jamais levé. Absent : anciens
+ * enregistrements, le timeout en cours est levé.
+ * @returns {Promise<{ ok: boolean, text: string }>} ok : plus rien à faire sur le timeout
+ */
+async function liftTimeout(interaction, client, userId, reason, { expectedUntil } = {}) {
+  if (expectedUntil === 0) return { ok: true, text: 'Aucun timeout n\'avait été posé par l\'AutoMod.' };
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ModerateMembers)) {
-    return 'Timeout non levé : il vous faut la permission **Exclure temporairement des membres**.';
+    return { ok: false, text: 'Timeout non levé : il vous faut la permission **Exclure temporairement des membres**.' };
   }
   const member = await interaction.guild.members.fetch(userId).catch(() => null);
-  if (!member) return 'Timeout non levé : le membre n\'est plus sur le serveur.';
-  if (!member.isCommunicationDisabled?.()) return 'Le membre n\'est pas en timeout.';
+  if (!member) return { ok: false, text: 'Timeout non levé : le membre n\'est plus sur le serveur.' };
+  if (!member.isCommunicationDisabled?.()) return { ok: true, text: 'Le membre n\'est pas en timeout.' };
+  const current = Number(member.communicationDisabledUntilTimestamp) || 0;
+  if (Number.isFinite(expectedUntil) && Math.abs(current - expectedUntil) > TIMEOUT_TOLERANCE_MS) {
+    const end = current ? ` (jusqu'à <t:${Math.floor(current / 1000)}:f>)` : '';
+    return { ok: true, text: `Un autre timeout est en cours${end} : non levé.` };
+  }
   try {
     await client.services.moderation.removeTimeout(interaction.guild, member, interaction.member, reason);
-    return 'Timeout **levé**.';
+    return { ok: true, text: 'Timeout **levé**.' };
   } catch (err) {
-    if (err?.isUserError) return `Timeout non levé : ${err.message}`;
+    if (err?.isUserError) return { ok: false, text: `Timeout non levé : ${err.message}` };
     throw err;
   }
 }
 
-/** Rend les rôles retirés par une quarantaine (rôles existants, sous le cliqueur et le bot). @returns {Promise<string>} */
+const roleList = (ids) => fitList(ids.map((id) => `<@&${id}>`), 900);
+
+/**
+ * Rend les rôles retirés par une quarantaine (rôles existants, sous le cliqueur et le bot).
+ * @returns {Promise<{ ok: boolean, lines: string[] }>} ok : tous les rôles ont été rendus
+ */
 async function restoreRoles(interaction, userId, roleIds, reason) {
-  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) return 'Rôles non rendus : il vous faut la permission **Gérer les rôles**.';
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
+    return { ok: false, lines: [`Rôles non rendus (il vous faut la permission **Gérer les rôles**) : ${roleList(roleIds)}`] };
+  }
   const guild = interaction.guild;
   const member = await guild.members.fetch(userId).catch(() => null);
-  if (!member) return 'Rôles non rendus : le membre n\'est plus sur le serveur.';
+  if (!member) return { ok: false, lines: ['Rôles non rendus : le membre n\'est plus sur le serveur.'] };
   const isOwner = interaction.user.id === guild.ownerId;
   const top = interaction.member?.roles?.highest?.position ?? 0;
-  const roles = roleIds
-    .map((id) => guild.roles.cache.get(id))
-    .filter((r) => r && !r.managed && r.editable !== false && !member.roles.cache.has(r.id) && (isOwner || r.position < top));
-  if (!roles.length) return 'Aucun rôle à rendre.';
-  const ok = await member.roles.add(roles.map((r) => r.id), reason).then(() => true, () => false);
-  return ok ? `**${roles.length}** rôle(s) rendu(s).` : 'Rôles non rendus : vérifiez ma permission **Gérer les rôles** et ma position.';
+  const toAdd = [];
+  const aboveMod = [];
+  const aboveBot = [];
+  let gone = 0;
+  for (const id of roleIds) {
+    const r = guild.roles.cache.get(id);
+    if (!r || r.managed) gone += 1; // supprimé entre-temps (ou géré par une intégration)
+    else if (member.roles.cache.has(r.id)) continue;
+    else if (r.editable === false) aboveBot.push(r.id);
+    else if (!isOwner && r.position >= top) aboveMod.push(r.id);
+    else toAdd.push(r.id);
+  }
+  let added = 0;
+  let refused = [];
+  if (toAdd.length) {
+    const ok = await member.roles.add(toAdd, reason).then(() => true, () => false);
+    if (ok) added = toAdd.length;
+    else refused = toAdd;
+  }
+  const lines = [
+    added ? `**${added}** rôle(s) rendu(s).` : null,
+    aboveMod.length ? `Non rendus (au-dessus de votre rôle le plus haut) : ${roleList(aboveMod)}` : null,
+    aboveBot.length ? `Non rendus (au-dessus de mon rôle, ou permission **Gérer les rôles** manquante) : ${roleList(aboveBot)}` : null,
+    refused.length ? `Non rendus (refusé par Discord : vérifiez ma permission **Gérer les rôles** et ma position) : ${roleList(refused)}` : null,
+    gone ? `${gone} rôle(s) supprimé(s) entre-temps, ignoré(s).` : null,
+  ].filter(Boolean);
+  return { ok: !aboveMod.length && !aboveBot.length && !refused.length, lines: lines.length ? lines : ['Aucun rôle à rendre.'] };
 }
 
 // ---------------------------------------------------------------- commande
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
+
+/** Code d'erreur Discord « Unknown Member ». */
+const UNKNOWN_MEMBER = 10007;
 
 module.exports = {
   category: 'automod',
@@ -1225,6 +1275,7 @@ module.exports = {
           ...r.updated.map((n) => `🔄 ${n}`),
           ...r.removed.map((n) => `🗑️ ${n} (filtre désactivé)`),
           ...r.failed.map((f) => `${ICONS.error} ${f.name} — ${f.reason}`),
+          ...(r.truncated ?? []).map((t) => `${ICONS.warning} ${t.name} — exemptions limitées par Discord : ${t.detail}`),
         ].join('\n') || `${ICONS.info} Aucun filtre compatible actif.`;
       }
       await interaction.editReply(await nativeView(client, interaction.guild, notice));
@@ -1294,7 +1345,11 @@ module.exports = {
       repo.remove(interaction.guildId, row.id);
       client.services.automod?.forget?.(interaction.guildId, row.user_id);
       const done = ['Infraction retirée du compteur de récidive.'];
-      if (row.action === 'timeout') done.push(await liftTimeout(interaction, client, row.user_id, `Faux positif AutoMod (signalé par ${who(interaction)})`));
+      if (row.action === 'timeout') {
+        // Seul le timeout posé par l'AutoMod est levé (fin enregistrée ; null = ancien enregistrement).
+        const expectedUntil = row.timeout_until ?? undefined;
+        done.push((await liftTimeout(interaction, client, row.user_id, `Faux positif AutoMod (signalé par ${who(interaction)})`, { expectedUntil })).text);
+      }
       if (row.action === 'warn') done.push('L\'avertissement reste dans l\'historique des sanctions (📜).');
       if (row.action === 'kick') done.push('L\'expulsion ne peut pas être annulée : renvoyez une invitation au membre si besoin.');
       const fixes = fixSuggestions(cfgOf(client, interaction.guildId), row.filter, content);
@@ -1340,20 +1395,51 @@ module.exports = {
       await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, 'Renvoyé en MP') });
     },
 
-    /** cmd:automod:qlift:<userId> — lève la quarantaine : timeout retiré, rôles retirés rendus. */
-    async qlift(interaction, client, [rawUserId]) {
+    /**
+     * cmd:automod:qlift:<userId>[:<idQuarantaine>] — lève la quarantaine : timeout posé retiré,
+     * rôles retirés rendus (relus en base ; anciens logs : relus dans le champ du log), infraction
+     * retirée du compteur de récidive. Le bouton n'est figé que si TOUT a été rendu.
+     */
+    async qlift(interaction, client, [rawUserId, rawQuarantineId]) {
       requirePermission(interaction, 'ModerateMembers');
       const userId = snowflake(rawUserId, 'membre');
+      if (rawQuarantineId != null && !/^\d{1,15}$/.test(rawQuarantineId)) throw new UserError('Bouton invalide (quarantaine).');
+      const repo = client.repositories?.automodQuarantines;
+      const row = rawQuarantineId != null ? repo?.get(interaction.guildId, Number(rawQuarantineId)) ?? null : null;
+      if (row && row.user_id !== userId) throw new UserError('Ce bouton ne correspond pas à cette quarantaine.');
+      if (row?.lifted_at) throw new UserError('Cette quarantaine a déjà été levée.');
       await interaction.deferUpdate();
       const reason = `Quarantaine AutoMod levée par ${who(interaction)}`;
-      const done = [await liftTimeout(interaction, client, userId, reason)];
-      // Rôles relus dans CE log (écrit par le bot), seulement s'il concerne bien ce membre.
-      const roles = footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
-      if (roles.length) done.push(await restoreRoles(interaction, userId, roles, reason));
+      // Avec l'enregistrement : seul le timeout posé par la quarantaine est levé.
+      const timeout = await liftTimeout(interaction, client, userId, reason, row ? { expectedUntil: row.timeout_until ?? 0 } : {});
+      // Rôles relus en base ; repli (quarantaine antérieure) : CE log, s'il concerne bien ce membre.
+      const roleIds = row ? row.roles : footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
+      const roles = roleIds.length ? await restoreRoles(interaction, userId, roleIds, reason) : { ok: true, lines: [] };
+      const done = [timeout.text, ...roles.lines];
+      if (row?.event_id) {
+        try {
+          if (client.repositories?.automodEvents?.remove(interaction.guildId, row.event_id)) done.push('Infraction retirée du compteur de récidive.');
+        } catch {
+          // journal indisponible : sans conséquence pour la levée
+        }
+      }
       client.services.automod?.forget?.(interaction.guildId, userId);
-      await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
+      const complete = timeout.ok && roles.ok;
+      if (complete) {
+        if (row) repo.lift(interaction.guildId, row.id, interaction.user.id);
+        await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
+      }
       await interaction.followUp({
-        embeds: [card({ tone: 'success', section: 'automod', icon: ICONS.unlock, title: 'Quarantaine levée', description: done.map((d) => `› ${d}`), fields: [field(ICONS.user, 'Membre', `<@${userId}>`)] })],
+        embeds: [
+          card({
+            tone: complete ? 'success' : 'warning',
+            section: 'automod',
+            icon: ICONS.unlock,
+            title: complete ? 'Quarantaine levée' : 'Quarantaine levée en partie',
+            description: [...done.map((d) => `› ${d}`), complete ? null : subtext('Le bouton reste actif : corrigez le problème puis cliquez à nouveau.')],
+            fields: [field(ICONS.user, 'Membre', `<@${userId}>`)],
+          }),
+        ],
         components: buttonRows(historyButton(userId)),
         ephemeral: true,
       });
@@ -1386,7 +1472,12 @@ module.exports = {
       await interaction.deferUpdate();
       const user = await client.users.fetch(userId).catch(() => null);
       if (!user) throw new UserError('Utilisateur introuvable.');
-      const member = await interaction.guild.members.fetch(userId).catch(() => null);
+      // Absent du serveur seulement sur « Unknown Member » : une erreur passagère ne doit pas
+      // faire sauter la vérification de hiérarchie.
+      const member = await interaction.guild.members.fetch(userId).catch((err) => {
+        if (err?.code === UNKNOWN_MEMBER) return null;
+        throw new UserError('Impossible de vérifier ce membre pour le moment (erreur Discord) : réessayez dans un instant.');
+      });
       const res = await client.services.moderation.ban(interaction.guild, user, interaction.member, 'Compte piraté (quarantaine AutoMod)', { deleteMessageSeconds: 3600, targetMember: member ?? undefined });
       await interaction.editReply({ embeds: [status.ok(`${userLine(user)} est banni${res?.id ? ` · sanction #${res.id}` : ''}.`, 'Membre banni')], components: [] });
       // Fige le bouton « Bannir » du log d'origine (best-effort).

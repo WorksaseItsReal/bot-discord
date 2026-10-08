@@ -27,11 +27,20 @@ class AutomodEventRepository {
     this.pruneStmt = db.prepare('DELETE FROM automod_events WHERE created_at < ?');
     this.getStmt = db.prepare('SELECT * FROM automod_events WHERE id = ? AND guild_id = ?');
     this.removeStmt = db.prepare('DELETE FROM automod_events WHERE id = ? AND guild_id = ?');
+    this.setTimeoutStmt = db.prepare('UPDATE automod_events SET timeout_until = ? WHERE id = ? AND guild_id = ?');
   }
 
   /** @returns {number} identifiant de l'infraction (bouton « Faux positif » du log) */
   add({ guildId, userId, filter, action, channelId = null, at = Date.now() }) {
     return Number(this.insertStmt.run(guildId, userId, filter, action, channelId, at).lastInsertRowid);
+  }
+
+  /**
+   * Fin prévue du timeout posé par l'AutoMod pour cette infraction (0 = aucun timeout posé) :
+   * « Faux positif » ne lève que ce timeout-là, jamais un autre posé entre-temps.
+   */
+  setTimeoutUntil(guildId, id, until) {
+    return this.setTimeoutStmt.run(until, id, guildId).changes > 0;
   }
 
   /** Infraction d'un serveur (jamais celle d'un autre serveur), ou null. */

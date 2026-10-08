@@ -40,7 +40,14 @@ const SUSPICIOUS_TLDS = new Set(['xyz', 'ru', 'tk', 'ml', 'ga', 'cf', 'gq', 'top
 const DICTIONARY = new Set(['stream', 'streams', 'steak', 'steal', 'steady', 'steamy', 'stamp', 'scream', 'switch', 'witch',
   'twitchy', 'discard', 'discards', 'disco', 'record', 'accord', 'nitric', 'nitrous', 'robin', 'robot', 'epic', 'steamed',
   'steamer', 'steams', 'nitrogen', 'nitrate', 'stream', 'dream', 'cream', 'team', 'teams', 'steel', 'steep', 'stead',
-  'steady', 'stewm', 'epicgamer', 'epicgamers', 'robots', 'roblex', 'discos', 'discover', 'discovery', 'disord', 'twitter']);
+  'steady', 'stewm', 'epicgamer', 'epicgamers', 'robots', 'roblex', 'discos', 'discover', 'discovery', 'disord', 'twitter',
+  'discorde', 'discordes', 'nitrox']);
+
+/**
+ * Services d'invitation Discord déjà reconnus par l'anti-invitations (INVITE_RE de links.js) :
+ * jamais pris pour une imitation de marque (l'anti-invitations s'en charge).
+ */
+const INVITE_SERVICES = ['discord.me', 'discord.io', 'discord.li', 'discord.link', 'dsc.gg', 'invite.gg'];
 
 const SHORTENERS = ['bit.ly', 'tinyurl.com', 'cutt.ly', 'is.gd', 'rb.gy', 'shorturl.at', 't.ly', 'goo.su', 'clck.ru', 'v.gd', 'tiny.cc', 'ow.ly', 'grabify.link', 'iplogger.org', 'iplogger.com', '2no.co', 'blasze.com', 'yip.su'];
 
@@ -78,13 +85,15 @@ function distance(a, b, max = 3) {
 }
 
 /**
- * Domaine qui imite une marque. Renvoie { brand, kind } ou null.
+ * Domaine qui imite une marque. Renvoie { brand, kind, exact? } ou null.
  *  - typosquat : « dlscord.com », « steamcornmunity.ru » (faute volontaire, hors vrais mots) ;
  *  - appât : « discord-gift.com », « discordnitro.xyz », « steam-trade.ru » (marque + appât ou TLD suspect).
+ * `exact` : le nom de la marque tel quel avec une autre extension (« discord.de », « twitch.fr »).
  * Une simple mention de la marque (« discord.js.org », « steamdb.info ») ne suffit pas.
  */
 function imitatesBrand(host, extraAllowed = []) {
   if (isOfficial(host, extraAllowed)) return null;
+  if (INVITE_SERVICES.some((d) => host === d || host.endsWith(`.${d}`))) return null;
   const labels = host.split('.');
   const tld = labels.at(-1);
   const rawTokens = labels.slice(0, -1).join('.').split(/[.-]/).filter(Boolean);
@@ -95,7 +104,7 @@ function imitatesBrand(host, extraAllowed = []) {
   // Nom du domaine sans tirets (« steam-community » → « steamcommunity ») : même nom
   // qu'un domaine officiel, mais autre extension (« steamcommunity.co », « discordapp.co »).
   const sld = readAs(labels.at(-2) ?? '').replace(/-/g, '');
-  if (OFFICIAL_NAMES.has(sld)) return { brand: sld, kind: 'typosquat' };
+  if (OFFICIAL_NAMES.has(sld)) return { brand: sld, kind: 'typosquat', exact: labels.length === 2 && labels[0] === sld };
   for (const brand of BRANDS) {
     for (const [i, t] of tokens.entries()) {
       // Homoglyphe ou « rn » pour « m » : se LIT comme la marque sans l'être (« dіscord », « stearn »).
@@ -122,11 +131,24 @@ const MASKED_RE = /\[([^\[\]\n]{1,200})\]\(\s*<?(https?:\/\/[^\s<>()]+)>?(?:\s+"
 /** Même site (égal ou sous-domaine l'un de l'autre). */
 const sameSite = (a, b) => a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
 
+/** Le domaine affiché se réclame-t-il d'une marque usurpée (« discord.com », « store.steampowered.com », « dіscord-nitro.ru ») ? */
+function showsBrand(host) {
+  const name = readAs(host.split('.').slice(0, -1).join('.'));
+  return BRANDS.some((b) => name.includes(b)) || Boolean(imitatesBrand(host));
+}
+
+/** Cible suspecte en elle-même : imitation de marque, extension douteuse ou punycode. */
+function suspiciousTarget(link) {
+  return Boolean(imitatesBrand(link.host)) || SUSPICIOUS_TLDS.has(link.tld) || link.host.split('.').some((p) => p.startsWith('xn--'));
+}
+
 /**
  * Liens masqués trompeurs : le texte affiché ressemble à un domaine (« discord.com/gift »)
  * différent de la vraie cible (« https://evil.ru »). « [clique ici](…) » n'est pas concerné,
  * ni un texte qui désigne le même site, ni une cible officielle ou autorisée. Pur.
- * @returns {Array<{ shown: string, host: string }>}
+ * `strong` : le texte affiche une marque usurpée (Discord, Steam, Nitro…) ou la cible est
+ * elle-même suspecte ; sinon simple miroir/raccourci (fxtwitter, amzn.to…), indice faible.
+ * @returns {Array<{ shown: string, host: string, strong: boolean }>}
  */
 function maskedLinks(text, allowedDomains = []) {
   const out = [];
@@ -136,7 +158,7 @@ function maskedLinks(text, allowedDomains = []) {
     // Le texte doit lui-même désigner un site, et aucun ne doit correspondre à la cible.
     const shown = extractLinks(m[1]);
     if (!shown.length || shown.some((l) => sameSite(l.host, target.host))) continue;
-    out.push({ shown: shown[0].host, host: target.host });
+    out.push({ shown: shown[0].host, host: target.host, strong: shown.some((l) => showsBrand(l.host)) || suspiciousTarget(target) });
   }
   return out;
 }
@@ -158,7 +180,10 @@ function phishingScore(text, ctx = {}) {
     if (isOfficial(l.host, allowed)) continue;
     const imitation = imitatesBrand(l.host, allowed);
     if (imitation) {
-      linkScore += imitation.weak ? 2 : 3;
+      // « je suis sur discord.de », « twitch.fr » : marque + extension écrite au fil de la phrase
+      // (sans protocole, chemin ni www) → indice faible, il faut d'autres signaux.
+      const bare = imitation.exact && !l.hasProtocol && !l.url.includes('/') && !/^www\./i.test(l.url);
+      linkScore += bare ? 1 : imitation.weak ? 2 : 3;
       reasons.push(`domaine imitant « ${imitation.brand} » (${l.host})`);
     }
     if (l.disguised) {
@@ -177,7 +202,7 @@ function phishingScore(text, ctx = {}) {
   }
   // « [discord.com/gift](https://evil.ru) » : le texte affiché ment sur la destination.
   for (const m of maskedLinks(text, allowed)) {
-    linkScore += 3;
+    linkScore += m.strong ? 3 : 1;
     reasons.push(`lien masqué (affiche « ${m.shown} » mais mène à ${m.host})`);
   }
   score += linkScore;
@@ -201,4 +226,4 @@ function phishingScore(text, ctx = {}) {
   return { score, reasons: [...new Set(reasons)], links };
 }
 
-module.exports = { phishingScore, maskedLinks, imitatesBrand, isOfficial, distance, OFFICIAL, KNOWN_LEGIT, SHORTENERS };
+module.exports = { phishingScore, maskedLinks, imitatesBrand, isOfficial, distance, OFFICIAL, KNOWN_LEGIT, SHORTENERS, INVITE_SERVICES };
