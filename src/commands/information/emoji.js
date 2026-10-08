@@ -10,8 +10,30 @@ function copyBlock(text) {
   return `\`\`\`\n${String(text).replace(/`/g, 'ˋ')}\n\`\`\``;
 }
 
+/** Nombre maximal d'emojis standard analysés en une fois. */
+const MAX_EMOJIS = 10;
+const KEYCAP = /^[0-9#*]\uFE0F?\u20E3$/u;
+const segmenter = new Intl.Segmenter('fr', { granularity: 'grapheme' });
+
+/**
+ * Un graphème est-il un vrai emoji Unicode ? Pictogramme (`\p{Extended_Pictographic}`,
+ * avec ses variantes : teinte, ZWJ…), drapeau (indicateurs régionaux) ou keycap (1️⃣ #️⃣ *️⃣). Pur.
+ */
+function isStandardEmoji(grapheme) {
+  return KEYCAP.test(grapheme) || /\p{Extended_Pictographic}/u.test(grapheme) || /^\p{Regional_Indicator}{2}$/u.test(grapheme);
+}
+
+/** Emojis standard d'une saisie (hors espaces), ou null si un élément n'en est pas un. Pur. */
+function parseStandardEmojis(input) {
+  const graphemes = [...segmenter.segment(String(input ?? ''))].map((s) => s.segment).filter((g) => !/^\s+$/u.test(g));
+  if (!graphemes.length || graphemes.length > MAX_EMOJIS || !graphemes.every(isStandardEmoji)) return null;
+  return graphemes;
+}
+
 module.exports = {
   guildOnly: false,
+  isStandardEmoji,
+  parseStandardEmojis,
   data: new SlashCommandBuilder()
     .setName('emoji')
     .setDescription('Affiche un emoji personnalisé en grand avec ses informations.')
@@ -53,10 +75,11 @@ module.exports = {
       });
     }
 
-    const chars = [...input].filter((c) => !/\s/.test(c));
-    if (!chars.length || chars.length > 10 || chars.some((c) => /[\w]/.test(c))) {
-      throw new UserError('Envoyez un emoji personnalisé (ex : `:pepe:`) ou un emoji standard.');
+    const emojis = parseStandardEmojis(input);
+    if (!emojis) {
+      throw new UserError(`Envoyez un emoji personnalisé (ex : \`:pepe:\`) ou jusqu'à ${MAX_EMOJIS} emojis standard (ex : 😀 🇫🇷 1️⃣).`);
     }
+    const chars = [...emojis.join('')];
     const codes = chars.map((c) => `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join(' ');
     await interaction.reply({
       embeds: [
@@ -65,11 +88,11 @@ module.exports = {
           section: 'information',
           icon: ICONS.emoji,
           title: 'Emoji standard',
-          description: [`# ${chars.join('')}`, subtext('Emoji Unicode : disponible partout, sans Nitro.')],
+          description: [`# ${emojis.join('')}`, subtext('Emoji Unicode : disponible partout, sans Nitro.')],
           fields: [
             field(ICONS.id, 'Unicode', code(codes)),
             field(ICONS.count, 'Points de code', `**${chars.length}**`),
-            wide(ICONS.tag, 'Copier', copyBlock(chars.join(''))),
+            wide(ICONS.tag, 'Copier', copyBlock(emojis.join(''))),
           ],
         }),
       ],

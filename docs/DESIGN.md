@@ -43,8 +43,16 @@ const embed = card({
 });
 ```
 
-- `card()` tronque tout aux limites Discord, aligne les champs inline par 3 et ajoute le pied de page.
-- Un champ vide affiche `—`.
+- `card()` tronque chaque élément à sa limite Discord (titre 256, description 4096, 25 champs,
+  nom 256 / valeur 1024, pied de page 2048), aligne les champs inline par 3 et ajoute le pied de page.
+- `card()` ne garantit **pas** le total de 6000 caractères d'un message. Ce total n'est assuré
+  automatiquement que pour les **réponses d'interaction** (`reply`, `editReply`, `followUp`, `update`),
+  qui passent par `sanitizeEmbeds` (`core/interactionSafety.js`). Un envoi direct (`channel.send`,
+  `message.edit`, webhook) n'est pas protégé : passez ses embeds par `fitEmbeds(embeds)` (`ui.js`), qui
+  réduit les derniers champs puis les descriptions jusqu'à passer sous la limite. Pour un contenu saisi
+  par l'utilisateur (ex : `/embed`), refusez plutôt avec un message précis que de tronquer en silence.
+- Un champ vide affiche `—`. Espaceur de grille : `blank()` (champ invisible, ajouté automatiquement
+  par l'alignement par 3).
 
 ## 3. Couleurs (`TONES`) — jamais de code couleur en dur
 
@@ -78,9 +86,15 @@ status.ok('Rôle ajouté à @Bob.')                      // ✅ vert
 status.fail('Ce membre est introuvable.')             // ❌ rouge (les UserError le font déjà)
 status.warn('Aucune option fournie.')                 // ⚠️ ambre
 status.note('Aucun rappel en cours.', 'Rappels')      // ℹ️ bleu, titre optionnel
+status.wait('Confirmé, exécution en cours…')          // ⏳ neutre : action longue en cours (message par défaut : « Traitement en cours… »)
 ```
 
-Les anciens `embeds.success/error/warning/info` passent déjà par `status`.
+Chaque helper accepte `(message, title?, extra?)` ; `extra` est passé à `card()` (ex : `{ footer }`).
+
+`utils/embeds.js` ne fournit plus de cartes de statut : il n'en reste que `errorReply(description, { title, footer })`,
+une réponse d'erreur éphémère toute prête (`{ embeds: [status.fail(…)], ephemeral: true }`), utilisée par le routeur
+d'interactions. Le reste de ce module, ce sont des briques (`truncate`, `progressBar`, `listOrMore`, `LIMITS`,
+`sanitizeEmbeds`, marque du pied de page) : pour une carte, passez toujours par `ui.js`.
 
 ## 6. Textes
 
@@ -89,6 +103,8 @@ Les anciens `embeds.success/error/warning/info` passent déjà par `status`.
 - Identifiants en police fixe : `code(id)`. Utilisateurs : `userLine(user)` (mention + pseudo).
 - Dates : timestamps Discord (`discordTimestamp(ms, 'D')` + `'R'` en dessous).
 - Petites précisions sous un texte : `subtext('…')` (ligne grise).
+- Paires « libellé · valeur » dans une description : `kv([['Seuil', '10'], ['Fenêtre', '10 s']])`
+  (libellé en gras, valeur vide → `—`, entrées `null`/`false` ignorées).
 - Listes : `bullets([...])`, au-delà de 10 éléments → pagination (`utils/pagination.js`).
 
 ## 7. Boutons
@@ -98,6 +114,7 @@ Les anciens `embeds.success/error/warning/info` passent déjà par `status`.
 | `actionButton({ command, action, args, label, emoji, style })` | Action persistante routée vers `module.exports.buttons[action]` de la commande. |
 | `linkButton(label, url, emoji)` | Ouvre une URL (avatar, message, site…). |
 | `deleteButton(ownerId)` | 🗑️ supprime le message (auteur ou modérateur). |
+| `labelButton(label)` | Étiquette grise désactivée, jamais cliquable (ex : « Page 2/5 ») ; customId `cmd:_:noop:…`. |
 | `buttonRows(...buttons)` | Range les boutons par 5, ignore les `null`. |
 
 Règles :
@@ -130,7 +147,18 @@ module.exports = {
 
 ## 8. Vérifications automatiques
 
-`tests/design.test.js` échoue si :
-- un fichier crée un `EmbedBuilder` ou appelle `.setColor()` hors de `utils/ui.js` (sauf le constructeur d'embeds libres `/embed`) ;
-- un `actionButton` vise une action qui n'existe pas dans `buttons` de la commande ;
-- une réponse d'interaction est envoyée en texte brut.
+`tests/design.test.js` analyse le **texte** des sources de `src/` (pas leur exécution) et échoue si :
+- un fichier contient `new EmbedBuilder(` ou `.setColor(` hors de `utils/ui.js` et du constructeur
+  d'embeds libres (`commands/utility/embed.js`, `components/embedbuilder.js`) ;
+- un appel `.reply(`, `.editReply(`, `.followUp(` ou `.update(` a pour premier argument une chaîne
+  littérale (texte brut). Un texte passé par variable n'est pas détecté ici ; la couche
+  `core/interactionSafety.js` le convertit de toute façon en carte à l'exécution ;
+- une route `cmd:<commande>:<action>` **écrite en dur** ne correspond à aucun handler
+  `buttons[action]` de la commande. Sont contrôlés : les appels `actionButton({ command: '…', action: '…' })`,
+  même écrits sur plusieurs lignes, et les customId littéraux (`'cmd:x:y'`, `` `cmd:x:y:${arg}` ``) de boutons,
+  menus et modals. Un segment calculé (`` `cmd:x:${action}` ``, `action` passé par variable) est ignoré :
+  ces routes-là se vérifient par les tests propres à la commande.
+
+Il vérifie aussi `card()` (couleur, alignement par 3, troncature par élément) et la limite de
+100 caractères du customId d'`actionButton`. Les limites d'ensemble d'une réponse (6000 caractères,
+5 rangées, customId uniques) sont contrôlées dans les tests de rendu de chaque commande.

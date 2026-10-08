@@ -1,7 +1,7 @@
 'use strict';
 
 const { EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-const { brand, brandFooter, truncate, LIMITS } = require('./embeds');
+const { brand, brandFooter, truncate, LIMITS, sanitizeEmbeds } = require('./embeds');
 const { categoryMeta } = require('./categories');
 
 /**
@@ -187,6 +187,19 @@ function card(opts = {}) {
   return embed;
 }
 
+/**
+ * Rend les embeds d'un message conformes aux limites Discord, total de 6000 caractères
+ * compris (réduit les derniers champs, puis les descriptions). À utiliser pour tout envoi
+ * HORS réponse d'interaction (`channel.send`, `message.edit`, webhook) : les réponses
+ * d'interaction (reply, editReply, followUp, update) passent déjà par cet assainissement
+ * (core/interactionSafety.js), pas les envois directs. Ne lève jamais.
+ * @param {Array<import('discord.js').EmbedBuilder | object> | import('discord.js').EmbedBuilder | object} embeds
+ * @returns {object[]} données JSON des embeds (10 max)
+ */
+function fitEmbeds(embeds) {
+  return sanitizeEmbeds(Array.isArray(embeds) ? embeds : [embeds]);
+}
+
 /** Champ « icône + libellé ». Inline par défaut (grille de 3). */
 function field(icon, label, value, inline = true) {
   return { name: icon ? `${icon} ${label}` : label, value: value == null || value === '' ? EMPTY : String(value), inline };
@@ -309,6 +322,7 @@ module.exports = {
   ICONS,
   EMPTY,
   card,
+  fitEmbeds,
   field,
   wide,
   blank,

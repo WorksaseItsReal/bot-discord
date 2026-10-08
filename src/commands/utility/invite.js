@@ -4,9 +4,13 @@ const { SlashCommandBuilder, PermissionsBitField, OAuth2Scopes } = require('disc
 const { card, field, ICONS, linkButton, buttonRows, subtext } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 
-/** Permissions demandées à l'invitation : de quoi faire fonctionner toutes les commandes. */
+/**
+ * Permissions demandées à l'invitation : de quoi faire fonctionner toutes les commandes.
+ * « Gérer le serveur » est requis par l'AutoMod natif de Discord (règles créées par /automod).
+ * /diagnostics contrôle exactement cette liste.
+ */
 const INVITE_PERMISSIONS = [
-  'ViewChannel', 'SendMessages', 'SendMessagesInThreads', 'EmbedLinks', 'AttachFiles', 'ReadMessageHistory', 'AddReactions',
+  'ManageGuild', 'ViewChannel', 'SendMessages', 'SendMessagesInThreads', 'EmbedLinks', 'AttachFiles', 'ReadMessageHistory', 'AddReactions',
   'UseExternalEmojis', 'ManageMessages', 'ManageChannels', 'ManageRoles', 'ManageNicknames', 'ManageThreads', 'KickMembers',
   'BanMembers', 'ModerateMembers', 'MuteMembers', 'DeafenMembers', 'MoveMembers', 'ViewAuditLog', 'SendPolls', 'Connect',
 ];
