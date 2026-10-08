@@ -234,6 +234,8 @@ class AntiRaidService {
     let skipped = 0;
     const eligible = ids.filter((id) => id !== guild.ownerId && id !== this.client.user?.id);
     const capped = Math.max(0, eligible.length - MAX_WAVE_PUNISH);
+    // Les départs provoqués par la sanction ne doivent pas être annoncés par l'accueil.
+    this.client.services?.welcome?.silenceWave?.(guild.id);
     for (const id of eligible.slice(-MAX_WAVE_PUNISH)) {
       const member = guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null));
       if (this.isWhitelisted(guild.id, id, member ? [...(member.roles?.cache?.keys() ?? [])] : [])) {
@@ -241,6 +243,7 @@ class AntiRaidService {
         continue;
       }
       try {
+        this.client.services?.welcome?.silence?.(guild.id, id);
         if (action === 'ban') {
           if (member && member.bannable === false) throw new Error('non bannissable');
           this.#markBan(guild.id, id);
@@ -322,6 +325,7 @@ class AntiRaidService {
     let ban = false;
     try {
       ban = newAccountAction(cfg) === 'ban';
+      this.client.services?.welcome?.silence?.(member.guild.id, member.id);
       if (ban) {
         this.#markBan(member.guild.id, member.id);
         await member.ban({ reason });

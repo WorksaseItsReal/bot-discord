@@ -241,6 +241,7 @@ class TempVoiceService {
     } catch {
       // Le membre a quitté entre-temps (ou déplacement impossible) : pas de salon orphelin.
       this.tempVoice.delete(channel.id);
+      this.renames.delete(channel.id);
       await channel.delete().catch(() => {});
       return;
     }
@@ -503,6 +504,7 @@ class TempVoiceService {
       const channel = await guild.channels.fetch(record.channel_id).catch(() => null);
       if (!channel) {
         this.tempVoice.delete(record.channel_id);
+        this.renames.delete(record.channel_id);
         dropped += 1;
         continue;
       }
@@ -510,6 +512,7 @@ class TempVoiceService {
         const ok = await channel.delete('Vocal temporaire vide').then(() => true, (err) => isUnknownChannel(err));
         if (ok) {
           this.tempVoice.delete(record.channel_id);
+          this.renames.delete(record.channel_id);
           deleted += 1;
         }
       }

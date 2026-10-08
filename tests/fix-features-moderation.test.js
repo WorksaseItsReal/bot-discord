@@ -232,7 +232,7 @@ function raidSetup(cfg = {}, { whitelist = { users: [], roles: [] } } = {}) {
     members.set(id, member);
     return service.handleJoin(member);
   };
-  return { service, join, kicked, banned, alerts, members };
+  return { service, join, kicked, banned, alerts, members, client };
 }
 
 test('AntiRaid : une vague en mode kick expulse les arrivants de la fenêtre', async () => {
@@ -328,4 +328,19 @@ test('/antiraid (tableau de bord) : chaque réglage de l\'ancien /antiraid set e
   assert.match(json, /Comptes récents/);
   assert.match(json, /Tableau de bord/);
   assert.equal(antiraid.data.toJSON().default_member_permissions, String(PermissionFlagsBits.Administrator));
+});
+
+test('AntiRaid : l\'accueil est prévenu AVANT la sanction (départ tu, même pour une vague)', async () => {
+  const calls = [];
+  const young = raidSetup({ minAccountAgeDays: 7 });
+  young.client.services.welcome = { silence: (g, id) => calls.push(['silence', id, young.kicked.length]), silenceWave: (g) => calls.push(['wave', g]) };
+  await young.join('jeune', { ageDays: 1 });
+  assert.deepEqual(calls[0], ['silence', 'jeune', 0], 'silence posé avant le kick');
+
+  const wave = raidSetup({ joinThreshold: 3 });
+  const seen = [];
+  wave.client.services.welcome = { silence: (g, id) => seen.push(id), silenceWave: () => seen.push('wave') };
+  for (const id of ['a', 'b', 'c']) await wave.join(id);
+  assert.equal(seen[0], 'wave');
+  assert.ok(['a', 'b', 'c'].every((id) => seen.includes(id)));
 });

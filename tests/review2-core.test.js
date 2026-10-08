@@ -33,3 +33,15 @@ test('client : aucune mention de masse ni de rôle par défaut', () => {
   assert.deepEqual(client.options.allowedMentions, { parse: ['users'], repliedUser: false });
   client.destroy?.();
 });
+
+test('arrêt propre : les services avec travail différé sont vidés avant la déconnexion', async () => {
+  const { GadgetClient } = require('../src/core/GadgetClient');
+  const client = new GadgetClient();
+  const order = [];
+  const svc = (name) => ({ flush: async () => order.push(name) });
+  client.services = { giveaways: svc('giveaways'), projects: svc('projects'), tickets: svc('tickets'), scheduler: { stop: async () => order.push('scheduler') } };
+  client.destroy = async () => order.push('destroy');
+  client.database = { close: () => order.push('db') };
+  await client.shutdown();
+  assert.deepEqual(order, ['scheduler', 'giveaways', 'projects', 'tickets', 'destroy', 'db']);
+});

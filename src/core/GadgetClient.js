@@ -221,6 +221,14 @@ class GadgetClient extends Client {
     } catch (err) {
       logger.warn('Arrêt du suivi des niveaux :', err?.message);
     }
+    // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
+    for (const name of ['giveaways', 'projects', 'tickets']) {
+      try {
+        await this.services?.[name]?.flush?.();
+      } catch (err) {
+        logger.warn(`Vidage du service ${name} :`, err?.message);
+      }
+    }
     try {
       await this.destroy();
     } catch (err) {
