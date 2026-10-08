@@ -134,6 +134,8 @@ class LockdownService {
    * fils, en sauvegardant l'état tri-valué d'ORIGINE de chaque permission touchée.
    * Un second lock ne remplace jamais l'état d'origine par l'état « verrouillé » ;
    * il ne fait que compléter les permissions qui n'étaient pas encore sauvegardées.
+   * Un /lock manuel sur un salon déjà verrouillé par un lockdown le fait passer en
+   * portée « manuel » : la levée du lockdown ne doit pas annuler ce verrouillage voulu.
    * @param {{ scope?: 'manual'|'lockdown' }} [opts]
    */
   async lockChannel(channel, moderator, reason, { scope = SCOPES.manual } = {}) {
@@ -144,7 +146,9 @@ class LockdownService {
     const state = saved ? normalizeLock(saved.data) : { scope, perms: {} };
     const current = channel.permissionOverwrites.cache.get(everyone.id);
     const missing = perms.filter((p) => !(p in state.perms));
-    if (!saved || missing.length) {
+    const promote = Boolean(saved) && scope === SCOPES.manual && (state.scope ?? SCOPES.lockdown) !== SCOPES.manual;
+    if (promote) state.scope = SCOPES.manual;
+    if (!saved || missing.length || promote) {
       for (const p of missing) state.perms[p] = overwriteState(current, p);
       this.locks.save(channel.guild.id, channel.id, { v: 2, scope: state.scope, perms: state.perms });
     }
@@ -153,6 +157,7 @@ class LockdownService {
     } catch (err) {
       // Salon non verrouillé : on n'en garde pas une trace qui fausserait le statut du lockdown.
       if (!saved) this.locks.delete(channel.guild.id, channel.id);
+      else if (promote) this.locks.save(channel.guild.id, channel.id, saved.data);
       throw err;
     }
   }
