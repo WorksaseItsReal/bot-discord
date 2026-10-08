@@ -5,23 +5,11 @@ const { truncate } = require('../../utils/embeds');
 const { paginate } = require('../../utils/pagination');
 const { card, field, wide, subtext, code, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
-const { renderTag, tagCard } = require('../utility/tag');
+const { renderTag, tagCard, normalizeTagName, lookupTagName } = require('../utility/tag');
 
 /** Tags par page de /custom list. */
 const PER_PAGE = 8;
 const VARIABLES = '{user} · {server} · {membercount}';
-/** Nom de tag : lettres (toutes langues), chiffres, « _ » et « - » ; au moins une lettre ou un chiffre. */
-const TAG_NAME = /^(?=.*[\p{L}\p{N}])[\p{L}\p{N}_-]{1,32}$/u;
-
-/** Normalise et valide un nom de tag saisi (minuscules, espaces → « - »). */
-function normalizeTagName(input) {
-  const name = String(input ?? '').trim().toLowerCase().replace(/\s+/g, '-');
-  if (!TAG_NAME.test(name)) {
-    throw new UserError('Nom de tag invalide : 32 caractères maximum, uniquement des lettres, des chiffres, « _ » et « - ».');
-  }
-  return name;
-}
-
 /** Les boutons revérifient la permission par défaut de la commande. */
 function assertManageGuild(interaction) {
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
@@ -55,6 +43,8 @@ module.exports = {
     .addSubcommand((s) => s.setName('list').setDescription('Liste les tags.')),
 
   async execute(interaction, client) {
+    // Revérifiée ici comme dans le bouton Tester : la permission par défaut peut être modifiée par serveur.
+    assertManageGuild(interaction);
     const sub = interaction.options.getSubcommand();
     const repo = client.repositories.customCommands;
     const guildId = interaction.guild.id;
@@ -87,7 +77,8 @@ module.exports = {
     }
 
     if (sub === 'delete') {
-      const name = interaction.options.getString('nom').toLowerCase();
+      // Même normalisation qu'à la création (« Mon Tag » → « mon-tag »).
+      const name = lookupTagName(interaction.options.getString('nom'));
       if (!repo.delete(guildId, name)) throw new UserError(`Tag introuvable : ${code(truncate(name, 32))}. Voir \`/custom list\`.`);
       return interaction.reply({
         embeds: [

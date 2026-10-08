@@ -35,7 +35,8 @@ const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
  * Giveaways persistants : création, participation par bouton, fin automatique
  * (via scheduler) et reroll. Tout survit au redémarrage.
  *
- * customIds : giveaway:enter:<id> (participation, rétrocompatible)
+ * customIds : giveaway:enter:<id> (participation idempotente, rétrocompatible)
+ *             giveaway:leave:<id> (retrait, proposé à un membre déjà inscrit)
  *             cmd:giveaway:reroll:<id> (nouveau tirage, réservé aux organisateurs)
  */
 class GiveawayService {
@@ -65,7 +66,7 @@ class GiveawayService {
       title: truncate(g.prize, 200),
       description: [
         `Cliquez sur **${ICONS.gift} Participer** pour tenter votre chance !`,
-        subtext('Cliquez à nouveau pour retirer votre participation.'),
+        subtext('Déjà inscrit ? Le bouton vous proposera de retirer votre participation.'),
       ],
       fields: [
         field('🏆', 'Gagnants', `**${g.winners}**`),
@@ -218,11 +219,8 @@ class GiveawayService {
     return isEligible(g, member);
   }
 
-  /**
-   * Bascule la participation du membre.
-   * @returns {Promise<boolean>} true si le membre participe désormais
-   */
-  async toggleEntry(interaction, giveawayId) {
+  /** Giveaway en cours du serveur de l'interaction, conditions de participation remplies. */
+  #assertCanEnter(interaction, giveawayId) {
     const g = this.giveaways.get(giveawayId);
     if (!g || g.guild_id !== interaction.guildId || g.ended) throw new UserError('Ce giveaway est terminé.');
     if (interaction.user.bot) throw new UserError('Les bots ne peuvent pas participer.');
@@ -233,8 +231,41 @@ class GiveawayService {
     if (g.forbidden_role && member.roles.cache.has(g.forbidden_role)) {
       throw new UserError(`Les membres ayant le rôle <@&${g.forbidden_role}> ne peuvent pas participer à ce giveaway.`);
     }
-    const joined = this.giveaways.toggleEntry(giveawayId, member.id);
+    return g;
+  }
+
+  /**
+   * Inscription idempotente (bouton « Participer ») : un double clic n'annule
+   * jamais une participation.
+   * @returns {Promise<boolean>} true si le membre vient d'être inscrit, false s'il l'était déjà
+   */
+  async enter(interaction, giveawayId) {
+    this.#assertCanEnter(interaction, giveawayId);
+    const joined = this.giveaways.addEntry(giveawayId, interaction.member.id);
     // Compteur affiché : une seule édition groupée toutes les ~5 s (pas une par clic).
+    if (joined) this.scheduleEdit(giveawayId);
+    return joined;
+  }
+
+  /**
+   * Retrait explicite (bouton « Se retirer »), sans condition de rôle.
+   * @returns {Promise<boolean>} true si une participation a été retirée
+   */
+  async leave(interaction, giveawayId) {
+    const g = this.giveaways.get(giveawayId);
+    if (!g || g.guild_id !== interaction.guildId || g.ended) throw new UserError('Ce giveaway est terminé.');
+    const left = this.giveaways.removeEntry(giveawayId, interaction.user.id);
+    if (left) this.scheduleEdit(giveawayId);
+    return left;
+  }
+
+  /**
+   * Bascule la participation (ancienne API, conservée pour compatibilité).
+   * @returns {Promise<boolean>} true si le membre participe désormais
+   */
+  async toggleEntry(interaction, giveawayId) {
+    this.#assertCanEnter(interaction, giveawayId);
+    const joined = this.giveaways.toggleEntry(giveawayId, interaction.member.id);
     this.scheduleEdit(giveawayId);
     return joined;
   }
@@ -251,6 +282,20 @@ class GiveawayService {
     }, EDIT_DEBOUNCE_MS);
     timer.unref?.();
     this.pendingEdits.set(giveawayId, timer);
+  }
+
+  /**
+   * Arrêt du bot : exécute tout de suite les réactualisations programmées (sinon
+   * le compteur affiché reste faux), annule leurs minuteurs et attend celles en cours.
+   */
+  async flush() {
+    const ids = [...this.pendingEdits.keys()];
+    for (const id of ids) clearTimeout(this.pendingEdits.get(id));
+    this.pendingEdits.clear();
+    await Promise.allSettled([
+      ...this.inflightEdits.values(),
+      ...ids.map((id) => this.#refreshLive(id).catch((err) => logger.warn(`Giveaway #${id} : carte non réactualisée à l'arrêt :`, err?.message ?? err))),
+    ]);
   }
 
   /** Annule une réactualisation programmée et attend celle en cours. */
@@ -309,9 +354,9 @@ class GiveawayService {
       if (!g.ended) throw new UserError('Ce giveaway est encore en cours : terminez-le avant de faire un reroll.');
     } else if (!this.giveaways.markEnded(giveawayId)) {
       // Garde atomique : un seul appel (commande, scheduler…) peut terminer le giveaway.
-      // Exception (reprise) : terminé, avec des participants, mais aucun gagnant
-      // enregistré → l'annonce avait échoué ; on retente le tirage et l'annonce.
-      retry = entries.length > 0 && !(this.giveaways.winners?.(giveawayId) ?? []).length;
+      // Exception (reprise) : terminé mais annonce jamais publiée (`announced_at`) →
+      // on la retente. Une fois publiée (même sans gagnant), plus aucun nouveau tirage.
+      retry = !wasAnnounced(g, this.giveaways, entries);
       if (!retry) throw new UserError('Ce giveaway est déjà terminé.');
     }
     // Une édition « en direct » tardive ne doit jamais écraser la carte de fin.
@@ -327,11 +372,11 @@ class GiveawayService {
       entries = entries.filter((id) => !previous.has(id));
     }
     const wanted = reroll && count ? Math.min(Math.max(1, count), MAX_REROLL_WINNERS) : g.winners;
-    const winners = await this.#drawWinners(g, entries, wanted);
+    // Reprise : les gagnants déjà affichés sur la carte de fin (mémorisés) sont conservés.
+    const kept = retry ? this.giveaways.winners?.(giveawayId) ?? [] : [];
+    const winners = kept.length ? kept : await this.#drawWinners(g, entries, wanted);
     if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll (les gagnants précédents, les membres partis et ceux qui ne remplissent plus les conditions sont exclus).');
 
-    // Les gagnants ne sont mémorisés qu'une fois l'annonce publiée : sinon
-    // /giveaway end peut la retenter (voir `retry` ci-dessus).
     let announced = false;
     if (channel?.isTextBased?.()) {
       announced = await channel.send(this.#announcement(g, winners, reroll)).then(() => true, (err) => {
@@ -341,13 +386,25 @@ class GiveawayService {
     } else {
       logger.warn(`Annonce du giveaway #${giveawayId} impossible : salon ${g.channel_id} introuvable ou non textuel.`);
     }
+
+    // La carte passe en « terminé » même si l'annonce a échoué (ex : envoi refusé
+    // mais édition possible) : le giveaway ne doit pas sembler encore ouvert.
+    let cardEdited = false;
+    if (message && !reroll) {
+      cardEdited = await message.edit(this.renderEnded(g, winners)).then(() => true, (err) => {
+        logger.warn(`Carte du giveaway #${giveawayId} non mise à jour :`, err?.message ?? err);
+        return false;
+      });
+    }
+    // Gagnants mémorisés dès qu'ils sont visibles (annonce ou carte) : une reprise
+    // les réannonce au lieu d'en tirer d'autres. Invisibles : /giveaway end retire au sort.
+    if (announced || cardEdited) this.giveaways.addWinners?.(giveawayId, winners);
     if (!announced) {
       throw new UserError(reroll
         ? 'Le nouveau tirage n\'a pas pu être annoncé (salon introuvable ou permissions manquantes). Corrigez puis relancez.'
         : `Le giveaway est terminé mais l'annonce des gagnants a échoué (salon introuvable ou permissions manquantes). Corrigez puis relancez \`/giveaway end id:${giveawayId}\` pour retenter.`);
     }
-    this.giveaways.addWinners?.(giveawayId, winners);
-    if (message && !reroll) await message.edit(this.renderEnded(g, winners)).catch(() => {});
+    if (!reroll) this.giveaways.markAnnounced?.(giveawayId);
     if (retry) logger.info(`Giveaway #${giveawayId} : annonce retentée avec succès.`);
     return winners;
   }
@@ -355,6 +412,17 @@ class GiveawayService {
   listActive(guildId) {
     return this.giveaways.listActive(guildId);
   }
+}
+
+/**
+ * L'annonce de fin a-t-elle déjà été publiée ? `announced_at` (migration 11) fait
+ * foi ; sans cette colonne (faux dépôt), repli sur l'ancienne règle : des
+ * gagnants mémorisés, ou aucun participant.
+ */
+function wasAnnounced(g, repo, entries) {
+  if (g.announced_at != null) return true;
+  if ('announced_at' in g) return false;
+  return !entries.length || (repo.winners?.(g.id) ?? []).length > 0;
 }
 
 /** Le membre remplit-il les conditions de rôles du giveaway ? Pur. */

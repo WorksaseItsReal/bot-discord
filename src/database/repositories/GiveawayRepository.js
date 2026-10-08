@@ -27,6 +27,7 @@ class GiveawayRepository {
     this.countEntriesStmt = db.prepare('SELECT COUNT(*) AS n FROM giveaway_entries WHERE giveaway_id = ?');
     this.addWinnerStmt = db.prepare('INSERT OR IGNORE INTO giveaway_winners (giveaway_id, user_id, drawn_at) VALUES (?, ?, ?)');
     this.winnersStmt = db.prepare('SELECT user_id FROM giveaway_winners WHERE giveaway_id = ?');
+    this.markAnnouncedStmt = db.prepare('UPDATE giveaways SET announced_at = ? WHERE id = ? AND announced_at IS NULL');
     this.addWinnersTx = db.transaction((id, userIds) => {
       const now = Date.now();
       for (const u of userIds) this.addWinnerStmt.run(id, u, now);
@@ -66,6 +67,25 @@ class GiveawayRepository {
   delete(id) {
     this.deleteEntriesStmt.run(id);
     return this.deleteStmt.run(id).changes > 0;
+  }
+
+  /** Inscription idempotente. @returns {boolean} true si le membre vient d'être inscrit. */
+  addEntry(id, userId) {
+    return this.addEntryStmt.run(id, userId).changes > 0;
+  }
+
+  /** @returns {boolean} true si une participation a été retirée. */
+  removeEntry(id, userId) {
+    return this.removeEntryStmt.run(id, userId).changes > 0;
+  }
+
+  hasEntry(id, userId) {
+    return Boolean(this.hasEntryStmt.get(id, userId));
+  }
+
+  /** Mémorise la publication de l'annonce de fin (première fois seulement). */
+  markAnnounced(id, at = Date.now()) {
+    return this.markAnnouncedStmt.run(at, id).changes > 0;
   }
 
   toggleEntry(id, userId) {

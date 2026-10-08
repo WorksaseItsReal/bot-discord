@@ -363,6 +363,22 @@ const migrations = [
     `,
   },
   {
+    id: 11,
+    name: 'giveaway_announced_at',
+    up: `
+      -- Giveaways : date de publication de l'annonce de fin. /giveaway end ne retente
+      -- le tirage que si l'annonce n'a jamais été publiée (sinon, tirage à l'infini).
+      ALTER TABLE giveaways ADD COLUMN announced_at INTEGER;
+      -- Giveaways terminés avant cette migration : annonce réputée publiée s'il y a des
+      -- gagnants mémorisés ou aucun participant (seuls les autres restent reprenables).
+      UPDATE giveaways SET announced_at = ends_at
+        WHERE ended = 1 AND (
+          id IN (SELECT giveaway_id FROM giveaway_winners)
+          OR id NOT IN (SELECT giveaway_id FROM giveaway_entries)
+        );
+    `,
+  },
+  {
     id: 12,
     name: 'automod_quarantines',
     up: `

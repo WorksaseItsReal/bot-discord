@@ -104,7 +104,9 @@ class SchedulerService {
     if (!giveaways || !repo) return;
     for (const g of repo.findDue()) {
       if (this.stopping) return;
-      await giveaways.end(g.id).catch((e) => logger.debug('giveaway end', e?.message));
+      // Annonce impossible (salon supprimé, permission retirée) : visible dans les logs,
+      // le staff peut la retenter avec /giveaway end.
+      await giveaways.end(g.id).catch((e) => logger.warn(`Fin du giveaway #${g.id} (serveur ${g.guild_id}) :`, e?.message ?? e));
     }
   }
 
@@ -113,6 +115,9 @@ class SchedulerService {
     const config = this.client.services?.config;
     if (!backup || !config) return;
     for (const guild of this.client.guilds.cache.values()) {
+      // Serveur indisponible (panne Discord) : cache vide ou partiel, la sauvegarde
+      // serait incomplète et évincerait une bonne sauvegarde du quota.
+      if (!guild.available) continue;
       const cfg = config.get(guild.id).autobackup;
       if (!cfg?.enabled) continue;
       const dueAt = (cfg.lastRun || 0) + (cfg.intervalHours || 24) * 3_600_000;

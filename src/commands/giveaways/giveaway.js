@@ -16,6 +16,16 @@ function assertCanManage(interaction) {
   }
 }
 
+/** Conditions de rôles satisfiables par au moins un membre. Pur. */
+function assertRoleConditions(guildId, requiredRole, forbiddenRole) {
+  if (forbiddenRole && forbiddenRole === guildId) {
+    throw new UserError('Le rôle @everyone ne peut pas être le rôle interdit : personne ne pourrait participer.');
+  }
+  if (requiredRole && forbiddenRole && requiredRole === forbiddenRole) {
+    throw new UserError('Le rôle requis et le rôle interdit doivent être différents : personne ne pourrait participer.');
+  }
+}
+
 function winnersReply(winners, id) {
   const list = winners.map((w) => `<@${w}>`);
   return status.ok(
@@ -26,6 +36,7 @@ function winnersReply(winners, id) {
 
 module.exports = {
   category: 'giveaways',
+  assertRoleConditions,
   data: new SlashCommandBuilder()
     .setName('giveaway')
     .setDescription('Système de giveaways.')
@@ -47,6 +58,8 @@ module.exports = {
   async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
     const { giveaways } = client.services;
+    // Mêmes droits que le bouton Relancer (la permission par défaut peut être modifiée par serveur).
+    if (sub === 'create' || sub === 'end' || sub === 'reroll') assertCanManage(interaction);
 
     if (sub === 'create') {
       const prize = interaction.options.getString('recompense');
@@ -55,6 +68,7 @@ module.exports = {
       const winners = interaction.options.getInteger('gagnants') || 1;
       const requiredRole = interaction.options.getRole('role_requis')?.id ?? null;
       const forbiddenRole = interaction.options.getRole('role_interdit')?.id ?? null;
+      assertRoleConditions(interaction.guild.id, requiredRole, forbiddenRole);
       const { id, message } = await giveaways.create(interaction.channel, interaction.user, { prize, winners, durationMs, requiredRole, forbiddenRole });
       return interaction.reply({
         embeds: [

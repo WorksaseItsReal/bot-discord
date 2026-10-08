@@ -1,6 +1,6 @@
 'use strict';
 
-const { ChannelType, OverwriteType } = require('discord.js');
+const { ChannelType, OverwriteType, PermissionFlagsBits } = require('discord.js');
 const { shortId } = require('../utils/random');
 const { UserError } = require('../core/errors');
 const { AUTO_BACKUP_NAME } = require('../database/repositories/BackupRepository');
@@ -37,8 +37,11 @@ function serializeOverwrites(channel, guild) {
   return out;
 }
 
-/** Re-mappe les permissions sérialisées vers les IDs actuels du serveur. */
-function resolveOverwrites(overwrites, guild) {
+/**
+ * Re-mappe les permissions sérialisées vers les IDs actuels du serveur.
+ * @param {string[]} [skipped] reçoit les surcharges ignorées (rôle ou membre introuvable)
+ */
+function resolveOverwrites(overwrites, guild, skipped) {
   if (!Array.isArray(overwrites)) return undefined;
   const out = [];
   for (const ow of overwrites) {
@@ -50,10 +53,27 @@ function resolveOverwrites(overwrites, guild) {
       id = ow.member;
       type = OverwriteType.Member;
     }
-    if (!id) continue;
+    if (!id) {
+      skipped?.push(ow.role ? `@${ow.role}` : ow.member ? `membre ${ow.member}` : '?');
+      continue;
+    }
     out.push({ id, type, allow: BigInt(ow.allow || 0), deny: BigInt(ow.deny || 0) });
   }
   return out;
+}
+
+/**
+ * Le bot doit pouvoir gérer les rôles et les salons : sans cela, chaque création
+ * échouerait une à une (et la restauration semblerait « vide »).
+ */
+function assertRestorePermissions(guild) {
+  const perms = guild.members?.me?.permissions;
+  if (!perms?.has) return; // bot introuvable dans le cache : on laisse Discord trancher
+  const missing = [
+    [PermissionFlagsBits.ManageRoles, 'Gérer les rôles'],
+    [PermissionFlagsBits.ManageChannels, 'Gérer les salons'],
+  ].filter(([flag]) => !perms.has(flag)).map(([, label]) => `**${label}**`);
+  if (missing.length) throw new UserError(`Restauration impossible : il me manque la permission ${missing.join(' et ')}.`);
 }
 
 /**
@@ -67,6 +87,13 @@ class BackupService {
    */
   constructor({ backups }) {
     this.backups = backups;
+    /** Serveurs dont une restauration est en cours (verrou posé de façon synchrone). */
+    this.restoring = new Set();
+  }
+
+  /** Une restauration est-elle en cours sur ce serveur ? */
+  isRestoring(guildId) {
+    return this.restoring.has(guildId);
   }
 
   /** Sérialise la structure d'un serveur (rôles, salons, permissions). */
@@ -135,13 +162,38 @@ class BackupService {
 
   /**
    * Restauration best-effort : recrée les rôles et salons manquants.
-   * @returns {Promise<{roles:number, channels:number}>}
+   * Une seule restauration à la fois par serveur (sinon tout est créé en double).
+   * @returns {Promise<RestoreResult>}
    */
   async restore(guild, id) {
     const backup = this.get(guild.id, id);
+    // Verrou posé de façon SYNCHRONE, avant toute attente.
+    if (this.restoring.has(guild.id)) throw new UserError('Une restauration est déjà en cours sur ce serveur : attendez qu\'elle se termine.');
+    this.restoring.add(guild.id);
+    try {
+      return await this.#restore(guild, backup, id);
+    } finally {
+      this.restoring.delete(guild.id);
+    }
+  }
+
+  /**
+   * @typedef {{ roles: number, channels: number, failed: Array<{ kind: 'role'|'channel', name: string, code: string|number }>,
+   *   skippedOverwrites: string[], reparented: number }} RestoreResult
+   */
+  async #restore(guild, backup, id) {
+    assertRestorePermissions(guild);
     const data = backup.data;
     let createdRoles = 0;
     let createdChannels = 0;
+    /** Créations refusées par Discord (nom + code), affichées dans la carte de résultat. */
+    const failed = [];
+    /** Surcharges de permissions ignorées (rôle ou membre introuvable). */
+    const skippedOverwrites = [];
+    const fail = (kind, name) => (err) => {
+      failed.push({ kind, name, code: err?.code ?? err?.status ?? err?.message ?? 'inconnu' });
+      return null;
+    };
 
     // Du plus haut au plus bas : Discord place chaque nouveau rôle juste
     // au-dessus de @everyone, donc le premier créé finit au sommet du lot.
@@ -151,24 +203,25 @@ class BackupService {
       if (exists) continue;
       await guild.roles
         .create({ name: role.name, colors: { primaryColor: role.color ?? 0 }, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions), reason: `Restauration backup ${id}` })
-        .then(() => (createdRoles += 1))
-        .catch(() => {});
+        .then(() => (createdRoles += 1), fail('role', role.name));
     }
 
     // Catégories d'abord
     const channels = (data.channels ?? []).filter((c) => !THREAD_TYPES.has(c.type));
     const categories = channels.filter((c) => c.type === ChannelType.GuildCategory);
+    const findCategory = (name) => guild.channels.cache.find((c) => c.name === name && c.type === ChannelType.GuildCategory);
     for (const cat of categories) {
-      if (guild.channels.cache.find((c) => c.name === cat.name && c.type === ChannelType.GuildCategory)) continue;
+      if (findCategory(cat.name)) continue;
       await guild.channels
-        .create({ name: cat.name, type: ChannelType.GuildCategory, permissionOverwrites: resolveOverwrites(cat.overwrites, guild) })
-        .then(() => (createdChannels += 1))
-        .catch(() => {});
+        .create({ name: cat.name, type: ChannelType.GuildCategory, permissionOverwrites: resolveOverwrites(cat.overwrites, guild, skippedOverwrites) })
+        .then(() => (createdChannels += 1), fail('channel', cat.name));
     }
+    /** Salons créés sans leur catégorie (introuvable à ce moment-là). */
+    const orphans = [];
     for (const ch of channels.filter((c) => c.type !== ChannelType.GuildCategory)) {
       if (guild.channels.cache.find((c) => c.name === ch.name && c.type === ch.type)) continue;
-      const parent = ch.parentName ? guild.channels.cache.find((c) => c.name === ch.parentName && c.type === ChannelType.GuildCategory) : null;
-      await guild.channels
+      const parent = ch.parentName ? findCategory(ch.parentName) : null;
+      const created = await guild.channels
         .create({
           name: ch.name,
           type: ch.type,
@@ -177,12 +230,24 @@ class BackupService {
           nsfw: ch.nsfw,
           // Permissions restaurées (salons privés inclus) ; à défaut (ancienne
           // sauvegarde), on hérite de la catégorie plutôt que de rendre public.
-          permissionOverwrites: resolveOverwrites(ch.overwrites, guild) ?? (parent ? parent.permissionOverwrites.cache : undefined),
+          permissionOverwrites: resolveOverwrites(ch.overwrites, guild, skippedOverwrites) ?? (parent ? parent.permissionOverwrites.cache : undefined),
         })
-        .then(() => (createdChannels += 1))
-        .catch(() => {});
+        .then((c) => {
+          createdChannels += 1;
+          return c;
+        }, fail('channel', ch.name));
+      if (created && ch.parentName && !parent) orphans.push([created, ch.parentName]);
     }
-    return { roles: createdRoles, channels: createdChannels };
+
+    // Second passage : rattache les salons dont la catégorie existe désormais
+    // (créée entre-temps, ou apparue dans le cache après leur création).
+    let reparented = 0;
+    for (const [channel, parentName] of orphans) {
+      const parent = findCategory(parentName);
+      if (!parent || typeof channel.setParent !== 'function') continue;
+      await channel.setParent(parent.id, { lockPermissions: false, reason: `Restauration backup ${id}` }).then(() => (reparented += 1), () => {});
+    }
+    return { roles: createdRoles, channels: createdChannels, failed, skippedOverwrites: [...new Set(skippedOverwrites)], reparented };
   }
 }
 

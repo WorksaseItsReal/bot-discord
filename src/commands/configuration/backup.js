@@ -83,6 +83,7 @@ function infoView(b) {
 /** Restauration (après confirmation) puis carte de résultat en suivi. */
 async function runRestore(interaction, backup, id) {
   const b = backup.get(interaction.guild.id, id);
+  if (backup.isRestoring?.(interaction.guild.id)) throw new UserError('Une restauration est déjà en cours sur ce serveur : attendez qu\'elle se termine.');
   const ok = await confirm(interaction, {
     description: [`Restaurer **${truncate(b.name, 100)}** (${code(b.id)}) ?`, '', bullets(RESTORE_WARNING)].join('\n'),
     confirmLabel: 'Restaurer',
@@ -90,32 +91,46 @@ async function runRestore(interaction, backup, id) {
   });
   if (!ok) return;
   const res = await backup.restore(interaction.guild, id);
+  await interaction.followUp({ embeds: [restoreResultCard(b, res)], ephemeral: true });
+}
+
+/** Libellé court d'un échec de création (« nom (code) »). Pur. */
+const failureLine = (f) => `${f.kind === 'role' ? ICONS.role : ICONS.channel} ${code(truncate(f.name, 40))} · ${code(f.code)}`;
+
+/** Carte de résultat d'une restauration (créations, échecs, permissions ignorées). Pur. */
+function restoreResultCard(b, res) {
   const created = res.roles + res.channels;
-  await interaction.followUp({
-    embeds: [
-      card({
-        tone: created ? 'success' : 'info',
-        section: 'configuration',
-        icon: created ? ICONS.success : ICONS.info,
-        title: 'Restauration terminée',
-        description: created
-          ? `**${created}** élément${created > 1 ? 's' : ''} recréé${created > 1 ? 's' : ''} depuis **${truncate(b.name, 100)}**.`
-          : 'Rien à recréer : tous les rôles et salons de la sauvegarde existent déjà.',
-        fields: [
-          field(ICONS.role, 'Rôles recréés', `**${res.roles}**`),
-          field(ICONS.channel, 'Salons recréés', `**${res.channels}**`),
-          field(ICONS.id, 'Sauvegarde', code(b.id)),
-          created
-            ? wide(ICONS.warning, 'À vérifier', bullets([
-              'L\'ordre des rôles recréés : replacez-les si besoin.',
-              'Réattribuez les rôles aux membres (non restaurés).',
-              'Les permissions des salons privés recréés.',
-            ]))
-            : null,
-        ],
-      }),
+  const failed = res.failed ?? [];
+  const skipped = res.skippedOverwrites ?? [];
+  const tone = failed.length ? (created ? 'warning' : 'danger') : created ? 'success' : 'info';
+  let description;
+  if (failed.length && !created) description = `Aucun élément n'a pu être recréé : Discord a refusé **${failed.length}** création${failed.length > 1 ? 's' : ''}.`;
+  else if (created) description = `**${created}** élément${created > 1 ? 's' : ''} recréé${created > 1 ? 's' : ''} depuis **${truncate(b.name, 100)}**.${failed.length ? ` **${failed.length}** création${failed.length > 1 ? 's ont' : ' a'} échoué.` : ''}`;
+  else description = 'Rien à recréer : tous les rôles et salons de la sauvegarde existent déjà.';
+  return card({
+    tone,
+    section: 'configuration',
+    icon: tone === 'success' ? ICONS.success : tone === 'info' ? ICONS.info : tone === 'danger' ? ICONS.error : ICONS.warning,
+    title: failed.length && !created ? 'Restauration échouée' : 'Restauration terminée',
+    description,
+    fields: [
+      field(ICONS.role, 'Rôles recréés', `**${res.roles}**`),
+      field(ICONS.channel, 'Salons recréés', `**${res.channels}**`),
+      field(ICONS.id, 'Sauvegarde', code(b.id)),
+      failed.length
+        ? wide(ICONS.error, `Échecs (${failed.length})`, `${failed.slice(0, 10).map(failureLine).join('\n')}${failed.length > 10 ? `\n${subtext(`+${failed.length - 10} autre(s)`)}` : ''}\n${subtext('50013 : permission ou hiérarchie insuffisante · 30005/30013 : limite de rôles/salons atteinte.')}`)
+        : null,
+      skipped.length
+        ? wide(ICONS.lock, 'Permissions ignorées', `${truncate(skipped.slice(0, 10).map((s) => code(truncate(s, 40))).join(' '), 900)}${skipped.length > 10 ? ` ${subtext(`+${skipped.length - 10}`)}` : ''}\n${subtext('Rôles ou membres introuvables : ces surcharges de salon n\'ont pas été recréées.')}`)
+        : null,
+      created
+        ? wide(ICONS.warning, 'À vérifier', bullets([
+          'L\'ordre des rôles recréés : replacez-les si besoin.',
+          'Réattribuez les rôles aux membres (non restaurés).',
+          'Les permissions des salons privés recréés.',
+        ]))
+        : null,
     ],
-    ephemeral: true,
   });
 }
 
@@ -145,6 +160,7 @@ async function runDelete(interaction, backup, id) {
 module.exports = {
   category: 'configuration',
   composition,
+  restoreResultCard,
   data: new SlashCommandBuilder()
     .setName('backup')
     .setDescription('Sauvegarde/restauration de la structure du serveur.')
@@ -160,6 +176,8 @@ module.exports = {
         .addIntegerOption((o) => o.setName('intervalle_h').setDescription('Intervalle en heures').setMinValue(1))),
 
   async execute(interaction, client) {
+    // Revérifiée ici comme dans les boutons : la permission par défaut peut être modifiée par serveur.
+    assertAdmin(interaction);
     const sub = interaction.options.getSubcommand();
     const { backup, config } = client.services;
     const guildId = interaction.guild.id;

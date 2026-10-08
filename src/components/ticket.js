@@ -1,7 +1,7 @@
 'use strict';
 
 const { card, field, ICONS, linkButton, buttonRows, status, subtext } = require('../utils/ui');
-const { button, row, ButtonStyle } = require('../utils/components');
+const { button, row, resetSelectMenu, ButtonStyle } = require('../utils/components');
 const { UserError } = require('../core/errors');
 
 /**
@@ -21,9 +21,16 @@ async function openTicket(interaction, client, reason) {
   });
 }
 
-/** Carte de confirmation de fermeture (éphémère). */
-function closeConfirmation(client, guildId) {
-  const logChannel = client.services.config.get(guildId).tickets?.logChannel;
+/**
+ * Carte de confirmation de fermeture (éphémère).
+ * @param {import('discord.js').Guild | string} guild serveur (ou son identifiant : ancienne signature)
+ */
+function closeConfirmation(client, guild) {
+  const guildId = typeof guild === 'string' ? guild : guild?.id;
+  const configured = client.services.config.get(guildId).tickets?.logChannel;
+  // Salon de transcripts supprimé depuis la configuration : ne pas promettre une archive.
+  const cache = typeof guild === 'object' ? guild?.channels?.cache : null;
+  const logChannel = configured && (!cache || cache.has(configured)) ? configured : null;
   return {
     embeds: [
       card({
@@ -35,7 +42,9 @@ function closeConfirmation(client, guildId) {
           'Le salon sera **supprimé** 5 secondes après confirmation.',
           logChannel
             ? `Le transcript sera archivé dans <#${logChannel}>.`
-            : `${ICONS.warning} Aucun salon de transcripts n'est configuré : téléchargez le transcript avant de fermer si besoin.`,
+            : configured
+              ? `${ICONS.warning} Le salon de transcripts configuré n'existe plus : téléchargez le transcript avant de fermer si besoin.`
+              : `${ICONS.warning} Aucun salon de transcripts n'est configuré : téléchargez le transcript avant de fermer si besoin.`,
           subtext('Cette action est définitive.'),
         ],
       }),
@@ -80,8 +89,13 @@ module.exports = {
       const value = interaction.values?.[0];
       const reasons = client.services.config.get(interaction.guildId).tickets?.reasons ?? [];
       const reason = reasons.find((r) => r.value === value)?.label ?? null;
-      await interaction.deferReply({ ephemeral: true });
-      return openTicket(interaction, client, reason);
+      try {
+        await interaction.deferReply({ ephemeral: true });
+        return await openTicket(interaction, client, reason);
+      } finally {
+        // Panneau public : sans remise à zéro, le motif reste coché côté client.
+        await resetSelectMenu(interaction);
+      }
     }
 
     if (action === 'closecancel') {
@@ -104,7 +118,7 @@ module.exports = {
     }
     if (action === 'close') {
       tickets.assertParticipant(interaction.member, record);
-      return interaction.reply(closeConfirmation(client, interaction.guildId));
+      return interaction.reply(closeConfirmation(client, interaction.guild ?? interaction.guildId));
     }
     if (action === 'closeconfirm') {
       tickets.assertParticipant(interaction.member, record);

@@ -4,6 +4,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  MessageFlags,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
 } = require('discord.js');
@@ -48,4 +49,19 @@ function selectMenu({ id, placeholder, options, min = 1, max = 1 }) {
   return menu;
 }
 
-module.exports = { button, row, selectMenu, ButtonStyle };
+/**
+ * Remet à zéro un menu déroulant PUBLIC après traitement. Sans cela, le client
+ * Discord garde la sélection précédente cochée (réponse éphémère, message
+ * jamais réédité) et la renvoie au clic suivant. Rééditer le message avec ses
+ * propres composants suffit. Best effort : jamais d'exception.
+ * @param {import('discord.js').MessageComponentInteraction} interaction
+ */
+async function resetSelectMenu(interaction) {
+  const message = interaction?.message;
+  if (typeof message?.edit !== 'function' || !message.components) return false;
+  // Message éphémère : non éditable par l'API des messages.
+  if (message.flags?.has?.(MessageFlags.Ephemeral)) return false;
+  return message.edit({ components: message.components }).then(() => true, () => false);
+}
+
+module.exports = { button, row, selectMenu, resetSelectMenu, ButtonStyle };
