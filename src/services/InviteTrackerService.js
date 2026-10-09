@@ -8,6 +8,8 @@ const logger = createLogger('invites');
 const DAY_MS = 86_400_000;
 /** Une invitation supprimée reste candidate ce temps-là (INVITE_DELETE reçu avant GUILD_MEMBER_ADD). */
 const DELETED_GRACE_MS = 15_000;
+/** Attente maximale de l'attribution par le log d'arrivée (events/guildMemberAdd.js). */
+const LOG_WAIT_MS = 2_000;
 
 /**
  * Suivi des invitations : cache des invitations de chaque serveur (compteurs `uses`),
@@ -19,7 +21,9 @@ const DELETED_GRACE_MS = 15_000;
  * (l'arrivée est enregistrée comme « inconnue »).
  *
  * Les traitements d'un même serveur sont sérialisés : deux arrivées simultanées ne
- * comparent jamais leurs instantanés en même temps.
+ * comparent jamais leurs instantanés en même temps. Les arrivées qui attendent dans la file
+ * partagent UNE lecture des invitations (rafale, raid) : le nombre d'appels à Discord ne
+ * croît pas avec le nombre d'arrivées.
  */
 class InviteTrackerService {
   /**
@@ -39,6 +43,10 @@ class InviteTrackerService {
     this.states = new Map();
     /** @type {Map<string, Promise<unknown>>} file d'attente par serveur */
     this.queues = new Map();
+    /** @type {Map<string, { members: object[], promise: Promise<Map<string, JoinResult>> }>} arrivées en attente d'une lecture */
+    this.waiting = new Map();
+    /** Attente maximale de l'attribution par le log d'arrivée (ms). */
+    this.logWaitMs = LOG_WAIT_MS;
   }
 
   /** Le bot peut-il lire les invitations du serveur ? */
@@ -157,23 +165,43 @@ class InviteTrackerService {
 
   /**
    * Arrivée d'un membre : retrouve l'invitation utilisée et enregistre l'arrivée.
+   * Les arrivées en attente dans la file du serveur sont regroupées : une seule lecture
+   * des invitations pour toutes (voir #processBatch).
    * @returns {Promise<JoinResult>}
    */
   handleJoin(member) {
+    if (member.user?.bot) return Promise.resolve({ kind: 'oauth' });
     const guild = member.guild;
-    return this.#enqueue(guild.id, async () => {
-      if (member.user?.bot) return { kind: 'oauth' };
-      const before = this.snapshots.get(guild.id) ?? null;
-      const vanityBefore = this.vanity.get(guild.id);
-      const after = await this.#fetch(guild);
-      if (after) this.snapshots.set(guild.id, after);
+    let batch = this.waiting.get(guild.id);
+    if (!batch) {
+      batch = { members: [], promise: null };
+      this.waiting.set(guild.id, batch);
+      const current = batch;
+      // Le lot est fermé au DÉBUT de son traitement : les arrivées suivantes forment le prochain.
+      current.promise = this.#enqueue(guild.id, () => {
+        if (this.waiting.get(guild.id) === current) this.waiting.delete(guild.id);
+        return this.#processBatch(guild, current.members);
+      });
+    }
+    batch.members.push(member);
+    return batch.promise.then((results) => results.get(member.id));
+  }
 
-      let result;
-      if (!after) result = { kind: 'unknown', reason: this.states.get(guild.id) === 'noperm' ? 'noperm' : 'error' };
-      else if (!before) result = { kind: 'unknown', reason: 'nobaseline' };
-      else result = this.#resolve(guild, before, after, vanityBefore);
+  /** Une lecture des invitations pour un lot d'arrivées. @returns {Promise<Map<string, JoinResult>>} */
+  async #processBatch(guild, members) {
+    const before = this.snapshots.get(guild.id) ?? null;
+    const vanityBefore = this.vanity.get(guild.id);
+    const after = await this.#fetch(guild);
+    if (after) this.snapshots.set(guild.id, after);
 
-      const days = this.fakeDays(guild.id);
+    let result;
+    if (!after) result = { kind: 'unknown', reason: this.states.get(guild.id) === 'noperm' ? 'noperm' : 'error' };
+    else if (!before) result = { kind: 'unknown', reason: 'nobaseline' };
+    else result = this.#resolve(guild, before, after, vanityBefore, members.length);
+
+    const days = this.fakeDays(guild.id);
+    const results = new Map();
+    for (const member of members) {
       const created = member.user?.createdTimestamp ?? Date.now();
       const fake = days > 0 && Date.now() - created < days * DAY_MS;
       try {
@@ -187,26 +215,33 @@ class InviteTrackerService {
       } catch (err) {
         logger.warn(`Arrivée non enregistrée (${guild.id}/${member.id}) :`, err?.message);
       }
-      return {
-        ...result,
-        fake,
-        fakeDays: days,
-        count: result.inviterId ? this.joins.stats(guild.id, result.inviterId).net : null,
-      };
-    });
+      let count = null;
+      try {
+        count = result.inviterId ? this.joins.stats(guild.id, result.inviterId).net : null;
+      } catch (err) {
+        logger.debug('stats', err?.message);
+      }
+      results.set(member.id, { ...result, fake, fakeDays: days, count });
+    }
+    return results;
   }
 
-  /** Comparaison de deux instantanés (pur, hors effets de bord du cache des supprimées). */
-  #resolve(guild, before, after, vanityBefore) {
+  /**
+   * Comparaison de deux instantanés (pur, hors effets de bord du cache des supprimées).
+   * @param {number} [arrivals] arrivées du lot : attribuées ensemble seulement si une seule
+   *   source a servi, et au moins autant de fois qu'il y a d'arrivées
+   */
+  #resolve(guild, before, after, vanityBefore, arrivals = 1) {
     const candidates = [];
     for (const [code, now] of after) {
       const old = before.get(code);
       // Invitation absente de l'ancien instantané (INVITE_CREATE manqué) : candidate si utilisée.
-      if (now.uses > (old?.uses ?? 0)) candidates.push(now);
+      const delta = now.uses - (old?.uses ?? 0);
+      if (delta > 0) candidates.push({ ...now, delta });
     }
     // Invitation à usage limité supprimée par Discord en atteignant son maximum.
     for (const [code, old] of before) {
-      if (!after.has(code) && exhausted(old)) candidates.push({ ...old, uses: old.uses + 1 });
+      if (!after.has(code) && exhausted(old)) candidates.push({ ...old, uses: old.uses + 1, delta: 1 });
     }
     const bucket = this.deleted.get(guild.id);
     if (bucket) {
@@ -214,7 +249,7 @@ class InviteTrackerService {
       for (const [code, { entry, at }] of bucket) {
         if (now - at > DELETED_GRACE_MS) bucket.delete(code);
         else if (!after.has(code) && !before.has(code) && exhausted(entry)) {
-          candidates.push({ ...entry, uses: entry.uses + 1 });
+          candidates.push({ ...entry, uses: entry.uses + 1, delta: 1 });
           bucket.delete(code);
         }
       }
@@ -225,6 +260,10 @@ class InviteTrackerService {
 
     const total = candidates.length + (vanityUsed ? 1 : 0);
     if (total > 1) return { kind: 'unknown', reason: 'multiple' };
+    // Lot de plusieurs arrivées : une source utilisée moins de fois qu'il n'y a d'arrivées
+    // n'explique pas toutes les arrivées (aucune attribution plutôt qu'une fausse).
+    const used = vanityUsed ? vanityAfter - vanityBefore : candidates[0]?.delta ?? 0;
+    if (total === 1 && arrivals > 1 && used < arrivals) return { kind: 'unknown', reason: 'multiple' };
     if (vanityUsed) return { kind: 'vanity', code: guild.vanityURLCode };
     if (candidates.length === 1) {
       const [c] = candidates;
@@ -262,6 +301,7 @@ function describeJoin(result) {
   else if (result.kind === 'oauth') line = 'Ajouté par OAuth2 (intégration autorisée par un administrateur)';
   else if (result.reason === 'multiple') line = 'Invitation inconnue (plusieurs invitations possibles)';
   else if (result.reason === 'noperm') line = 'Invitation inconnue : il me manque la permission **Gérer le serveur**';
+  else if (result.reason === 'timeout') line = 'Invitation inconnue : lecture des invitations trop lente (arrivées nombreuses)';
   else line = 'Invitation inconnue';
   if (result.fake) line += `\n⚠️ Comptée comme **fausse** (compte de moins de ${plural(result.fakeDays ?? 7, 'jour')})`;
   return line;
@@ -288,4 +328,4 @@ function toEntry(invite) {
   };
 }
 
-module.exports = { InviteTrackerService, toEntry, describeJoin, DELETED_GRACE_MS };
+module.exports = { InviteTrackerService, toEntry, describeJoin, DELETED_GRACE_MS, LOG_WAIT_MS };

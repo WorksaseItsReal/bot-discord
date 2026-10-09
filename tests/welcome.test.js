@@ -306,7 +306,10 @@ test('guildMemberAdd appelle l\'accueil après l\'AntiRaid et lui transmet le r�
       },
     };
     await guildMemberAdd.execute(client, member);
-    assert.deepEqual(calls, ['log', ['welcome', punished]]);
+    // Le log d'arrivée part en parallèle (il attend l'attribution de l'invitation) :
+    // l'accueil ne l'attend pas, l'ordre entre les deux n'est pas garanti.
+    assert.deepEqual(calls.filter((c) => c !== 'log'), [['welcome', punished]]);
+    assert.equal(calls.filter((c) => c === 'log').length, 1);
   }
 });
 

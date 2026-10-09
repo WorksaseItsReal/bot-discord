@@ -179,15 +179,20 @@ test('InviteTrackerService : usage unique supprimé, INVITE_CREATE/DELETE, lien 
   assert.equal(state.fetches, before);
   assert.match(describeJoin(r), /OAuth2/);
 
-  // Deux arrivées simultanées sur la même invitation : traitées l'une après l'autre.
+  // Deux arrivées simultanées sur la même invitation : UNE lecture pour les deux (lot),
+  // chacune attribuée puisque l'invitation a servi deux fois.
   const x = add('x', ADMIN);
   svc.onCreate({ ...x, guild: { id: GUILD } });
   x.uses = 2; // les deux utilisations sont déjà visibles au premier fetch
+  const fetches = state.fetches;
   const [r1, r2] = await Promise.all([svc.handleJoin(memberOf(guild, '25')), svc.handleJoin(memberOf(guild, '26'))]);
-  assert.equal(r1.kind, 'invite');
-  assert.equal(r1.code, 'x');
-  assert.equal(r2.kind, 'unknown', 'la seconde ne doit pas compter deux fois la même utilisation');
+  assert.equal(state.fetches - fetches, 1, 'une seule lecture pour deux arrivées en attente');
+  assert.deepEqual([r1.kind, r1.code, r2.kind, r2.code], ['invite', 'x', 'invite', 'x']);
   assert.deepEqual(svc.invitesOf(GUILD, ADMIN).map((e) => e.code), ['x']);
+  // Une seule utilisation pour deux arrivées : aucune attribution (pas de double comptage).
+  x.uses = 3;
+  const [r3, r4] = await Promise.all([svc.handleJoin(memberOf(guild, '27')), svc.handleJoin(memberOf(guild, '28'))]);
+  assert.deepEqual([r3.kind, r4.kind], ['unknown', 'unknown']);
 });
 
 test('InviteTrackerService : sans « Gérer le serveur », aucune lecture et arrivée « inconnue »', async () => {

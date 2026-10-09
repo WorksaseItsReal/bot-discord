@@ -3,7 +3,7 @@
 const { discordTimestamp } = require('../utils/time');
 const { field, wide, ICONS, userLine, code } = require('../utils/ui');
 const { logCard } = require('../services/LoggingService');
-const { describeJoin } = require('../services/InviteTrackerService');
+const { describeJoin, LOG_WAIT_MS } = require('../services/InviteTrackerService');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('guildMemberAdd');
@@ -55,35 +55,56 @@ module.exports = {
   reapplyMute,
   /** @param {import('../core/GadgetClient').GadgetClient} client */
   async execute(client, member) {
-    // Invitation utilisée : lancée AVANT l'AntiRaid (les compteurs d'utilisation sont lus au plus tôt).
+    // Invitation utilisée : lancée AVANT l'AntiRaid (les compteurs d'utilisation sont lus au plus
+    // tôt), en parallèle. La sécurité (mute réappliqué, rôles d'arrivée / vérification) ne
+    // l'attend JAMAIS : en raid, la file des lectures d'invitations peut prendre du retard.
     const invite = client.services.invites?.handleJoin(member).catch((e) => {
       logger.debug('invites', e?.message);
       return null;
     });
     const raid = await client.services.antiraid.handleJoin(member).catch(() => null);
-    const inviteLine = describeJoin(await invite);
-    const user = member.user;
-    const created = user.createdTimestamp;
-    const recent = Date.now() - created < NEW_ACCOUNT_DAYS * DAY_MS;
-    const embed = logCard({
-      category: 'members',
-      tone: 'success',
-      icon: '📥',
-      title: user.bot ? 'Bot ajouté' : 'Nouveau membre',
-      description: `${user} a rejoint le serveur.`,
-      user,
-      fields: [
-        field(ICONS.user, 'Membre', userLine(user)),
-        field(ICONS.date, 'Compte créé', `${discordTimestamp(created, 'D')}\n${discordTimestamp(created, 'R')}`),
-        field(ICONS.members, 'Membres', `**${member.guild.memberCount}**`),
-        inviteLine ? wide(ICONS.link, 'Invitation', inviteLine) : null,
-        recent ? wide(ICONS.warning, 'Compte récent', `Ce compte a moins de ${NEW_ACCOUNT_DAYS} jours.`) : null,
-      ],
-    });
-    await client.services.logging.send(member.guild.id, 'members', embed, undefined, { event: 'memberJoin' });
+    // Log d'arrivée en parallèle : il attend l'attribution, au plus `logWaitMs` (l'arrivée
+    // reste enregistrée ensuite par le suivi des invitations).
+    const logged = logJoin(client, member, invite).catch((e) => logger.warn('Log d\'arrivée :', e?.message));
     // Membre expulsé/banni par l'AntiRaid : il n'est plus là, rien à réappliquer.
     if (!raid?.punished) await reapplyMute(client, member).catch((e) => logger.debug('reapplyMute', e?.message));
     // Accueil APRÈS l'AntiRaid : rien n'est envoyé à un membre qu'il vient d'expulser/bannir.
     await client.services.welcome?.handleJoin(member, { raid }).catch((e) => logger.debug('welcome', e?.message));
+    await logged;
   },
 };
+
+/** Carte « Nouveau membre » (logs Membres), avec l'invitation utilisée si elle est connue à temps. */
+async function logJoin(client, member, invite) {
+  const inviteLine = describeJoin(await withTimeout(invite, client.services.invites?.logWaitMs ?? LOG_WAIT_MS));
+  const user = member.user;
+  const created = user.createdTimestamp;
+  const recent = Date.now() - created < NEW_ACCOUNT_DAYS * DAY_MS;
+  const embed = logCard({
+    category: 'members',
+    tone: 'success',
+    icon: '📥',
+    title: user.bot ? 'Bot ajouté' : 'Nouveau membre',
+    description: `${user} a rejoint le serveur.`,
+    user,
+    fields: [
+      field(ICONS.user, 'Membre', userLine(user)),
+      field(ICONS.date, 'Compte créé', `${discordTimestamp(created, 'D')}\n${discordTimestamp(created, 'R')}`),
+      field(ICONS.members, 'Membres', `**${member.guild.memberCount}**`),
+      inviteLine ? wide(ICONS.link, 'Invitation', inviteLine) : null,
+      recent ? wide(ICONS.warning, 'Compte récent', `Ce compte a moins de ${NEW_ACCOUNT_DAYS} jours.`) : null,
+    ],
+  });
+  await client.services.logging.send(member.guild.id, 'members', embed, undefined, { event: 'memberJoin' });
+}
+
+/** Attend `promise` au plus `ms` ; au-delà : arrivée « inconnue (lecture trop lente) ». */
+function withTimeout(promise, ms) {
+  if (!promise) return Promise.resolve(null);
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'unknown', reason: 'timeout' }), Math.max(0, ms));
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
