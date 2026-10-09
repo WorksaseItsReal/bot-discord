@@ -19,6 +19,7 @@ const CATEGORIES = {
   fun: { emoji: '🎲', label: 'Fun', description: 'Jeux, sondages et divertissement.' },
   suggestions: { emoji: '💡', label: 'Suggestions', description: 'Idées et votes de la communauté.' },
   levels: { emoji: '📈', label: 'Niveaux', description: 'XP, rangs, classement et récompenses.' },
+  economy: { emoji: '🪙', label: 'Économie', description: 'Monnaie virtuelle, boutique et mini-jeux.' },
 };
 
 function categoryMeta(key) {

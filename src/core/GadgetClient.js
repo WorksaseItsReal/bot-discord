@@ -39,6 +39,7 @@ const { ScheduledAnnouncementRepository } = require('../database/repositories/Sc
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
 const { AfkRepository } = require('../database/repositories/AfkRepository');
 const { HighlightRepository } = require('../database/repositories/HighlightRepository');
+const { EconomyRepository } = require('../database/repositories/EconomyRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -69,6 +70,7 @@ const { BirthdayService } = require('../services/BirthdayService');
 const { AfkService } = require('../services/AfkService');
 const { HighlightService } = require('../services/HighlightService');
 const { SnipeService } = require('../services/SnipeService');
+const { EconomyService } = require('../services/EconomyService');
 
 const logger = createLogger('client');
 
@@ -133,6 +135,7 @@ class GadgetClient extends Client {
       birthdays: new BirthdayRepository(db),
       afk: new AfkRepository(db),
       highlights: new HighlightRepository(db),
+      economy: new EconomyRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -176,6 +179,8 @@ class GadgetClient extends Client {
       afk: new AfkService({ client: this, afk: this.repositories.afk, config: configService }),
       highlights: new HighlightService({ client: this, highlights: this.repositories.highlights, config: configService }),
       snipe: new SnipeService({ client: this, config: configService }),
+      // Économie : synchrone (transactions SQLite), aucun minuteur à arrêter.
+      economy: new EconomyService({ economy: this.repositories.economy, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));

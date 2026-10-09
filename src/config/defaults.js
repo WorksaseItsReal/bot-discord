@@ -279,6 +279,18 @@ const defaultGuildConfig = Object.freeze({
     highlights: { enabled: true },
     snipe: { enabled: true }, // « Gérer les messages » ; salons ignorés des logs respectés
   },
+  // Économie (/eco, /economie) : monnaie virtuelle SANS valeur réelle. Désactivée par défaut.
+  // Comptes, boutique et historique en base (tables economy_*). Bornes : utils/economy.js.
+  economy: {
+    enabled: false,
+    currency: { name: 'pièces', emoji: '🪙' }, // nom (pluriel) et emoji (Unicode ou <:nom:id> du serveur)
+    daily: { amount: 100, streakBonus: 10, streakMax: 7 }, // bonus par jour de série, plafonné à streakMax jours
+    weekly: { amount: 500 },
+    work: { min: 20, max: 80, cooldownMinutes: 60 },
+    transfers: { taxPercent: 0, confirmAbove: 1000 }, // taxe détruite ; confirmation au-delà (0 : jamais)
+    limits: { maxBet: 1000, maxBalance: 10_000_000 },
+    games: { coinflip: true, slots: true, houseEdgePercent: 5, cooldownSeconds: 10 }, // espérance négative réglable
+  },
 });
 
 module.exports = { defaultGuildConfig };

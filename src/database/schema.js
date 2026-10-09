@@ -568,6 +568,69 @@ const migrations = [
     `,
   },
   {
+    id: 18,
+    name: 'economy',
+    up: `
+      -- Économie (/eco, /economie) : monnaie virtuelle par serveur, sans valeur réelle.
+      -- Toute écriture de solde passe par une transaction SQLite qui relit le solde
+      -- (jamais négatif : contrainte CHECK en dernier rempart).
+      CREATE TABLE IF NOT EXISTS economy_accounts (
+        guild_id     TEXT NOT NULL,
+        user_id      TEXT NOT NULL,
+        balance      INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
+        last_daily   INTEGER,                       -- dernière récompense quotidienne
+        last_weekly  INTEGER,                       -- dernière récompense hebdomadaire
+        last_work    INTEGER,                       -- dernier /eco travail
+        daily_streak INTEGER NOT NULL DEFAULT 0,    -- jours consécutifs (bonus de série)
+        updated_at   INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_economy_accounts_rank ON economy_accounts (guild_id, balance DESC, user_id);
+
+      -- Articles de la boutique (25 par serveur) : objet virtuel ou rôle à attribuer.
+      CREATE TABLE IF NOT EXISTS economy_items (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id    TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        description TEXT,
+        emoji       TEXT,
+        price       INTEGER NOT NULL CHECK (price >= 1),
+        kind        TEXT NOT NULL DEFAULT 'item',   -- item | role
+        role_id     TEXT,
+        stock       INTEGER CHECK (stock IS NULL OR stock >= 0), -- NULL = illimité
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_economy_items_guild ON economy_items (guild_id, price);
+
+      -- Objets possédés (les rôles achetés sont attribués directement).
+      CREATE TABLE IF NOT EXISTS economy_inventory (
+        guild_id    TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        item_id     INTEGER NOT NULL REFERENCES economy_items (id) ON DELETE CASCADE,
+        quantity    INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+        acquired_at INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_economy_inventory_item ON economy_inventory (item_id);
+
+      -- Historique des mouvements (200 derniers par membre).
+      CREATE TABLE IF NOT EXISTS economy_transactions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id      TEXT NOT NULL,
+        user_id       TEXT NOT NULL,
+        delta         INTEGER NOT NULL,
+        balance_after INTEGER NOT NULL,
+        kind          TEXT NOT NULL,                -- daily | weekly | work | transfer_in | transfer_out | buy | refund | coinflip | slots | admin
+        ref           TEXT,                         -- autre membre, article, modérateur, résultat d'un jeu…
+        created_at    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_economy_tx_user ON economy_transactions (guild_id, user_id, id);
+      CREATE INDEX IF NOT EXISTS idx_economy_tx_kind ON economy_transactions (guild_id, user_id, kind, id);
+      CREATE INDEX IF NOT EXISTS idx_economy_tx_guild ON economy_transactions (guild_id, created_at);
+    `,
+  },
+  {
     id: 20,
     name: 'member_tools',
     up: `
