@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { Collection, InteractionContextType, ApplicationIntegrationType } = require('discord.js');
+const { Collection, InteractionContextType, ApplicationIntegrationType, ApplicationCommandType } = require('discord.js');
 const { createLogger } = require('./logger');
 
 const logger = createLogger('commands');
@@ -10,6 +10,9 @@ const logger = createLogger('commands');
 /**
  * Charge récursivement les modules de commandes depuis src/commands.
  * Chaque module exporte : { data: SlashCommandBuilder, category, execute, autocomplete? }.
+ * Menus contextuels (clic droit → Applications) : `data` est un ContextMenuCommandBuilder
+ * (type User ou Message), sans description ni options ; le module peut exporter
+ * `description` (texte affiché par /help). Même pipeline que les commandes slash.
  */
 class CommandHandler {
   constructor() {
@@ -94,4 +97,25 @@ function applyContexts(command) {
   if ('dm_permission' in command.data) command.data.dm_permission = undefined;
 }
 
-module.exports = { CommandHandler, applyContexts };
+/** Type d'application command (1 : slash, 2 : menu utilisateur, 3 : menu message). */
+function commandType(command) {
+  return command?.data?.type ?? ApplicationCommandType.ChatInput;
+}
+
+/** Vrai pour un menu contextuel (clic droit → Applications). */
+function isContextMenu(command) {
+  const type = commandType(command);
+  return type === ApplicationCommandType.User || type === ApplicationCommandType.Message;
+}
+
+/** Nom affiché d'une commande : `/ban`, ou « Signaler le message » pour un menu contextuel. */
+function commandLabel(command) {
+  return isContextMenu(command) ? `« ${command.data.name} »` : `/${command.data.name}`;
+}
+
+/** Où trouver un menu contextuel : « clic droit sur un message → Applications ». */
+function contextMenuWhere(command) {
+  return commandType(command) === ApplicationCommandType.Message ? 'Clic droit sur un message → Applications' : 'Clic droit sur un membre → Applications';
+}
+
+module.exports = { CommandHandler, applyContexts, commandType, isContextMenu, commandLabel, contextMenuWhere };

@@ -412,6 +412,7 @@ module.exports = {
   enforcedRefusal,
   normalizeReason,
   normalizeNote,
+  noteModal,
   data: new SlashCommandBuilder()
     .setName('sanctions')
     .setDescription('Gère les sanctions (fiches, historique, raisons) et les notes de modération.')
@@ -671,7 +672,11 @@ module.exports = {
       const userId = snowflake(rawUserId, 'membre');
       const content = normalizeNote(interaction.fields.getTextInputValue('note'));
       client.repositories.modNotes.create({ guildId: interaction.guildId, userId, authorId: interaction.user.id, content });
-      await interaction.update(notesView(client, interaction.guild, userId, 0, `${ICONS.success} Note ajoutée.`));
+      const view = notesView(client, interaction.guild, userId, 0, `${ICONS.success} Note ajoutée.`);
+      // Formulaire ouvert depuis un message (fiche, notes) : on met la vue à jour ; depuis le
+      // menu contextuel « Note de modération » (sans message) : nouvelle réponse éphémère.
+      if (interaction.isFromMessage?.() === false) await interaction.reply({ ...view, ephemeral: true });
+      else await interaction.update(view);
     },
     /** cmd:sanctions:notes:<userId>:<page> — notes d'un membre. */
     async notes(interaction, client, [rawUserId, rawPage]) {

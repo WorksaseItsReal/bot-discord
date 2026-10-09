@@ -27,6 +27,15 @@ class CooldownManager {
     return 0;
   }
 
+  /**
+   * Temps restant d'un cooldown, SANS le consommer (ex : prévenir avant d'ouvrir un formulaire).
+   * @returns {number} 0 si libre, sinon millisecondes restantes
+   */
+  remaining(key, now = Date.now()) {
+    const expiry = this.expiries.get(key);
+    return expiry && expiry > now ? expiry - now : 0;
+  }
+
   /** Libère un cooldown (ex: la commande a échoué à cause d'une erreur utilisateur). */
   release(key) {
     this.expiries.delete(key);

@@ -31,6 +31,7 @@ const { AutomodQuarantineRepository } = require('../database/repositories/Automo
 const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { LevelRepository } = require('../database/repositories/LevelRepository');
 const { InviteJoinRepository } = require('../database/repositories/InviteJoinRepository');
+const { ReportRepository } = require('../database/repositories/ReportRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -51,6 +52,7 @@ const { WelcomeService } = require('../services/WelcomeService');
 const { LevelService } = require('../services/LevelService');
 const { InviteTrackerService } = require('../services/InviteTrackerService');
 const { StatsCounterService } = require('../services/StatsCounterService');
+const { ReportService } = require('../services/ReportService');
 
 const logger = createLogger('client');
 
@@ -107,6 +109,7 @@ class GadgetClient extends Client {
       modNotes: new ModNoteRepository(db),
       levels: new LevelRepository(db),
       inviteJoins: new InviteJoinRepository(db),
+      reports: new ReportRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -137,6 +140,7 @@ class GadgetClient extends Client {
       levels: new LevelService({ client: this, levels: this.repositories.levels, config: configService }),
       invites: new InviteTrackerService({ client: this, joins: this.repositories.inviteJoins, config: configService }),
       counters: new StatsCounterService({ client: this, config: configService }),
+      reports: new ReportService({ reports: this.repositories.reports, config: configService, logging }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
