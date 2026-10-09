@@ -37,6 +37,7 @@ const { StickyRepository } = require('../database/repositories/StickyRepository'
 const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
 const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
+const { ActivityRepository } = require('../database/repositories/ActivityRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -64,6 +65,7 @@ const { AutoResponderService } = require('../services/AutoResponderService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
+const { ActivityService } = require('../services/ActivityService');
 
 const logger = createLogger('client');
 
@@ -126,6 +128,7 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleRepository(db),
       announcements: new ScheduledAnnouncementRepository(db),
       birthdays: new BirthdayRepository(db),
+      activity: new ActivityRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -165,6 +168,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
       birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
+      // Statistiques du serveur : compteurs en mémoire, écrits par lots (30 s et à l'arrêt).
+      activity: new ActivityService({ client: this, activity: this.repositories.activity, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -181,6 +186,7 @@ class GadgetClient extends Client {
     this.services.scheduler.start();
     this.services.levels.start(); // suivi vocal des niveaux (minuteur unref, arrêté dans shutdown)
     this.services.counters.start(); // compteurs de statistiques (minuteur unref, arrêté dans shutdown)
+    this.services.activity.start(); // statistiques du serveur : vidage du tampon (minuteur unref, arrêté dans shutdown)
   }
 
   /**
@@ -275,7 +281,8 @@ class GadgetClient extends Client {
     }
     // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
     // En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
-    await this.#settleAll(['autoResponses', 'sticky', 'starboard'], 'stop', 'Arrêt du service');
+    // Statistiques (activity) : tampon mémoire et sessions vocales écrits en base.
+    await this.#settleAll(['autoResponses', 'sticky', 'starboard', 'activity'], 'stop', 'Arrêt du service');
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
     // pour rester sous le garde-fou d'arrêt.

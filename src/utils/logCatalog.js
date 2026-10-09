@@ -10,8 +10,8 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '🔨',
     label: 'Modération',
     channel: 'modération',
-    description: 'Sanctions, levées de sanction, actions manuelles, tickets et signalements.',
-    events: { sanction: 'Sanctions (warn, mute, timeout, kick, ban)', revocation: 'Levées de sanction', manualBan: 'Actions manuelles (bans, kicks, timeouts hors du bot)', ticket: 'Tickets ouverts', report: 'Signalements de messages' },
+    description: 'Sanctions, levées de sanction, actions manuelles, tickets, signalements, inactifs.',
+    events: { sanction: 'Sanctions (warn, mute, timeout, kick, ban)', revocation: 'Levées de sanction', manualBan: 'Actions manuelles (bans, kicks, timeouts hors du bot)', ticket: 'Tickets ouverts', report: 'Signalements de messages', inactivity: 'Actions groupées sur les membres inactifs' },
   },
   messages: {
     emoji: '💬',

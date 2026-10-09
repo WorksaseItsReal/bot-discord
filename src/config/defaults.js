@@ -269,6 +269,19 @@ const defaultGuildConfig = Object.freeze({
     timeZone: 'Europe/Paris', // fuseau IANA du serveur (date du jour)
     hour: 9,                  // heure locale d'envoi (0-23)
   },
+  // Statistiques du serveur (/statistiques) et membres inactifs (/activite). Compteurs uniquement
+  // (messages, minutes de vocal, arrivées/départs), jamais le contenu des messages. Les bots et les
+  // salons ignorés des logs (logs.ignoredChannels) ne sont pas comptés.
+  stats: {
+    enabled: true,            // collecte active
+    public: false,            // /statistiques lisible par tous (sinon : « Gérer le serveur »)
+    retentionDays: 90,        // conservation des compteurs (7 à 365 jours)
+    inactivity: {
+      excludedRoles: [],      // rôles jamais considérés comme inactifs (staff…), 10 max
+      roleId: null,           // dernier rôle « inactif » choisi dans /activite
+      dmMessage: null,        // modèle du MP aux inactifs (null = modèle par défaut)
+    },
+  },
 });
 
 module.exports = { defaultGuildConfig };

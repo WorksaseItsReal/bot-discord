@@ -567,6 +567,57 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_levels_left ON levels (guild_id, left_at);
     `,
   },
+  {
+    id: 19,
+    name: 'server_stats',
+    up: `
+      -- Statistiques du serveur (/statistiques, /activite) : COMPTEURS uniquement, jamais le
+      -- contenu des messages. Jours au format AAAA-MM-JJ (UTC). Purge selon stats.retentionDays.
+      -- Messages et secondes de vocal par (serveur, jour, salon, membre) ; un fil compte pour son salon.
+      CREATE TABLE IF NOT EXISTS activity_daily (
+        guild_id      TEXT NOT NULL,
+        day           TEXT NOT NULL,
+        channel_id    TEXT NOT NULL,
+        user_id       TEXT NOT NULL,
+        messages      INTEGER NOT NULL DEFAULT 0,
+        voice_seconds INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, day, channel_id, user_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_activity_daily_user ON activity_daily (guild_id, user_id, day);
+
+      -- Messages par heure UTC (heures de pointe), tous salons et membres confondus.
+      CREATE TABLE IF NOT EXISTS activity_hourly (
+        guild_id TEXT NOT NULL,
+        day      TEXT NOT NULL,
+        hour     INTEGER NOT NULL,
+        messages INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, day, hour)
+      ) WITHOUT ROWID;
+
+      -- Arrivées et départs (humains) par jour : la croissance en est reconstruite.
+      CREATE TABLE IF NOT EXISTS member_flow_daily (
+        guild_id TEXT NOT NULL,
+        day      TEXT NOT NULL,
+        joins    INTEGER NOT NULL DEFAULT 0,
+        leaves   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, day)
+      ) WITHOUT ROWID;
+
+      -- Début de la collecte par serveur : avant, tout le monde paraît inactif.
+      CREATE TABLE IF NOT EXISTS stats_guilds (
+        guild_id TEXT PRIMARY KEY,
+        since    INTEGER NOT NULL
+      );
+
+      -- Dernier MP « membre inactif » envoyé (au plus un par membre et par semaine).
+      CREATE TABLE IF NOT EXISTS inactivity_dms (
+        guild_id TEXT NOT NULL,
+        user_id  TEXT NOT NULL,
+        sent_at  INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      ) WITHOUT ROWID;
+    `,
+  },
 ];
 
 module.exports = { migrations };
