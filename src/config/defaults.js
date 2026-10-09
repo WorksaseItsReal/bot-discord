@@ -212,6 +212,24 @@ const defaultGuildConfig = Object.freeze({
     ignoredRoles: [],       // rôles sans XP
     multipliers: [],        // [{ roleId, multiplier }] : le plus élevé du membre s'applique
   },
+  // Suivi des invitations (/invitations). Lecture des invitations : permission « Gérer le serveur ».
+  invites: {
+    fakeAccountDays: 7,     // compte plus jeune à l'arrivée → invitation « fausse » (0 : jamais)
+  },
+  // Compteurs de statistiques (/compteurs) : salons vocaux verrouillés dont le nom affiche une valeur.
+  // template null = modèle par défaut ; renamedAt : dernier renommage (limite Discord : 2 / 10 min).
+  statsCounters: {
+    categoryId: null,       // catégorie « 📊 Statistiques » créée par le bot
+    counters: {
+      members: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+      humans: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+      bots: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+      online: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+      boosts: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+      channels: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+      roles: { enabled: false, channelId: null, template: null, renamedAt: 0 },
+    },
+  },
 });
 
 module.exports = { defaultGuildConfig };

@@ -405,6 +405,25 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_role_menus_message ON role_menus (message_id);
     `,
   },
+  {
+    id: 14,
+    name: 'invite_joins',
+    up: `
+      -- Suivi des invitations : une ligne par arrivée (un membre qui revient en crée une nouvelle).
+      CREATE TABLE IF NOT EXISTS invite_joins (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        inviter_id TEXT,                     -- null : invitation inconnue, lien personnalisé ou OAuth
+        code       TEXT,                     -- code utilisé, 'vanity' (lien personnalisé) ou null
+        joined_at  INTEGER NOT NULL,
+        left_at    INTEGER,                  -- départ du membre (null : toujours là)
+        fake       INTEGER NOT NULL DEFAULT 0 -- 1 : compte trop récent à l'arrivée (« fausse » invitation)
+      );
+      CREATE INDEX IF NOT EXISTS idx_invite_joins_inviter ON invite_joins (guild_id, inviter_id);
+      CREATE INDEX IF NOT EXISTS idx_invite_joins_user ON invite_joins (guild_id, user_id);
+    `,
+  },
 ];
 
 module.exports = { migrations };

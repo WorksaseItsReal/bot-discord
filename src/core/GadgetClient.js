@@ -30,6 +30,7 @@ const { AutomodEventRepository } = require('../database/repositories/AutomodEven
 const { AutomodQuarantineRepository } = require('../database/repositories/AutomodQuarantineRepository');
 const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { LevelRepository } = require('../database/repositories/LevelRepository');
+const { InviteJoinRepository } = require('../database/repositories/InviteJoinRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -48,6 +49,8 @@ const { ProjectService } = require('../services/ProjectService');
 const { LogSetupService } = require('../services/LogSetupService');
 const { WelcomeService } = require('../services/WelcomeService');
 const { LevelService } = require('../services/LevelService');
+const { InviteTrackerService } = require('../services/InviteTrackerService');
+const { StatsCounterService } = require('../services/StatsCounterService');
 
 const logger = createLogger('client');
 
@@ -103,6 +106,7 @@ class GadgetClient extends Client {
       automodQuarantines: new AutomodQuarantineRepository(db),
       modNotes: new ModNoteRepository(db),
       levels: new LevelRepository(db),
+      inviteJoins: new InviteJoinRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -131,6 +135,8 @@ class GadgetClient extends Client {
       logSetup: new LogSetupService({ config: configService }),
       welcome: new WelcomeService({ client: this, config: configService, logging }),
       levels: new LevelService({ client: this, levels: this.repositories.levels, config: configService }),
+      invites: new InviteTrackerService({ client: this, joins: this.repositories.inviteJoins, config: configService }),
+      counters: new StatsCounterService({ client: this, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -146,6 +152,7 @@ class GadgetClient extends Client {
     await this.login(config.token);
     this.services.scheduler.start();
     this.services.levels.start(); // suivi vocal des niveaux (minuteur unref, arrêté dans shutdown)
+    this.services.counters.start(); // compteurs de statistiques (minuteur unref, arrêté dans shutdown)
   }
 
   /**
@@ -220,6 +227,11 @@ class GadgetClient extends Client {
       await this.services?.levels?.stop();
     } catch (err) {
       logger.warn('Arrêt du suivi des niveaux :', err?.message);
+    }
+    try {
+      await this.services?.counters?.stop();
+    } catch (err) {
+      logger.warn('Arrêt des compteurs de statistiques :', err?.message);
     }
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s

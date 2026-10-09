@@ -3,6 +3,7 @@
 const { discordTimestamp } = require('../utils/time');
 const { field, wide, ICONS, userLine, code } = require('../utils/ui');
 const { logCard } = require('../services/LoggingService');
+const { describeJoin } = require('../services/InviteTrackerService');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('guildMemberAdd');
@@ -54,7 +55,13 @@ module.exports = {
   reapplyMute,
   /** @param {import('../core/GadgetClient').GadgetClient} client */
   async execute(client, member) {
+    // Invitation utilisée : lancée AVANT l'AntiRaid (les compteurs d'utilisation sont lus au plus tôt).
+    const invite = client.services.invites?.handleJoin(member).catch((e) => {
+      logger.debug('invites', e?.message);
+      return null;
+    });
     const raid = await client.services.antiraid.handleJoin(member).catch(() => null);
+    const inviteLine = describeJoin(await invite);
     const user = member.user;
     const created = user.createdTimestamp;
     const recent = Date.now() - created < NEW_ACCOUNT_DAYS * DAY_MS;
@@ -69,6 +76,7 @@ module.exports = {
         field(ICONS.user, 'Membre', userLine(user)),
         field(ICONS.date, 'Compte créé', `${discordTimestamp(created, 'D')}\n${discordTimestamp(created, 'R')}`),
         field(ICONS.members, 'Membres', `**${member.guild.memberCount}**`),
+        inviteLine ? wide(ICONS.link, 'Invitation', inviteLine) : null,
         recent ? wide(ICONS.warning, 'Compte récent', `Ce compte a moins de ${NEW_ACCOUNT_DAYS} jours.`) : null,
       ],
     });
