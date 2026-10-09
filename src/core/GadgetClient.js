@@ -42,6 +42,7 @@ const { HighlightRepository } = require('../database/repositories/HighlightRepos
 const { EconomyRepository } = require('../database/repositories/EconomyRepository');
 const { GameScoreRepository } = require('../database/repositories/GameScoreRepository');
 const { TimedActionRepository } = require('../database/repositories/TimedActionRepository');
+const { ActivityRepository } = require('../database/repositories/ActivityRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -75,6 +76,7 @@ const { SnipeService } = require('../services/SnipeService');
 const { EconomyService } = require('../services/EconomyService');
 const { GameService } = require('../services/GameService');
 const { TimedLockService } = require('../services/TimedLockService');
+const { ActivityService } = require('../services/ActivityService');
 
 const logger = createLogger('client');
 
@@ -151,6 +153,7 @@ class GadgetClient extends Client {
       economy: new EconomyRepository(db),
       gameScores: new GameScoreRepository(db),
       timedActions: new TimedActionRepository(db),
+      activity: new ActivityRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -200,6 +203,8 @@ class GadgetClient extends Client {
       games: new GameService({ client: this, scores: this.repositories.gameScores }),
       // Levées automatiques : /lock duree, /slowmode pendant, /lockdown enable duree.
       timedLocks: new TimedLockService({ client: this, timed: this.repositories.timedActions }),
+      // Statistiques du serveur : compteurs en mémoire, écrits par lots (30 s et à l'arrêt).
+      activity: new ActivityService({ client: this, activity: this.repositories.activity, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -216,6 +221,7 @@ class GadgetClient extends Client {
     this.services.scheduler.start();
     this.services.levels.start(); // suivi vocal des niveaux (minuteur unref, arrêté dans shutdown)
     this.services.counters.start(); // compteurs de statistiques (minuteur unref, arrêté dans shutdown)
+    this.services.activity.start(); // statistiques du serveur : vidage du tampon (minuteur unref, arrêté dans shutdown)
   }
 
   /**
@@ -327,6 +333,8 @@ class GadgetClient extends Client {
       ['Arrêt du snipe', () => s.snipe?.stop()],
       // Mini-jeux : nettoyage périodique et minuteurs (défis, questions) annulés.
       ['Arrêt des mini-jeux', () => s.games?.stop()],
+      // Statistiques : dernier vidage du tampon de compteurs en base.
+      ['Arrêt des statistiques', () => s.activity?.stop()],
       ['Vidage des tickets', () => s.tickets?.flush?.()],
       ['Vidage des giveaways', () => s.giveaways?.flush?.()],
       ['Vidage des projets', () => s.projects?.flush?.()],

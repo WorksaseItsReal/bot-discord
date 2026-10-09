@@ -33,7 +33,8 @@ const PERMANENT_USER_CODES = new Set([10013, 50007, 50278]);
  *  - déclenchement des rappels arrivés à échéance ;
  *  - fin des giveaways, sauvegardes automatiques, purge des serveurs quittés ;
  *  - rôles temporaires, annonces programmées, anniversaires et levées automatiques
- *    (lock, mode lent, lockdown) : services dédiés.
+ *    (lock, mode lent, lockdown) : services dédiés ;
+ *  - purge quotidienne des statistiques expirées (ActivityService).
  * Tout survit au redémarrage car l'état vit en base. Chaque étape est isolée :
  * une erreur dans l'une n'empêche pas les suivantes.
  */
@@ -106,6 +107,7 @@ class SchedulerService {
       ['announcements', () => this.client.services?.announcements?.processDue({ isStopping: this.#budget() })],
       ['birthdays', () => this.client.services?.birthdays?.processDue({ isStopping: this.#budget() })],
       ['timedlocks', () => this.client.services?.timedLocks?.processDue({ isStopping: this.#budget() })],
+      ['activity', () => this.client.services?.activity?.processDue({ isStopping: this.#budget() })],
     ];
     for (const [name, run] of stages) {
       if (this.stopping) return;
