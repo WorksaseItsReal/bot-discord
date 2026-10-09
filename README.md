@@ -4,7 +4,7 @@
 
 **Le bot Discord tout-en-un pour administrer, modérer, sécuriser et animer votre serveur.**
 
-92 slash commands · 4 menus contextuels · plus de 200 actions · embeds soignés · multi-serveurs · 100 % en français
+94 slash commands · 4 menus contextuels · plus de 200 actions · embeds soignés · multi-serveurs · 100 % en français
 
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2022-339933?logo=node.js&logoColor=white)
@@ -223,6 +223,8 @@ Voir aussi le filtre [AutoMod « Pseudos »](#-automod), les [signalements](#-co
 
 **Candidatures, notes et conditions** — `/candidatures` (Gérer le serveur) : jusqu'à 5 formulaires (1 à 5 questions, réponse courte ou longue), un panneau public « Postuler » et les réponses en carte dans un salon du staff (rôle mentionné facultatif). Le staff (Gérer le serveur ou Gérer les rôles) accepte (rôles donnés et MP), refuse (motif en MP) ou ouvre un entretien (ticket, sinon fil privé dans le salon du panneau) ; une seule décision par candidature, même sur double clic. Une candidature en attente par membre et par formulaire, avec un délai réglable entre deux ; les membres suivent les leurs avec `/candidature statut|retirer`. À la fermeture d'un ticket, son auteur peut le **noter** de 1 à 5 ⭐ en MP (commentaire facultatif, notation désactivable) ; la vue « Statistiques » de `/tickets` affiche la note moyenne, les tickets et notes par membre du staff et les délais moyens de prise en charge et de fermeture. Les **giveaways** acceptent `niveau_min`, `invitations_min` et `anciennete_min` (jours sur le serveur), affichés sur la carte et vérifiés à l'inscription comme au tirage.
 
+**Automatisations et flux RSS** — **`/flux ajouter url salon [role_mention] [filtre_mot]`** (Gérer le serveur) suit un flux RSS / Atom ou une chaîne YouTube (identifiant `UC…` ou lien `youtube.com/channel/UC…` ; les liens `@pseudo` ne sont pas reconnus) dans un salon. Les articles déjà parus ne sont jamais republiés ; les nouveautés sont vérifiées toutes les 10 minutes et publiées en carte (titre, extrait, lien, image), avec un rôle mentionné et un mot-filtre facultatifs (25 flux par serveur). Un flux en erreur 10 fois de suite est désactivé et signalé dans les logs ; `/flux liste` le réactive, `/flux tester` vérifie un lien. Les requêtes sortantes refusent les adresses privées ou locales, même après redirection, et `FEEDS_NETWORK=off` les coupe toutes. **`/automatisations`** (Gérer le serveur) regroupe la **publication automatique** des salons d'annonces (file d'attente dans la limite de Discord de 10 par heure et par salon), les **fils automatiques** sous chaque message (ou seulement ceux avec image / lien, nom `{pseudo}` / `{n}`), un **rôle vocal** porté tant qu'un membre est en vocal (global ou par salon, rattrapé au démarrage) et le **remerciement des boosters** (message `{membre}` `{serveur}` `{boosts}`, rôle facultatif retiré à la fin du boost). La présence du bot se règle avec `PRESENCE_STATUSES` et `PRESENCE_INTERVAL_MINUTES`.
+
 **Sécurité renforcée** — l'AntiRaid surveille aussi les **expulsions massives** (seuil « Expulsions », désactivé par défaut, 5 en préréglage Strict), faites à la main ou via le bot. `/backup restore` remet les rôles recréés dans l'ordre et peut, sur option, rétablir les permissions des salons existants. `/tickets` peut archiver les **pièces jointes** avec les transcripts (8 Mo par fichier, 24 Mo au total).
 
 ---
@@ -241,7 +243,7 @@ Activables un par un pour le serveur avec **`/alertes config`** (Gérer le serve
 
 **Économie** (désactivée par défaut) — une monnaie virtuelle propre au serveur, **sans valeur réelle**. Avec **`/eco`**, les membres consultent leur `solde`, réclament une récompense `quotidien` (bonus de série) et `hebdo`, utilisent `travail`, se paient entre eux avec `payer` (taxe facultative, confirmation au-delà d'un seuil), achètent des objets ou des rôles dans la `boutique` (stock facultatif, protection contre le double achat, remboursement si le rôle ne peut pas être donné), consultent `inventaire`, `classement` et `historique`, et jouent à `pile-ou-face` ou à la `machine-a-sous` (mise plafonnée, délai entre deux parties, espérance négative réglable). Les soldes ne deviennent jamais négatifs. Le tableau de bord **`/economie`** (Gérer le serveur) règle la monnaie, les gains, la taxe, les plafonds, les jeux et la boutique (25 articles), permet de donner, retirer, définir ou réinitialiser des soldes et affiche des statistiques ; tout est journalisé (logs Serveur).
 
-> ⚠️ **Jeux d'argent** : tant que l'économie est désactivée (par défaut), pile ou face et machine à sous sont inaccessibles. Une fois l'économie activée, ces deux jeux sont **actifs** : sur un serveur qui accueille des mineurs, désactivez-les dans `/economie` › Jeux.
+> ⚠️ **Jeux d'argent** : pile ou face et machine à sous (espérance négative) sont **désactivés par défaut**, même une fois l'économie activée : on les ouvre un par un dans `/economie` › Jeux. Sur un serveur qui accueille des mineurs, laissez-les fermés.
 
 **Mini-jeux** — **`/jeu morpion|puissance4 [adversaire]`** : défiez un membre (il a 60 s pour accepter) ou le bot (morpion imbattable ; au puissance 4, il gagne quand il peut, bloque vos victoires et vise le centre). **`/jeu pendu [solo|salon]`** (plus de 400 mots, lettres choisies dans des menus, 6 erreurs), **`/jeu quiz [theme] [manches]`** (140 questions en 5 thèmes, 15 s par question, le plus rapide marque) et **`/jeu devine`** (nombre de 1 à 100). Une partie à la fois par joueur (par salon pour le quiz et le pendu en mode salon), arrêtée après 10 min d'inactivité ; scores conservés et **`/jeu classement [jeu]`**.
 
@@ -406,7 +408,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 </details>
 
 <details>
-<summary><b>⚙️ Configuration</b> (7) 🔒</summary>
+<summary><b>⚙️ Configuration</b> (9) 🔒</summary>
 
 | Commande | Description |
 | --- | --- |
@@ -415,6 +417,8 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/diagnostics` | Analyse la configuration et signale les permissions manquantes. |
 | `/backup` | Sauvegarde, restauration (ordre des rôles, permissions sur option) et sauvegarde automatique de la structure du serveur. |
 | `/compteurs` | Salons de statistiques (membres, bots, boosts…) mis à jour automatiquement. |
+| `/flux` | Flux RSS / Atom / YouTube publiés dans un salon : `ajouter`, `retirer`, `liste`, `tester`. |
+| `/automatisations` | Tableau de bord : publication automatique, fils automatiques, rôle vocal, remerciement des boosters. |
 | `/health` | État technique du bot : latence, base de données, services. |
 | `/projet config` | Réglages du module projets. |
 
@@ -457,6 +461,9 @@ npm start                # ou npm run dev pour relancer à chaque modification
 | `DATABASE_PATH` | ➖ | Fichier SQLite (défaut : `./data/gadget.sqlite`). |
 | `LOG_LEVEL` | ➖ | `error`, `warn`, `info` ou `debug` (défaut : `info`). |
 | `NODE_ENV` | ➖ | `development` ou `production`. |
+| `PRESENCE_STATUSES` | ➖ | Statuts tournants du bot, séparés par une barre verticale et préfixés de `joue:`, `regarde:` ou `écoute:` (variables `{serveurs}`, `{membres}` ; voir `.env.example`). |
+| `PRESENCE_INTERVAL_MINUTES` | ➖ | Intervalle de rotation des statuts (1 minute au minimum). |
+| `FEEDS_NETWORK` | ➖ | `off` coupe toute requête sortante des flux RSS. |
 
 > 🔐 Ne committez jamais le fichier `.env` : il est déjà ignoré par `.gitignore`.
 
@@ -479,15 +486,13 @@ Le bot demande 10 intents (`src/config/intents.js`). Dans le Developer Portal, o
 
 ### Inviter le bot
 
-Une fois le bot démarré, la commande `/invite` donne un lien d'invitation qui demande ces 23 permissions (celles que `/diagnostics` contrôle) :
-Gérer le serveur · Voir les salons · Envoyer des messages · Envoyer des messages dans les fils · Intégrer des liens · Joindre des fichiers · Voir l'historique des messages · Ajouter des réactions · Utiliser des emojis externes · Gérer les messages · Gérer les salons · Gérer les rôles · **Gérer les pseudos** (AFK, AutoMod des pseudos, `/pseudo`) · Gérer les fils · Expulser des membres · Bannir des membres · Exclure temporairement des membres · Rendre muet · Mettre en sourdine · Déplacer des membres · Voir les logs du serveur · Créer des sondages · Se connecter.
+Une fois le bot démarré, la commande `/invite` donne un lien d'invitation qui demande ces 26 permissions (celles que `/diagnostics` contrôle) :
+Gérer le serveur · Voir les salons · Envoyer des messages · Envoyer des messages dans les fils · Intégrer des liens · Joindre des fichiers · Voir l'historique des messages · Ajouter des réactions · Utiliser des emojis externes · Gérer les messages · Gérer les salons · Gérer les rôles · **Gérer les pseudos** (AFK, AutoMod des pseudos, `/pseudo`) · Gérer les fils · Expulser des membres · Bannir des membres · Exclure temporairement des membres · Rendre muet · Mettre en sourdine · Déplacer des membres · Voir les logs du serveur · Créer des sondages · Se connecter · Gérer les expressions (`/emoji ajouter|supprimer|renommer`) · Créer des fils publics (fils automatiques) · Créer des fils privés (entretiens de candidature sans tickets).
 
-Le lien ne demande **pas** ces permissions, à donner à la main au rôle du bot si vous utilisez la fonctionnalité :
+Le lien ne demande **pas** cette permission sensible, à donner à la main au rôle du bot seulement si vous utilisez la fonctionnalité :
 
 | Permission | Nécessaire pour |
 | --- | --- |
-| Gérer les expressions | `/emoji ajouter`, `supprimer`, `renommer`. |
-| Créer des fils privés | Entretiens de candidature en fil privé (quand les tickets ne sont pas configurés). |
 | Mentionner @everyone, @here et tous les rôles | Annonces programmées qui mentionnent @everyone, rôle non mentionnable notifié par les signalements ou les candidatures. |
 
 Placez ensuite le rôle du bot **au-dessus** des rôles qu'il doit gérer : Discord interdit d'agir sur un rôle plus haut que le sien (ni sur le pseudo d'un membre placé au-dessus).
@@ -532,7 +537,7 @@ Chaque interaction passe par une couche de sûreté commune, avant même d'attei
 - **Résistance aux pannes** : bans temporaires, giveaways, verrous à durée, rôles temporaires et annonces programmées repris après un redémarrage, reconnexion automatique, arrêt propre et borné.
 
 ```bash
-npm test        # plus de 1 000 tests, dont la validation des 96 commandes (menus contextuels compris) contre les limites de Discord
+npm test        # plus de 1 000 tests, dont la validation des 98 commandes (menus contextuels compris) contre les limites de Discord
 npm run test:e2e  # tests de bout en bout : le vrai bot sur le vrai discord.js, sans réseau
 npm run test:chaos  # version longue des tests de chaos : valeurs hostiles, clics simultanés, marches aléatoires (CHAOS_SEED pour changer de graine)
 npm run check   # healthcheck : base, commandes, événements, sans connexion
@@ -576,7 +581,7 @@ Le contrat complet d'une commande est décrit dans [ARCHITECTURE.md](./ARCHITECT
 | « Cette commande n'existe plus » | Les commandes enregistrées sont anciennes : relancez `npm run deploy`. |
 | « Il me manque des permissions » | Donnez la permission indiquée au bot, ou montez son rôle, puis lancez `/diagnostics`. |
 | Membres ou messages non détectés | Activez les intents privilégiés dans le Developer Portal. |
-| `/emoji ajouter` : « Il me manque la permission Gérer les expressions » | Cette permission n'est pas dans le lien de `/invite` : donnez-la au rôle du bot. |
+| `/emoji ajouter` : « Il me manque la permission Gérer les expressions » | Bot invité avant la 0.6.0 : donnez cette permission à son rôle, ou réinvitez-le avec le lien de `/invite`. |
 | Erreur avec un code de référence | Cherchez ce code dans les logs du bot pour voir l'erreur complète. |
 
 ---

@@ -35,15 +35,21 @@ Ce projet suit un versionnage sémantique.
 - **Logs** : 8 nouveaux événements (notes des tickets, signalements, candidatures, `/snipe`, inactifs, levées automatiques, pseudos renommés, économie).
 - **Tests de chaos** (`npm run test:chaos`, `CHAOS_SEED`) : valeurs hostiles, double clics, marches aléatoires, bot sans droits ;
   audit UX de bout en bout (chaque sous-commande répond par une embed, en admin comme en membre).
+- **Automatisations** : `/flux` (flux RSS / Atom / YouTube : première lecture sans historique, déduplication, ETag, désactivation
+  après 10 erreurs, requêtes sortantes sans adresse privée même après redirection, `FEEDS_NETWORK=off`) et tableau de bord
+  `/automatisations` (publication automatique des salons d'annonces avec file d'attente, fils automatiques, rôle vocal,
+  remerciement des boosters) ; présence du bot réglable (`PRESENCE_STATUSES`, `PRESENCE_INTERVAL_MINUTES`).
 - Migrations #13 (signalements), #14 (invitations), #15 (starboard, sticky), #16 (rôles temporaires, annonces, anniversaires),
   #17 (départs des niveaux), #18 (économie), #19 (statistiques), #20 (outils des membres), #21 (strikes datés, levées automatiques),
-  #23 (candidatures, notes des tickets, conditions de giveaway), #24 (scores des mini-jeux), #25 (réessais des rôles temporaires, garde des anniversaires).
+  #22 (flux RSS, compteurs des fils automatiques), #23 (candidatures, notes des tickets, conditions de giveaway), #24 (scores des mini-jeux), #25 (réessais des rôles temporaires, garde des anniversaires).
 
 ### Changed
 - **`/channel` et `/emoji` passent en sous-commandes** : l'affichage devient `/channel info` et `/emoji info` (relancer `npm run deploy`).
 - 41 descriptions d'options clarifiées ; raccourcis (boutons du projet après modification, « Prochains anniversaires »,
   « Classement » des invitations, « Ouvrir l'AntiRaid » depuis `/whitelist`) ; `/help` présente les menus contextuels et la catégorie Économie.
 - Intents `GuildInvites` (suivi des invitations) et `GuildMessageReactions` (starboard) ajoutés.
+- Économie : pile ou face et machine à sous désactivés par défaut, même une fois l'économie activée.
+- `/invite` et `/diagnostics` : Gérer les expressions, Créer des fils publics et Créer des fils privés ajoutées (26 permissions).
 
 ### Security
 - La permission déclarée par chaque commande est revérifiée par le bot : un rôle autorisé dans Paramètres du serveur › Intégrations
@@ -63,7 +69,8 @@ Ce projet suit un versionnage sémantique.
 - **Arrivées** : mute et rôles d'arrivée réappliqués sans attendre le suivi des invitations (raids) ; une lecture des invitations par lot.
 - **Niveaux et invitations** : départs survenus hors ligne rattrapés au démarrage ; un gain d'XP différé ne remet plus un membre parti au classement.
 - **AntiRaid** : le lockdown automatique attend un verrouillage ou une levée en cours ; un échec propose « Réessayer le lockdown ».
-- **Double clics** : boutons de levée (démute, timeout, débannissement), salon créateur de `/tempvoice`, lockdowns globaux simultanés.
+- **Double clics** : boutons de levée (démute, timeout, débannissement), salon créateur de `/tempvoice`, lockdowns globaux simultanés,
+  interrupteurs de `/economie` (une seule ligne de journal).
 - **Arrêt du bot** : un seul passage parallèle borné à 6 s, puis déconnexion et fermeture de la base ; budget de temps par étape du scheduler.
 - **Divers** : compteurs bornés face aux limites de renommage de Discord ; compteurs et vocaux temporaires exclus des sauvegardes ;
   tickets archivés sans téléchargement à l'arrêt ; texte fait d'espaces refusé proprement dans les embeds ; `/diagnostics` signale
