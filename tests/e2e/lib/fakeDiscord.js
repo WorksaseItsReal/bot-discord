@@ -59,6 +59,8 @@ class FakeDiscord {
     this.massMentions = [];
     /** Rôles qui ne doivent jamais être notifiés, même via une liste explicite (saisies hostiles). */
     this.forbiddenPings = new Set();
+    /** Libellés de scénario dont les mentions de rôle sont VOULUES (ex. /annonce avec un rôle choisi). */
+    this.intendedPingLabels = [];
     /** Routes non simulées (réponse par défaut) : à compléter dans le harnais. */
     this.unmocked = [];
     /** Erreurs injectées : { match(call) → bool, status, code, message, times } */
@@ -136,7 +138,8 @@ class FakeDiscord {
       const found = L.findSuspiciousText(call.body);
       if (found.length) this.suspicious.push({ method, route, problems: found, label: call.label });
       if (method === 'POST' || method === 'PATCH') {
-        const pings = L.findMassMentions(call.body, this.forbiddenPings);
+        const intended = this.intendedPingLabels.some((re) => re.test(call.label ?? ''));
+        const pings = intended ? [] : L.findMassMentions(call.body, this.forbiddenPings);
         if (pings.length) this.massMentions.push({ method, route, problems: pings, label: call.label });
       }
     }

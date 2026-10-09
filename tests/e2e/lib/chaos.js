@@ -417,6 +417,9 @@ async function fuzzModals(h, rootRec, { rng, failures, seed, perField = 4, as = 
 /** Rôles injectés dans les chaînes hostiles : ne doivent jamais être notifiés. */
 function forbidHostilePings(h) {
   for (const id of [IDS.roles.admin, IDS.roles.mod, IDS.guild]) h.fake.forbiddenPings.add(id);
+  // /annonce : mentionner le rôle choisi par l'administrateur est le but de la commande
+  // (@everyone exige en plus la permission « Mentionner @everyone » de l'auteur, vérifiée par le bot).
+  h.fake.intendedPingLabels.push(/cmd:annonce:/, /\/annonce /, /planificateur/);
 }
 
 /* ---------------------------------------------------------------------- */
