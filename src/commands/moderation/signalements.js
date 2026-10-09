@@ -15,7 +15,7 @@ const { discordTimestamp } = require('../../utils/time');
 const { requirePermission, needPermission } = require('../../services/ModerationService');
 const { REPORT_COOLDOWN_MS, REPORT_TIMEOUT_MS, MAX_REPORT_REASON, REPORT_ICON, STATUS, TEXT_TYPES, messageLink, normalizeReportReason } = require('../../services/ReportService');
 const { snowflake } = require('../../utils/buttonGuard');
-const { assertCanModerate } = require('../../utils/permissions');
+const { canActOnByHierarchy } = require('../../utils/permissions');
 const { applyEscalation } = require('./warn');
 const { UserError } = require('../../core/errors');
 
@@ -176,6 +176,25 @@ async function targetMember(guild, report) {
   return member;
 }
 
+/** Le membre peut-il voir et gérer les messages de ce salon (surcharges comprises) ? */
+function canDeleteIn(channel, member) {
+  try {
+    return channel?.permissionsFor?.(member)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageMessages]) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Hiérarchie modérateur ↔ auteur pour supprimer un message (propriétaire : toujours). */
+function assertCanDeleteMessageOf(moderator, author) {
+  const ownerId = moderator.guild?.ownerId;
+  const allowed = canActOnByHierarchy(
+    { isOwner: moderator.id === ownerId, highestRolePosition: moderator.roles?.highest?.position ?? 0 },
+    { isOwner: author.id === ownerId, highestRolePosition: author.roles?.highest?.position ?? 0 },
+  );
+  if (!allowed) throw new UserError('Vous ne pouvez pas supprimer le message de ce membre : son rôle est supérieur ou égal au vôtre.');
+}
+
 const sanctionReason = (report) => `Message signalé (signalement #${report.id})`;
 
 module.exports = {
@@ -293,6 +312,11 @@ module.exports = {
       const guild = interaction.guild;
       const channel = guild.channels.cache.get(report.channel_id);
       if (!channel?.messages) throw new UserError('Le salon de ce message n\'existe plus.');
+      // memberPermissions = permissions dans le salon de la CARTE : on exige aussi le droit
+      // dans le salon du message (sinon « Gérer les messages » dans #staff suffirait partout).
+      if (!canDeleteIn(channel, interaction.member)) {
+        throw new UserError(`Il vous faut la permission **Gérer les messages** dans <#${channel.id}> pour supprimer ce message.`);
+      }
       const mine = channel.permissionsFor?.(guild.members.me);
       if (mine && !mine.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageMessages])) {
         throw new UserError(`Il me manque la permission **Gérer les messages** dans <#${channel.id}>.`);
@@ -303,7 +327,9 @@ module.exports = {
         moderator: interaction.user,
         run: async () => {
           const member = await targetMember(guild, report);
-          if (member) assertCanModerate(interaction.member, member, guild.members.me, { action: 'supprimer le message de' });
+          // Suppression d'un message : seule la hiérarchie modérateur ↔ auteur compte
+          // (le bot peut supprimer le message d'un membre placé au-dessus de lui).
+          if (member) assertCanDeleteMessageOf(interaction.member, member);
           client.services.logging.suppressMessage(report.message_id);
           try {
             await channel.messages.delete(report.message_id);
