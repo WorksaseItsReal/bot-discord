@@ -83,6 +83,17 @@ function openLine(guild, r) {
   return `${REPORT_ICON} \`#${r.id}\` · <@${r.target_id}> · <#${r.channel_id}> · ${discordTimestamp(r.created_at, 'R')} · [message](${messageLink(guild.id, r.channel_id, r.message_id)})${cardLink}`;
 }
 
+/**
+ * Le rôle mentionné sera-t-il vraiment notifié ? Un rôle non mentionnable ne l'est que si
+ * j'ai « Mentionner @everyone, @here et tous les rôles ».
+ */
+function pingWarning(guild, roleId) {
+  const role = roleId ? guild.roles?.cache?.get(roleId) : null;
+  if (!role || role.mentionable) return null;
+  if (guild.members?.me?.permissions?.has?.(PermissionFlagsBits.MentionEveryone)) return null;
+  return `${ICONS.warning} Le rôle <@&${role.id}> n'est pas **mentionnable** et je n'ai pas la permission **Mentionner @everyone, @here et tous les rôles** : ses membres ne seront pas notifiés. Rendez le rôle mentionnable ou accordez-moi cette permission.`;
+}
+
 function homeView(client, guild, notice) {
   const { reports } = client.services;
   const settings = reports.settings(guild.id);
@@ -115,6 +126,7 @@ function homeView(client, guild, notice) {
           on ? '🟢 Les membres peuvent **signaler** un message : clic droit → Applications → **Signaler le message**.' : '🔴 Les signalements sont **désactivés**.',
           on && dest.status !== 'ok' ? `${ICONS.warning} Aucun salon utilisable : les signalements sont refusés tant qu'un salon n'est pas configuré.` : null,
           dest.status === 'ok' && isPublic(guild, dest.channelId) ? `${ICONS.warning} **Ce salon est visible par @everyone** : les cartes (auteur, signaleur, contenu) doivent rester réservées au staff.` : null,
+          pingWarning(guild, role),
           '',
           `**Signalements ouverts** (${counts.open})`,
           open.length ? open.map((r) => openLine(guild, r)).join('\n') : '*Aucun signalement en attente.* ✨',

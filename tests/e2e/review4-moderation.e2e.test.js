@@ -14,6 +14,7 @@ const { nextId } = require('./lib/ids');
 const REPORT = 'Signaler le message';
 const botMessages = (h, mark, pred = () => true) => h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m && m.author.id === h.client.user.id && pred(m));
 const allText = (h, rec) => h.messagesOf(rec).flatMap((m) => m.embeds ?? []).flatMap((e) => [e.title, e.description, ...(e.fields ?? []).flatMap((f) => [f.name, f.value])]).filter(Boolean).join('\n');
+const embedTextOf = (m) => (m?.embeds ?? []).flatMap((e) => [e.title, e.description, ...(e.fields ?? []).flatMap((f) => [f.name, f.value])]).filter(Boolean).join('\n');
 const authoredBy = (h, as, content, channelId = IDS.channels.general) => h.fake.buildMessage({ channelId, body: { content }, author: h.fake.users.get(IDS.users[as] ?? as) });
 
 /** Signale `message` (menu + formulaire) et renvoie la carte publiée dans #staff. */
@@ -159,6 +160,22 @@ test('salon des signalements supprimé : débranché, repli sur les logs Modéra
     const menu2 = await h.contextMenu(REPORT, authoredBy(h, 'target', 'Second'), { as: 'admin' });
     await h.submitModal(menu2, { raison: 'y' });
     assert.ok(botMessages(h, mark2, (m) => m.channel_id === IDS.channels.logs && /Signalement #2/.test(m.embeds?.[0]?.title ?? '')).length);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('/signalements : avertissement si le rôle mentionné ne sera pas notifié', async () => {
+  const h = await createHarness({ botAdministrator: false }); // sans « Mentionner tous les rôles »
+  h.configureAll();
+  h.configure({ reports: { channelId: IDS.channels.staff } });
+  try {
+    const dash = await h.slash('signalements');
+    await h.click(h.message(dash.original), 'cmd:signalements:role', { values: [IDS.roles.mod] }); // non mentionnable
+    assert.match(allText(h, dash) + embedTextOf(h.message(dash.original)), /pas \*\*mentionnable\*\*/);
+    await h.click(h.message(dash.original), 'cmd:signalements:role', { values: [IDS.roles.notif] }); // mentionnable
+    assert.doesNotMatch(embedTextOf(h.message(dash.original)), /mentionnable/);
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
