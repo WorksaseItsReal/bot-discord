@@ -67,6 +67,16 @@ test('/jeu : chaque sous-commande lancée puis explorée (boutons, menus, formul
       for (const k of stats.keys) keys.add(k);
       endAll(h);
     }
+    // « Abandonner » aussi cliqué directement : l'exploration de /jeu devine peut trouver le nombre
+    // (tiré au hasard) avant d'atteindre le bouton, ce qui rendait ce test aléatoire.
+    const quit = await h.slash('jeu', sub('devine'));
+    const quitCard = cardOf(h, quit);
+    const quitButton = flat(quitCard).find((c) => c.custom_id?.startsWith('cmd:jeu:abandon:'));
+    assert.ok(quitButton, 'bouton « Abandonner » absent de /jeu devine');
+    const quitted = await h.click(h.message(quitCard.id), quitButton.custom_id);
+    assert.ok(!h.isError(quitted), `abandon refusé : ${h.replyText(quitted)}`);
+    keys.add('cmd:jeu:abandon');
+    endAll(h);
     for (const action of ['jouer', 'colonne', 'lettre', 'reponse', 'proposer', 'abandon', 'accepter', 'refuser', 'vue', 'page']) {
       assert.ok(keys.has(`cmd:jeu:${action}`), `${action} jamais utilisé`);
     }
