@@ -37,6 +37,7 @@ const { StickyRepository } = require('../database/repositories/StickyRepository'
 const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
 const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
+const { EconomyRepository } = require('../database/repositories/EconomyRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -64,6 +65,7 @@ const { AutoResponderService } = require('../services/AutoResponderService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
+const { EconomyService } = require('../services/EconomyService');
 
 const logger = createLogger('client');
 
@@ -126,6 +128,7 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleRepository(db),
       announcements: new ScheduledAnnouncementRepository(db),
       birthdays: new BirthdayRepository(db),
+      economy: new EconomyRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -165,6 +168,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
       birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
+      // Économie : synchrone (transactions SQLite), aucun minuteur à arrêter.
+      economy: new EconomyService({ economy: this.repositories.economy, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
