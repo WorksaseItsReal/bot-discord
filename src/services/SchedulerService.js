@@ -25,7 +25,8 @@ const PERMANENT_USER_CODES = new Set([10013, 50007, 50278]);
  * Boucle périodique robuste qui réconcilie l'état persistant avec la réalité :
  *  - expiration des bans temporaires et des mutes (levée automatique) ;
  *  - déclenchement des rappels arrivés à échéance ;
- *  - fin des giveaways, sauvegardes automatiques, purge des serveurs quittés.
+ *  - fin des giveaways, sauvegardes automatiques, purge des serveurs quittés ;
+ *  - rôles temporaires, annonces programmées et anniversaires (services dédiés).
  * Tout survit au redémarrage car l'état vit en base. Chaque étape est isolée :
  * une erreur dans l'une n'empêche pas les suivantes.
  */
@@ -87,6 +88,9 @@ class SchedulerService {
       ['giveaways', () => this.#processDueGiveaways()],
       ['autobackup', () => this.#processAutobackup()],
       ['purge', () => this.#processLeftGuildPurge()],
+      ['temproles', () => this.client.services?.tempRoles?.processDue({ isStopping: () => this.stopping })],
+      ['announcements', () => this.client.services?.announcements?.processDue({ isStopping: () => this.stopping })],
+      ['birthdays', () => this.client.services?.birthdays?.processDue({ isStopping: () => this.stopping })],
     ];
     for (const [name, run] of stages) {
       if (this.stopping) return;

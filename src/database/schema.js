@@ -488,6 +488,74 @@ const migrations = [
     `,
   },
   {
+    id: 16,
+    name: 'scheduled_features',
+    up: `
+      -- Rôles temporaires (/role temporaire) : retirés automatiquement à l'échéance par le
+      -- scheduler, réappliqués si le membre revient avant. Une seule ligne active par
+      -- (serveur, membre, rôle) : une nouvelle attribution remplace l'échéance.
+      CREATE TABLE IF NOT EXISTS temp_roles (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id     TEXT NOT NULL,
+        user_id      TEXT NOT NULL,
+        role_id      TEXT NOT NULL,
+        moderator_id TEXT,
+        reason       TEXT,
+        expires_at   INTEGER NOT NULL,
+        created_at   INTEGER NOT NULL,
+        active       INTEGER NOT NULL DEFAULT 1,
+        ended_at     INTEGER,
+        end_reason   TEXT                           -- expired | removed | left | role_deleted | guild_left | failed
+      );
+      CREATE INDEX IF NOT EXISTS idx_temp_roles_due ON temp_roles (active, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_temp_roles_member ON temp_roles (guild_id, user_id, active);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_temp_roles_active ON temp_roles (guild_id, user_id, role_id) WHERE active = 1;
+
+      -- Annonces programmées (/annonce) : brouillon (aperçu) → programmée → terminée ou désactivée.
+      CREATE TABLE IF NOT EXISTS scheduled_announcements (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id      TEXT NOT NULL,
+        channel_id    TEXT NOT NULL,
+        author_id     TEXT NOT NULL,
+        title         TEXT,
+        message       TEXT,
+        color         INTEGER,
+        image         TEXT,
+        role_id       TEXT,                         -- rôle mentionné (identifiant du serveur = @everyone)
+        repeat        TEXT NOT NULL DEFAULT 'none', -- none | daily | weekly | monthly
+        time_zone     TEXT NOT NULL DEFAULT 'Europe/Paris',
+        anchor_at     INTEGER NOT NULL,             -- première échéance (base des répétitions)
+        next_run      INTEGER NOT NULL,
+        runs          INTEGER NOT NULL DEFAULT 0,   -- échéances écoulées depuis anchor_at
+        status        TEXT NOT NULL DEFAULT 'draft',-- draft | scheduled | disabled | done
+        sent_count    INTEGER NOT NULL DEFAULT 0,
+        last_sent_at  INTEGER,
+        last_error    TEXT,
+        created_at    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scheduled_announcements_due ON scheduled_announcements (status, next_run);
+      CREATE INDEX IF NOT EXISTS idx_scheduled_announcements_guild ON scheduled_announcements (guild_id, status);
+
+      -- Anniversaires (/anniversaire) : l'année n'est affichée qu'avec l'accord du membre.
+      CREATE TABLE IF NOT EXISTS birthdays (
+        guild_id       TEXT NOT NULL,
+        user_id        TEXT NOT NULL,
+        day            INTEGER NOT NULL,
+        month          INTEGER NOT NULL,
+        year           INTEGER,
+        show_age       INTEGER NOT NULL DEFAULT 0,
+        last_celebrated TEXT,                       -- date locale (AAAA-MM-JJ) de la dernière fête
+        role_id        TEXT,                        -- rôle « anniversaire » donné…
+        role_until     INTEGER,                     -- …et retiré à cette date
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_birthdays_date ON birthdays (guild_id, month, day);
+      CREATE INDEX IF NOT EXISTS idx_birthdays_role ON birthdays (role_until);
+    `,
+  },
+  {
     id: 17,
     name: 'levels_left_at',
     up: `

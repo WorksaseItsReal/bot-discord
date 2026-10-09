@@ -34,6 +34,9 @@ const { InviteJoinRepository } = require('../database/repositories/InviteJoinRep
 const { ReportRepository } = require('../database/repositories/ReportRepository');
 const { StarboardRepository } = require('../database/repositories/StarboardRepository');
 const { StickyRepository } = require('../database/repositories/StickyRepository');
+const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
+const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
+const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -58,6 +61,9 @@ const { ReportService } = require('../services/ReportService');
 const { StarboardService } = require('../services/StarboardService');
 const { StickyService } = require('../services/StickyService');
 const { AutoResponderService } = require('../services/AutoResponderService');
+const { TempRoleService } = require('../services/TempRoleService');
+const { AnnouncementService } = require('../services/AnnouncementService');
+const { BirthdayService } = require('../services/BirthdayService');
 
 const logger = createLogger('client');
 
@@ -117,6 +123,9 @@ class GadgetClient extends Client {
       reports: new ReportRepository(db),
       starboard: new StarboardRepository(db),
       sticky: new StickyRepository(db),
+      tempRoles: new TempRoleRepository(db),
+      announcements: new ScheduledAnnouncementRepository(db),
+      birthdays: new BirthdayRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -152,6 +161,10 @@ class GadgetClient extends Client {
       starboard: new StarboardService({ client: this, starboard: this.repositories.starboard, config: configService }),
       sticky: new StickyService({ client: this, sticky: this.repositories.sticky }),
       autoResponses: new AutoResponderService({ client: this, config: configService }),
+      // Tâches planifiées : chacune est une étape isolée du SchedulerService.
+      tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
+      announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
+      birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
