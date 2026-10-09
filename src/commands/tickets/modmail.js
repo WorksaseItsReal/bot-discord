@@ -22,7 +22,7 @@ module.exports = {
         .addChannelOption((o) => o.setName('salon_logs').setDescription('Salon d\'archive des transcripts').addChannelTypes(ChannelType.GuildText)))
     .addSubcommand((s) =>
       s.setName('reply').setDescription('Répond à la conversation ModMail actuelle.')
-        .addStringOption((o) => o.setName('message').setDescription('Message').setRequired(true).setMaxLength(2000)))
+        .addStringOption((o) => o.setName('message').setDescription('Réponse envoyée en MP au membre').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) => s.setName('close').setDescription('Ferme la conversation ModMail actuelle.')),
 
   async execute(interaction, client) {

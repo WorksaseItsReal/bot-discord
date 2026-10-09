@@ -39,6 +39,7 @@ const {
   normalizeUrl,
   projectSection,
   buildProjectEmbed,
+  buildProjectComponents,
   buildProjectListPages,
   buildProjectStatsEmbed,
   buildProjectSettingsEmbed,
@@ -84,7 +85,7 @@ const data = new SlashCommandBuilder()
       .setName('progression')
       .setDescription('Définit la progression (projets sans tâches).')
       .addStringOption(projectOption)
-      .addIntegerOption((o) => o.setName('pourcentage').setDescription('0 à 100').setRequired(true).setMinValue(0).setMaxValue(100)),
+      .addIntegerOption((o) => o.setName('pourcentage').setDescription('Avancement du projet, de 0 à 100 %').setRequired(true).setMinValue(0).setMaxValue(100)),
   )
   .addSubcommand((s) =>
     s
@@ -219,6 +220,8 @@ function updatedReply(service, project, guild, message) {
   const { tasks, members } = service.details(project);
   return {
     embeds: [statusCard.ok(message), buildProjectEmbed(project, { tasks, members, guild })],
+    // Mêmes boutons que la fiche (modifier, publier, liens) : l'action suivante est à un clic.
+    components: buildProjectComponents(project, { hasTasks: tasks.length > 0 }),
     ephemeral: true,
   };
 }

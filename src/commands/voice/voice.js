@@ -98,20 +98,20 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.MoveMembers)
     .addSubcommand((s) =>
       s.setName('move').setDescription('Déplace un membre vers un salon vocal.')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre connecté en vocal').setRequired(true))
         .addChannelOption((o) => o.setName('salon').setDescription('Salon vocal').addChannelTypes(ChannelType.GuildVoice).setRequired(true)))
     .addSubcommand((s) =>
       s.setName('kick').setDescription('Déconnecte un membre du vocal.')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre connecté en vocal').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('mute').setDescription('Coupe le micro d\'un membre en vocal.')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre connecté en vocal').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('unmute').setDescription('Réactive le micro d\'un membre.')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre connecté en vocal').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('disconnect').setDescription('Déconnecte un membre (alias de kick).')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre connecté en vocal').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('cleanup').setDescription('Déconnecte tous les membres d\'un salon vocal.')
         .addChannelOption((o) => o.setName('salon').setDescription('Salon vocal').addChannelTypes(ChannelType.GuildVoice).setRequired(true))),

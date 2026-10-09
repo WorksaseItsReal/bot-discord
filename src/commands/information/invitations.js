@@ -183,6 +183,7 @@ module.exports = {
         embeds: [status.ok(days > 0
           ? `Une arrivée dont le compte a moins de **${plural(days, 'jour')}** comptera comme une invitation **fausse**.`
           : 'Plus aucune invitation ne sera comptée comme fausse.', 'Réglage enregistré', { footer: 'S\'applique aux prochaines arrivées' })],
+        components: buttonRows(actionButton({ command: 'invitations', action: 'page', args: ['0', interaction.user.id], label: 'Classement', emoji: '🏆' })),
         ephemeral: true,
       });
       return;

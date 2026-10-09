@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { card, wide, ICONS, status } = require('../../utils/ui');
+const { card, wide, ICONS, status, actionButton, buttonRows } = require('../../utils/ui');
 const { fitList } = require('../../services/LoggingService');
 const { UserError } = require('../../core/errors');
 
@@ -29,6 +29,12 @@ function whitelistCard(wl, notice) {
  * Whitelist de sécurité : les utilisateurs/rôles whitelistés échappent aux
  * sanctions automatiques de l'AntiRaid.
  */
+/** Raccourci vers le tableau de bord AntiRaid (réservé aux administrateurs, comme /antiraid). */
+function antiraidShortcut(interaction) {
+  if (!interaction.memberPermissions?.has?.(PermissionFlagsBits.Administrator)) return [];
+  return buttonRows(actionButton({ command: 'antiraid', action: 'go', args: ['whitelist'], label: 'Ouvrir l\'AntiRaid', emoji: '🚨' }));
+}
+
 module.exports = {
   category: 'security',
   data: new SlashCommandBuilder()
@@ -38,11 +44,11 @@ module.exports = {
     .addSubcommand((s) =>
       s.setName('add').setDescription('Ajoute un utilisateur ou un rôle.')
         .addUserOption((o) => o.setName('utilisateur').setDescription('Utilisateur'))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle')))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle de confiance (ignoré par l\'AntiRaid)')))
     .addSubcommand((s) =>
       s.setName('remove').setDescription('Retire un utilisateur ou un rôle.')
         .addUserOption((o) => o.setName('utilisateur').setDescription('Utilisateur'))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle')))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle de confiance (ignoré par l\'AntiRaid)')))
     .addSubcommand((s) => s.setName('list').setDescription('Affiche la whitelist.')),
 
   async execute(interaction, client) {
@@ -52,7 +58,7 @@ module.exports = {
     const wl = config.get(guildId).whitelist;
 
     if (sub === 'list') {
-      return interaction.reply({ embeds: [whitelistCard(wl)], ephemeral: true });
+      return interaction.reply({ embeds: [whitelistCard(wl)], components: antiraidShortcut(interaction), ephemeral: true });
     }
 
     const user = interaction.options.getUser('utilisateur');
@@ -71,6 +77,6 @@ module.exports = {
 
     const targets = [user, role].filter(Boolean).map(String).join(' et ');
     const notice = add ? `${targets} ${user && role ? 'ajoutés' : 'ajouté'} à la whitelist.` : `${targets} ${user && role ? 'retirés' : 'retiré'} de la whitelist.`;
-    return interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], ephemeral: true });
+    return interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], components: antiraidShortcut(interaction), ephemeral: true });
   },
 };

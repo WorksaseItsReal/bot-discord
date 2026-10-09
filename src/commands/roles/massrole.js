@@ -73,9 +73,9 @@ module.exports = {
     .setName('massrole')
     .setDescription('Ajoute ou retire un rôle en masse.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption((o) => o.setName('action').setDescription('Action').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }))
+    .addStringOption((o) => o.setName('action').setDescription('Ajouter ou retirer le rôle').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }))
     .addRoleOption((o) => o.setName('role').setDescription('Rôle cible').setRequired(true))
-    .addStringOption((o) => o.setName('cible').setDescription('Qui ?').addChoices({ name: 'tous', value: 'all' }, { name: 'humains', value: 'humans' }, { name: 'bots', value: 'bots' })),
+    .addStringOption((o) => o.setName('cible').setDescription('Membres concernés (tous, humains ou bots)').addChoices({ name: 'tous', value: 'all' }, { name: 'humains', value: 'humans' }, { name: 'bots', value: 'bots' })),
 
   async execute(interaction, client) {
     const action = interaction.options.getString('action');

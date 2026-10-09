@@ -39,7 +39,7 @@ module.exports = {
         .addStringOption((o) => o.setName('nom').setDescription('Nom du tag (lettres, chiffres, _ et -)').setRequired(true).setMaxLength(32))
         .addStringOption((o) => o.setName('contenu').setDescription('Contenu (variables: {user} {server} {membercount})').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) =>
-      s.setName('delete').setDescription('Supprime un tag.').addStringOption((o) => o.setName('nom').setDescription('Nom').setRequired(true).setAutocomplete(true)))
+      s.setName('delete').setDescription('Supprime un tag.').addStringOption((o) => o.setName('nom').setDescription('Nom de la commande personnalisée à supprimer').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les tags.')),
 
   async execute(interaction, client) {

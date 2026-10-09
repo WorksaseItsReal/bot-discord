@@ -163,6 +163,11 @@ function assertBirthdayRole(interaction, roleId) {
   return role;
 }
 
+/** Raccourci vers la liste des prochains anniversaires (navigation sur place). */
+function upcomingButton(ownerId) {
+  return buttonRows(actionButton({ command: 'anniversaire', action: 'page', args: ['0', ownerId], label: 'Prochains anniversaires', emoji: '🎂' }));
+}
+
 module.exports = {
   category: 'utility',
   cooldown: 3_000,
@@ -174,7 +179,7 @@ module.exports = {
     .addSubcommand((s) =>
       s.setName('definir').setDescription('Enregistre votre date d\'anniversaire.')
         .addIntegerOption((o) => o.setName('jour').setDescription('Jour (1 à 31)').setRequired(true).setMinValue(1).setMaxValue(31))
-        .addIntegerOption((o) => o.setName('mois').setDescription('Mois').setRequired(true)
+        .addIntegerOption((o) => o.setName('mois').setDescription('Mois de naissance (1 à 12)').setRequired(true)
           .addChoices(...MONTHS.map((name, i) => ({ name, value: i + 1 }))))
         .addIntegerOption((o) => o.setName('annee').setDescription('Année de naissance (facultative, jamais affichée sans votre accord)').setMinValue(1900).setMaxValue(2100))
         .addBooleanOption((o) => o.setName('afficher_age').setDescription('Montrer votre âge aux autres membres (défaut : non)')))
@@ -222,6 +227,7 @@ module.exports = {
             ],
           }),
         ],
+        components: upcomingButton(interaction.user.id),
         ephemeral: true,
       });
     }
@@ -230,7 +236,7 @@ module.exports = {
       const removed = repo.delete(guild.id, interaction.user.id);
       if (!removed) throw new UserError('Aucun anniversaire enregistré pour vous sur ce serveur.');
       await client.services.birthdays.dropRole(guild, removed);
-      return interaction.reply({ embeds: [card({ tone: 'neutral', section: 'utility', icon: ICONS.delete, title: 'Anniversaire supprimé', description: 'Votre date d\'anniversaire a été effacée de ce serveur.' })], ephemeral: true });
+      return interaction.reply({ embeds: [card({ tone: 'neutral', section: 'utility', icon: ICONS.delete, title: 'Anniversaire supprimé', description: 'Votre date d\'anniversaire a été effacée de ce serveur.' })], components: upcomingButton(interaction.user.id), ephemeral: true });
     }
 
     if (sub === 'liste') {

@@ -18,17 +18,17 @@ module.exports = {
     .setDescription('Système de suggestions.')
     .addSubcommand((s) =>
       s.setName('setup').setDescription('Définit le salon des suggestions.')
-        .addChannelOption((o) => o.setName('salon').setDescription('Salon').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addChannelOption((o) => o.setName('salon').setDescription('Salon où publier les suggestions').addChannelTypes(ChannelType.GuildText).setRequired(true)))
     .addSubcommand((s) =>
       s.setName('create').setDescription('Propose une suggestion.')
         .addStringOption((o) => o.setName('contenu').setDescription('Votre suggestion').setRequired(true).setMaxLength(2000)))
     .addSubcommand((s) =>
       s.setName('approve').setDescription('Approuve une suggestion.')
-        .addIntegerOption((o) => o.setName('id').setDescription('ID').setRequired(true))
+        .addIntegerOption((o) => o.setName('id').setDescription('Numéro de la suggestion (en bas de sa carte)').setRequired(true))
         .addStringOption((o) => o.setName('raison').setDescription('Explication affichée sur la suggestion').setMaxLength(900)))
     .addSubcommand((s) =>
       s.setName('deny').setDescription('Refuse une suggestion.')
-        .addIntegerOption((o) => o.setName('id').setDescription('ID').setRequired(true))
+        .addIntegerOption((o) => o.setName('id').setDescription('Numéro de la suggestion (en bas de sa carte)').setRequired(true))
         .addStringOption((o) => o.setName('raison').setDescription('Explication affichée sur la suggestion').setMaxLength(900)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les dernières suggestions.')),
 

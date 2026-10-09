@@ -13,8 +13,8 @@ module.exports = {
     .setName('derank')
     .setDescription('Retire tous les rôles d\'un membre.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-    .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison')),
+    .addUserOption((o) => o.setName('membre').setDescription('Membre à qui retirer tous les rôles').setRequired(true))
+    .addStringOption((o) => o.setName('raison').setDescription('Raison du derank (visible dans les logs)')),
 
   async execute(interaction, client) {
     const user = interaction.options.getUser('membre');

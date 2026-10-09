@@ -76,11 +76,11 @@ module.exports = {
     .setDescription('Crée un menu de rôles auto-attribuables.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
     .addStringOption((o) => o.setName('titre').setDescription('Titre du menu').setRequired(true).setMaxLength(200))
-    .addRoleOption((o) => o.setName('role1').setDescription('Rôle 1').setRequired(true))
-    .addRoleOption((o) => o.setName('role2').setDescription('Rôle 2'))
-    .addRoleOption((o) => o.setName('role3').setDescription('Rôle 3'))
-    .addRoleOption((o) => o.setName('role4').setDescription('Rôle 4'))
-    .addRoleOption((o) => o.setName('role5').setDescription('Rôle 5'))
+    .addRoleOption((o) => o.setName('role1').setDescription('1er rôle proposé dans le menu').setRequired(true))
+    .addRoleOption((o) => o.setName('role2').setDescription('2e rôle proposé (facultatif)'))
+    .addRoleOption((o) => o.setName('role3').setDescription('3e rôle proposé (facultatif)'))
+    .addRoleOption((o) => o.setName('role4').setDescription('4e rôle proposé (facultatif)'))
+    .addRoleOption((o) => o.setName('role5').setDescription('5e rôle proposé (facultatif)'))
     .addStringOption((o) => o.setName('description').setDescription('Texte d\'introduction du panneau').setMaxLength(1000))
     .addStringOption((o) =>
       o.setName('details').setDescription('Description de chaque rôle, dans l\'ordre, séparées par | (ex : Annonces|Événements)').setMaxLength(600)),

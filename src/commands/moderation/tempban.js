@@ -15,7 +15,7 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
     .addUserOption((o) => o.setName('membre').setDescription('Le membre').setRequired(true))
     .addStringOption((o) => o.setName('duree').setDescription('Durée (ex: 7d, 12h)').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison').setMaxLength(512)),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison du bannissement (visible dans l\'historique)').setMaxLength(512)),
 
   async execute(interaction, client) {
     const user = interaction.options.getUser('membre');

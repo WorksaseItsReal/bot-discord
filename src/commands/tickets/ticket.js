@@ -45,9 +45,9 @@ module.exports = {
     .addSubcommand((s) => s.setName('claim').setDescription('Prend en charge le ticket actuel.'))
     .addSubcommand((s) => s.setName('transcript').setDescription('Génère le transcript du ticket.'))
     .addSubcommand((s) =>
-      s.setName('add').setDescription('Ajoute un membre au ticket.').addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
+      s.setName('add').setDescription('Ajoute un membre au ticket.').addUserOption((o) => o.setName('membre').setDescription('Membre à ajouter ou retirer de ce ticket').setRequired(true)))
     .addSubcommand((s) =>
-      s.setName('remove').setDescription('Retire un membre du ticket.').addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true)))
+      s.setName('remove').setDescription('Retire un membre du ticket.').addUserOption((o) => o.setName('membre').setDescription('Membre à ajouter ou retirer de ce ticket').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('rename').setDescription('Renomme le ticket.').addStringOption((o) => o.setName('nom').setDescription('Nouveau nom').setRequired(true).setMaxLength(90))),
 

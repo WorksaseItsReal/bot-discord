@@ -26,7 +26,7 @@ module.exports = {
       s.setName('create').setDescription('Ouvre un formulaire pour construire un embed.'))
     .addSubcommand((s) =>
       s.setName('send').setDescription('Envoie un embed avec des options directes.')
-        .addStringOption((o) => o.setName('titre').setDescription('Titre').setMaxLength(256))
+        .addStringOption((o) => o.setName('titre').setDescription('Titre de l\'embed (256 caractères max.)').setMaxLength(256))
         .addStringOption((o) => o.setName('description').setDescription('Description').setMaxLength(4096))
         .addStringOption((o) => o.setName('couleur').setDescription('Couleur hex (ex: #5865F2)').setMaxLength(7))
         .addStringOption((o) => o.setName('image').setDescription('URL de l\'image').setMaxLength(MAX_URL_LENGTH))

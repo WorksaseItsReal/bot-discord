@@ -193,13 +193,13 @@ module.exports = {
     .setName('backup')
     .setDescription('Sauvegarde/restauration de la structure du serveur.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addSubcommand((s) => s.setName('create').setDescription('Crée une sauvegarde.').addStringOption((o) => o.setName('nom').setDescription('Nom').setMaxLength(100)))
+    .addSubcommand((s) => s.setName('create').setDescription('Crée une sauvegarde.').addStringOption((o) => o.setName('nom').setDescription('Nom de la sauvegarde (ex. « avant refonte »)').setMaxLength(100)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les sauvegardes.'))
-    .addSubcommand((s) => s.setName('info').setDescription('Détails d\'une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
-    .addSubcommand((s) => s.setName('delete').setDescription('Supprime une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
+    .addSubcommand((s) => s.setName('info').setDescription('Détails d\'une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('Numéro de la sauvegarde (voir /backup list)').setRequired(true)))
+    .addSubcommand((s) => s.setName('delete').setDescription('Supprime une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('Numéro de la sauvegarde (voir /backup list)').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('restore').setDescription('Restaure (recrée rôles/salons manquants).')
-        .addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true))
+        .addStringOption((o) => o.setName('id').setDescription('Numéro de la sauvegarde (voir /backup list)').setRequired(true))
         .addBooleanOption((o) => o.setName('permissions').setDescription('Rétablir aussi les permissions des salons existants (non par défaut)')))
     .addSubcommand((s) =>
       s.setName('auto').setDescription('Active/désactive les sauvegardes automatiques.')

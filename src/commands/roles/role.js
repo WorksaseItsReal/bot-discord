@@ -238,24 +238,24 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
     .addSubcommand((s) =>
       s.setName('add').setDescription('Ajoute un rôle à un membre.')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle').setRequired(true)))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre concerné').setRequired(true))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle concerné').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('remove').setDescription('Retire un rôle d\'un membre.')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle').setRequired(true)))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre concerné').setRequired(true))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle concerné').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('create').setDescription('Crée un rôle.')
         .addStringOption((o) => o.setName('nom').setDescription('Nom du rôle').setRequired(true).setMaxLength(100))
         .addStringOption((o) => o.setName('couleur').setDescription('Couleur hex (ex: #5865F2)')))
     .addSubcommand((s) =>
       s.setName('delete').setDescription('Supprime un rôle.')
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle').setRequired(true)))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle concerné').setRequired(true)))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les rôles du serveur.'))
     .addSubcommand((s) =>
       s.setName('temporaire').setDescription('Donne un rôle pour une durée limitée (retiré automatiquement).')
-        .addUserOption((o) => o.setName('membre').setDescription('Membre').setRequired(true))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle').setRequired(true))
+        .addUserOption((o) => o.setName('membre').setDescription('Membre concerné').setRequired(true))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle concerné').setRequired(true))
         .addStringOption((o) => o.setName('duree').setDescription('Durée : 30m, 12h, 7d, 2w… (1 an maximum)').setRequired(true).setMaxLength(20))
         .addStringOption((o) => o.setName('raison').setDescription('Raison (visible dans les logs)').setMaxLength(300)))
     .addSubcommand((s) =>

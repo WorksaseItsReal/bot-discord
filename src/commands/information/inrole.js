@@ -71,7 +71,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('inrole')
     .setDescription('Liste les membres possédant un rôle.')
-    .addRoleOption((o) => o.setName('role').setDescription('Le rôle').setRequired(true)),
+    .addRoleOption((o) => o.setName('role').setDescription('Rôle dont afficher les membres').setRequired(true)),
   async execute(interaction, client) {
     const role = interaction.options.getRole('role');
     await interaction.deferReply();

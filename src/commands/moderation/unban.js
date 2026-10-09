@@ -12,7 +12,7 @@ module.exports = {
     .setDescription('Débannit un utilisateur via son ID.')
     .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
     .addStringOption((o) => o.setName('user_id').setDescription('ID de l\'utilisateur à débannir').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison').setMaxLength(512)),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison du débannissement (facultative)').setMaxLength(512)),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {

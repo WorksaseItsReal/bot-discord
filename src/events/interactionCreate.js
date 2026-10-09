@@ -8,7 +8,7 @@ const { errorReply } = require('../utils/embeds');
 const { missingPermissions, permissionLabel } = require('../utils/permissionNames');
 const { discordTimestamp } = require('../utils/time');
 const { deleteButton, status } = require('../utils/ui');
-const { MessagePayload } = require('discord.js');
+const { MessagePayload, PermissionsBitField } = require('discord.js');
 const { commandLabel } = require('../core/CommandHandler');
 
 const logger = createLogger('interaction');
@@ -40,6 +40,25 @@ module.exports = {
  * Vérifications communes avant exécution. Lève une UserError si la commande
  * ne peut pas s'exécuter dans ce contexte.
  */
+/**
+ * Permission Discord déclarée par la commande (`setDefaultMemberPermissions`), revérifiée
+ * côté bot : Discord ne l'applique qu'à l'AFFICHAGE, et un administrateur peut ouvrir une
+ * commande à n'importe quel rôle dans Paramètres du serveur → Intégrations. Sans ce contrôle,
+ * un rôle sans « Bannir des membres » pourrait bannir via /ban avec les droits du bot.
+ * « 0 » (commande masquée à tous) est réservé aux administrateurs.
+ */
+function assertMemberPermissions(interaction, command) {
+  if (!interaction.inGuild()) return;
+  const declared = command.data?.default_member_permissions ?? command.data?.toJSON?.().default_member_permissions;
+  if (declared == null) return;
+  const required = BigInt(declared) === 0n ? PermissionsBitField.Flags.Administrator : BigInt(declared);
+  const have = interaction.memberPermissions;
+  if (have?.has?.(required)) return;
+  const missing = have ? missingPermissions(have, [required]) : new PermissionsBitField(required).toArray();
+  const names = (missing.length ? missing : new PermissionsBitField(required).toArray()).map((p) => `**${permissionLabel(p)}**`).join(', ');
+  throw new UserError(`Il vous faut la permission ${names} pour utiliser **${commandLabel(command)}**.`);
+}
+
 function preflight(client, interaction, command) {
   if (command.guildOnly !== false && !interaction.inGuild()) {
     throw new UserError('Cette commande ne peut être utilisée que sur un serveur.');
@@ -50,6 +69,7 @@ function preflight(client, interaction, command) {
   if (command.ownerOnly && !client.config.ownerIds.includes(interaction.user.id)) {
     throw new UserError('Cette commande est réservée aux propriétaires du bot.');
   }
+  assertMemberPermissions(interaction, command);
   if (interaction.inGuild() && command.botPermissions?.length) {
     const missing = missingPermissions(interaction.appPermissions, command.botPermissions);
     if (missing.length) {
@@ -238,3 +258,4 @@ module.exports.reportError = reportError;
 module.exports.withDeleteButton = withDeleteButton;
 module.exports.componentExistsOnMessage = componentExistsOnMessage;
 module.exports.DEFAULT_COOLDOWN_MS = DEFAULT_COOLDOWN_MS;
+module.exports.assertMemberPermissions = assertMemberPermissions;
