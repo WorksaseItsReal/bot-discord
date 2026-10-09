@@ -2,22 +2,31 @@
 
 const dns = require('node:dns');
 const net = require('node:net');
+const http = require('node:http');
+const https = require('node:https');
+const zlib = require('node:zlib');
 
 /**
- * Requête HTTP sortante « sûre » (flux RSS) : `fetch` natif, http(s) uniquement, délai
- * total de 10 s, corps limité à 1 Mo, hôtes privés refusés — y compris après résolution
- * DNS (toutes les adresses), IPv6 locales et IPv4 mappées comprises —, redirections
- * suivies À LA MAIN (3 sauts au plus), chaque saut revalidé.
+ * Requête HTTP sortante « sûre » (flux RSS) : `http(s).request` natif, http(s) uniquement,
+ * ports 80 / 443 / 8080 / 8443, délai total de 10 s (corps compris), corps limité à 1 Mo
+ * (après décompression gzip / deflate / br), en-têtes limités à 16 Ko, hôtes privés refusés
+ * — IPv6 locales et IPv4 mappées comprises —, redirections suivies À LA MAIN (3 sauts au
+ * plus), chaque saut revalidé.
  *
- * Limite connue : `fetch` refait sa propre résolution DNS ; un domaine qui change de
- * réponse entre les deux (DNS rebinding) n'est pas totalement exclu. Les noms à une seule
- * étiquette, `localhost`, `.local`, `.internal`… sont refusés avant toute résolution.
+ * DNS rebinding : la résolution est validée AU MOMENT DE LA CONNEXION (option `lookup` de
+ * net.connect) et le socket utilise exactement les adresses validées ; plus de seconde
+ * résolution entre la vérification et la connexion. Le nom d'hôte reste dans l'URL : SNI et
+ * vérification du certificat TLS inchangés. Les noms à une seule étiquette, `localhost`,
+ * `.local`, `.internal`… sont refusés avant toute résolution.
  */
 
 const MAX_BYTES = 1_048_576;
 const TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 3;
+const MAX_HEADER_BYTES = 16_384;
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
+/** Ports autorisés (jamais SSH, SMTP, bases de données… d'un hôte public). */
+const ALLOWED_PORTS = Object.freeze([80, 443, 8080, 8443]);
 
 class FetchError extends Error {
   /** @param {string} message phrase en français (affichable) */
@@ -179,7 +188,19 @@ function abortable(promise, signal) {
   });
 }
 
-/** Résout le nom et refuse si UNE des adresses est privée. */
+/** Adresses d'une réponse de `lookup` (tableau d'objets ou de chaînes, ou objet seul). */
+function addressList(addrs) {
+  return (Array.isArray(addrs) ? addrs : [addrs])
+    .map((a) => (typeof a === 'string' ? { address: a, family: net.isIP(a) } : a))
+    .filter((a) => a && a.address);
+}
+
+const PRIVATE_TARGET = 'ce domaine pointe vers une adresse privée ou locale : refusé';
+
+/**
+ * Vérification préalable (message lisible avant toute connexion) : résout le nom et refuse
+ * si UNE des adresses est privée. La vraie garde est `guardedLookup`, à la connexion.
+ */
 async function assertPublicHost(url, { lookup, allowLoopback, signal }) {
   const { host, literal } = checkHostname(url.hostname, { allowLoopback });
   if (literal) return;
@@ -190,28 +211,163 @@ async function assertPublicHost(url, { lookup, allowLoopback, signal }) {
     if (err instanceof FetchError) throw err;
     throw new FetchError(`nom de domaine introuvable (${host})`);
   }
-  const list = (Array.isArray(addrs) ? addrs : [addrs]).map((a) => (typeof a === 'string' ? a : a?.address)).filter(Boolean);
+  const list = addressList(addrs);
   if (!list.length) throw new FetchError(`nom de domaine introuvable (${host})`);
-  if (list.some((a) => isBlockedAddress(a, { allowLoopback }))) throw new FetchError('ce domaine pointe vers une adresse privée ou locale : refusé', { blocked: true });
+  if (list.some((a) => isBlockedAddress(a.address, { allowLoopback }))) throw new FetchError(PRIVATE_TARGET, { blocked: true });
 }
 
-/** Lit un corps de réponse en s'arrêtant au-delà de `max` octets. */
-async function readLimited(body, max) {
-  if (!body) return Buffer.alloc(0);
-  const reader = body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => {});
-      throw new FetchError(`document trop volumineux (plus de ${Math.round(max / 1024)} Ko)`);
+/**
+ * `lookup` pour net.connect / tls.connect : résout, refuse si UNE adresse est privée, et
+ * rend EXACTEMENT les adresses validées (celles que le socket utilisera). Signature de
+ * dns.lookup ; `lookup` injecté (tests) : (host, opts) => Promise<adresses>.
+ */
+function guardedLookup({ lookup, allowLoopback }) {
+  return (hostname, options, callback) => {
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
     }
-    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+    const opts = { all: true, verbatim: true };
+    if (options?.family === 4 || options?.family === 6) opts.family = options.family;
+    Promise.resolve()
+      .then(() => lookup(hostname, opts))
+      .then((addrs) => {
+        const list = addressList(addrs).map((a) => ({ address: a.address, family: a.family || net.isIP(a.address) }));
+        if (!list.length) throw Object.assign(new Error(`nom introuvable (${hostname})`), { code: 'ENOTFOUND' });
+        if (list.some((a) => isBlockedAddress(a.address, { allowLoopback }))) throw new FetchError(PRIVATE_TARGET, { blocked: true });
+        if (options?.all) callback(null, list);
+        else callback(null, list[0].address, list[0].family);
+      })
+      .catch((err) => callback(err));
+  };
+}
+
+/** Port effectif d'une URL http(s). */
+const portOf = (url) => (url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80);
+
+/** Port autorisé ? (`allowLoopback`, tests : tout port de 127.0.0.1) */
+function assertPort(url, { allowLoopback, allowedPorts }) {
+  if (allowLoopback && url.hostname === '127.0.0.1') return;
+  if (!allowedPorts.includes(portOf(url))) throw new FetchError(`port ${portOf(url)} refusé (ports acceptés : ${ALLOWED_PORTS.join(', ')})`, { blocked: true });
+}
+
+/** En-têtes Node → `Headers` (valeurs invalides ignorées). */
+function toHeaders(rawHeaders) {
+  const headers = new Headers();
+  for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+    try {
+      headers.append(rawHeaders[i], rawHeaders[i + 1]);
+    } catch {
+      /* en-tête invalide : ignoré */
+    }
   }
-  return Buffer.concat(chunks, total);
+  return headers;
+}
+
+/** Décodeur du corps selon Content-Encoding (un seul encodage), ou null (identité). */
+function decoderFor(encoding, firstChunk) {
+  switch (encoding) {
+    case 'gzip':
+    case 'x-gzip':
+      return zlib.createGunzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH });
+    case 'deflate':
+      // zlib (RFC 1950) le plus souvent, deflate brut chez certains serveurs.
+      return (firstChunk?.[0] & 0x0f) === 0x08
+        ? zlib.createInflate({ finishFlush: zlib.constants.Z_SYNC_FLUSH })
+        : zlib.createInflateRaw({ finishFlush: zlib.constants.Z_SYNC_FLUSH });
+    case 'br':
+      return zlib.createBrotliDecompress({ finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH });
+    default:
+      return null;
+  }
+}
+
+const tooBig = (max) => new FetchError(`document trop volumineux (plus de ${Math.round(max / 1024)} Ko)`);
+
+/**
+ * Lit (et décompresse) le corps en s'arrêtant au-delà de `max` octets — compressés comme
+ * décompressés : une « bombe » gzip est coupée à 1 Mo de sortie.
+ */
+function readBody(res, { max, signal, timeoutMessage }) {
+  const encoding = String(res.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
+  if (encoding && encoding !== 'identity' && !['gzip', 'x-gzip', 'deflate', 'br'].includes(encoding)) {
+    res.destroy();
+    return Promise.reject(new FetchError(`encodage de contenu non pris en charge (${encoding.slice(0, 40)})`));
+  }
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    let raw = 0;
+    let decoder = null;
+    let settled = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      if (err) {
+        res.destroy();
+        decoder?.destroy();
+        reject(err);
+      } else resolve(value);
+    };
+    const onAbort = () => finish(new FetchError(timeoutMessage));
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const push = (chunk) => {
+      total += chunk.length;
+      if (total > max) return finish(tooBig(max));
+      chunks.push(chunk);
+      return undefined;
+    };
+    const done = () => finish(null, Buffer.concat(chunks, total));
+    const fail = (err) => finish(err instanceof FetchError ? err : new FetchError(`lecture interrompue (${err?.code ?? err?.message ?? 'erreur réseau'})`));
+    res.on('data', (chunk) => {
+      if (settled) return;
+      raw += chunk.length;
+      if (raw > max) return finish(tooBig(max));
+      if (encoding && encoding !== 'identity') {
+        if (!decoder) {
+          decoder = decoderFor(encoding, chunk);
+          decoder.on('data', push);
+          decoder.on('end', done);
+          decoder.on('error', (err) => fail(new FetchError(`contenu compressé illisible (${err?.code ?? err?.message})`)));
+        }
+        decoder.write(chunk);
+      } else push(chunk);
+      return undefined;
+    });
+    res.on('end', () => {
+      if (decoder) decoder.end();
+      else done();
+    });
+    res.on('error', fail);
+    res.on('close', () => {
+      if (!res.complete) fail(new FetchError('lecture interrompue (connexion fermée)'));
+    });
+  });
+}
+
+/** Un saut : GET, réponse brute (statut, en-têtes Node, flux). */
+function requestOnce(url, { headers, signal, lookup, allowLoopback }) {
+  const mod = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    let req;
+    try {
+      req = mod.request(url, {
+        method: 'GET',
+        headers: { ...headers, 'accept-encoding': 'gzip, deflate, br' },
+        lookup: guardedLookup({ lookup, allowLoopback }),
+        agent: false, // jamais de socket réutilisé d'une résolution antérieure ; pas de proxy implicite
+        signal,
+        maxHeaderSize: MAX_HEADER_BYTES,
+      }, resolve);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 /**
@@ -219,9 +375,10 @@ async function readLimited(body, max) {
  * @param {string|URL} rawUrl
  * @param {{
  *   headers?: Record<string, string>, maxBytes?: number, timeoutMs?: number, maxRedirects?: number,
- *   allowLoopback?: boolean, signal?: AbortSignal,
- *   fetchImpl?: typeof fetch, lookup?: (host: string, opts: object) => Promise<Array<{ address: string }>>,
- * }} [opts] `allowLoopback`, `fetchImpl` et `lookup` : injection pour les tests uniquement
+ *   allowLoopback?: boolean, allowedPorts?: number[], signal?: AbortSignal,
+ *   lookup?: (host: string, opts: object) => Promise<Array<{ address: string, family?: number }>>,
+ * }} [opts] `allowLoopback`, `allowedPorts` et `lookup` : injection pour les tests uniquement
+ *   (`allowLoopback` n'autorise QUE 127.0.0.1, sur tout port)
  * @returns {Promise<{ status: number, ok: boolean, headers: Headers, url: string, body: Buffer, redirects: number }>}
  */
 async function safeFetch(rawUrl, opts = {}) {
@@ -231,8 +388,8 @@ async function safeFetch(rawUrl, opts = {}) {
     timeoutMs = TIMEOUT_MS,
     maxRedirects = MAX_REDIRECTS,
     allowLoopback = false,
+    allowedPorts = ALLOWED_PORTS,
     signal: outer,
-    fetchImpl = globalThis.fetch,
     lookup = dns.promises.lookup,
   } = opts;
   const controller = new AbortController();
@@ -244,21 +401,26 @@ async function safeFetch(rawUrl, opts = {}) {
     else outer.addEventListener('abort', relay, { once: true });
   }
   const { signal } = controller;
+  const timeoutMessage = `délai de ${Math.round(timeoutMs / 1000)} s dépassé`;
   try {
     let url = parseHttpUrl(rawUrl);
     for (let hop = 0; ; hop += 1) {
       await assertPublicHost(url, { lookup, allowLoopback, signal });
+      assertPort(url, { allowLoopback, allowedPorts });
       let res;
       try {
-        res = await fetchImpl(url.toString(), { method: 'GET', headers, redirect: 'manual', signal });
+        res = await requestOnce(url, { headers, signal, lookup, allowLoopback });
       } catch (err) {
-        if (signal.aborted) throw new FetchError(`délai de ${Math.round(timeoutMs / 1000)} s dépassé`);
-        throw new FetchError(`connexion impossible (${err?.cause?.code ?? err?.code ?? err?.message ?? 'erreur réseau'})`);
+        if (err instanceof FetchError) throw err;
+        if (signal.aborted) throw new FetchError(timeoutMessage);
+        if (err?.code === 'ENOTFOUND') throw new FetchError(`nom de domaine introuvable (${url.hostname})`);
+        throw new FetchError(`connexion impossible (${err?.code ?? err?.message ?? 'erreur réseau'})`);
       }
-      if (REDIRECT_CODES.has(res.status)) {
-        const location = res.headers.get('location');
-        await res.body?.cancel().catch(() => {});
-        if (!location) throw new FetchError(`redirection HTTP ${res.status} sans destination`);
+      const status = res.statusCode;
+      if (REDIRECT_CODES.has(status)) {
+        const location = res.headers.location;
+        res.destroy();
+        if (!location) throw new FetchError(`redirection HTTP ${status} sans destination`);
         if (hop >= maxRedirects) throw new FetchError(`trop de redirections (${maxRedirects} au plus)`);
         let next;
         try {
@@ -269,20 +431,19 @@ async function safeFetch(rawUrl, opts = {}) {
         url = parseHttpUrl(next);
         continue;
       }
-      const length = Number(res.headers.get('content-length'));
+      const length = Number(res.headers['content-length']);
       if (Number.isFinite(length) && length > maxBytes) {
-        await res.body?.cancel().catch(() => {});
-        throw new FetchError(`document trop volumineux (plus de ${Math.round(maxBytes / 1024)} Ko)`);
+        res.destroy();
+        throw tooBig(maxBytes);
       }
       let body;
-      try {
-        body = res.status === 304 ? Buffer.alloc(0) : await readLimited(res.body, maxBytes);
-      } catch (err) {
-        if (err instanceof FetchError) throw err;
-        if (signal.aborted) throw new FetchError(`délai de ${Math.round(timeoutMs / 1000)} s dépassé`);
-        throw new FetchError(`lecture interrompue (${err?.message ?? 'erreur réseau'})`);
+      if (status === 304) {
+        res.destroy();
+        body = Buffer.alloc(0);
+      } else {
+        body = await readBody(res, { max: maxBytes, signal, timeoutMessage });
       }
-      return { status: res.status, ok: res.ok, headers: res.headers, url: url.toString(), body, redirects: hop };
+      return { status, ok: status >= 200 && status < 300, headers: toHeaders(res.rawHeaders), url: url.toString(), body, redirects: hop };
     }
   } finally {
     clearTimeout(timer);
@@ -293,6 +454,7 @@ async function safeFetch(rawUrl, opts = {}) {
 module.exports = {
   safeFetch,
   FetchError,
+  guardedLookup,
   isBlockedAddress,
   isPrivateIPv4,
   isPrivateIPv6,
@@ -302,4 +464,5 @@ module.exports = {
   MAX_BYTES,
   TIMEOUT_MS,
   MAX_REDIRECTS,
+  ALLOWED_PORTS,
 };

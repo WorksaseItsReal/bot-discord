@@ -34,7 +34,7 @@ const PERMANENT_USER_CODES = new Set([10013, 50007, 50278]);
  *  - fin des giveaways, sauvegardes automatiques, purge des serveurs quittés ;
  *  - rôles temporaires, annonces programmées, anniversaires et levées automatiques
  *    (lock, mode lent, lockdown) : services dédiés ;
- *  - flux RSS / YouTube (FeedService) ;
+ *  - flux RSS / YouTube (FeedService) ; rattrapage du rôle vocal (AutomationService) ;
  *  - purge quotidienne des statistiques expirées (ActivityService).
  * Tout survit au redémarrage car l'état vit en base. Chaque étape est isolée :
  * une erreur dans l'une n'empêche pas les suivantes.
@@ -110,6 +110,7 @@ class SchedulerService {
       ['timedlocks', () => this.client.services?.timedLocks?.processDue({ isStopping: this.#budget() })],
       ['activity', () => this.client.services?.activity?.processDue({ isStopping: this.#budget() })],
       ['feeds', () => this.client.services?.feeds?.processDue({ isStopping: this.#budget() })],
+      ['voiceroles', () => this.client.services?.automations?.processDue({ isStopping: this.#budget() })],
     ];
     for (const [name, run] of stages) {
       if (this.stopping) return;

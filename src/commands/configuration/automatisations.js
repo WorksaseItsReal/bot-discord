@@ -571,6 +571,8 @@ module.exports = {
         // Activation : rattrapage des membres déjà en vocal. Désactivation : rôles retirés.
         svc.runInBackground(enabled ? svc.reconcileGuild(guild) : svc.releaseRoles(guild, before));
       }
+      // Désactivation : les messages en attente ne sont plus publiés.
+      if (feature === 'crosspost') svc?.refreshCrosspost(guild.id);
       const back = view === feature ? feature : 'home';
       await interaction.update(render(client, guild, back, `${ICONS.success} ${TOGGLE_NOTICES[feature][enabled ? 0 : 1]}`, interaction.user));
     },
@@ -581,6 +583,8 @@ module.exports = {
       guard(interaction);
       const channels = picked(interaction, [ChannelType.GuildAnnouncement]);
       save(client, interaction.guildId, { crosspost: { channels } });
+      // Salons retirés : leurs messages en attente ne sont plus publiés.
+      client.services.automations?.refreshCrosspost(interaction.guildId);
       await interaction.update(crosspostView(client, interaction.guild, `${ICONS.success} ${channels.length} salon(s) d'annonces publié(s) automatiquement.`));
     },
 
@@ -702,7 +706,13 @@ module.exports = {
       const id = interaction.values?.[0] ?? null;
       let notice = `${ICONS.success} Salon du remerciement retiré.`;
       if (id) {
-        if (!SNOWFLAKE.test(id) || !TEXT_TYPES.includes(guild.channels.cache.get(id)?.type)) throw new UserError('Choisissez un salon textuel de ce serveur.');
+        const channel = SNOWFLAKE.test(id) ? guild.channels.cache.get(id) : null;
+        if (!channel || !TEXT_TYPES.includes(channel.type)) throw new UserError('Choisissez un salon textuel de ce serveur.');
+        // L'auteur doit lui-même pouvoir lire et écrire dans ce salon.
+        const authorPerms = interaction.member && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+        if (authorPerms && !authorPerms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+          throw new UserError(`Vous ne pouvez pas écrire dans <#${id}> : choisissez un salon où vous avez le droit de publier.`);
+        }
         const issue = channelIssue(guild, id);
         notice = issue ? `${ICONS.warning} Salon enregistré, mais je ne peux pas y publier : ${issue}.` : `${ICONS.success} Remerciements publiés dans <#${id}>.`;
       }

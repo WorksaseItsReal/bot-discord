@@ -65,6 +65,36 @@ function assertMentionAllowed(guild, roleId, authorPermissions) {
   if (!role.mentionable && !canEveryone) throw new UserError(`Le rôle ${role.name} n'est pas mentionnable : il faut la permission **Mentionner @everyone, @here et tous les rôles**.`);
 }
 
+/**
+ * La mention de `roleId` est-elle encore permise à son auteur ? Rôle mentionnable (ou
+ * supprimé) : toujours. Sinon (rôle non mentionnable, @everyone) l'auteur doit être encore là
+ * et avoir « Mentionner @everyone, @here et tous les rôles » — dans `channel` si fourni.
+ * Partagé par les annonces programmées et les flux RSS (revérifié à chaque publication).
+ * @returns {Promise<string|null>} raison du refus (définitif), ou null ; lève sur erreur passagère
+ */
+async function mentionAuthorIssue(guild, { roleId, authorId, channel = null }) {
+  if (!roleId) return null;
+  const everyone = roleId === guild.id;
+  const role = everyone ? null : guild.roles?.cache?.get(roleId);
+  // Rôle mentionnable : aucune permission requise. Rôle supprimé : la mention ne notifie plus personne.
+  if (!everyone && (!role || role.mentionable)) return null;
+  if (!authorId) return 'son auteur est inconnu (mention non autorisée)';
+  let member = guild.members?.cache?.get(authorId);
+  if (!member) {
+    try {
+      member = await guild.members.fetch(authorId);
+    } catch (e) {
+      if (GONE_CODES.has(e?.code)) return 'son auteur a quitté le serveur (mention non autorisée)';
+      throw e; // erreur passagère : réessai
+    }
+  }
+  const perms = channel && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(member) : member.permissions;
+  if (perms?.has?.(PermissionFlagsBits.MentionEveryone)) return null;
+  return everyone
+    ? 'son auteur n\'a plus la permission de mentionner @everyone'
+    : 'son auteur n\'a plus la permission de mentionner ce rôle (non mentionnable)';
+}
+
 /** Pourquoi le bot ne peut pas publier dans ce salon (texte), ou null. Pur. */
 function channelIssue(guild, channelId) {
   const channel = guild?.channels?.cache?.get(channelId);
@@ -101,24 +131,7 @@ class AnnouncementService {
    * @returns {Promise<string|null>} raison du refus (définitif), ou null
    */
   async #authorMentionIssue(guild, row) {
-    if (!row.role_id) return null;
-    const everyone = row.role_id === guild.id;
-    const role = everyone ? null : guild.roles?.cache?.get(row.role_id);
-    // Rôle mentionnable : aucune permission requise. Rôle supprimé : la mention ne notifie plus personne.
-    if (!everyone && (!role || role.mentionable)) return null;
-    let member = guild.members?.cache?.get(row.author_id);
-    if (!member) {
-      try {
-        member = await guild.members.fetch(row.author_id);
-      } catch (e) {
-        if (GONE_CODES.has(e?.code)) return 'son auteur a quitté le serveur (mention non autorisée)';
-        throw e; // erreur passagère : réessai
-      }
-    }
-    if (member.permissions?.has?.(PermissionFlagsBits.MentionEveryone)) return null;
-    return everyone
-      ? 'son auteur n\'a plus la permission de mentionner @everyone'
-      : 'son auteur n\'a plus la permission de mentionner ce rôle (non mentionnable)';
+    return mentionAuthorIssue(guild, { roleId: row.role_id, authorId: row.author_id });
   }
 
   /**
@@ -255,4 +268,5 @@ module.exports = {
   announcementPayload,
   assertMentionAllowed,
   channelIssue,
+  mentionAuthorIssue,
 };

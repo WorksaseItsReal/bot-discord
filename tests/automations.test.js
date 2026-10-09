@@ -223,38 +223,93 @@ async function localServer(t) {
   return { routes, hits, base, url: (path) => `${base}${path}` };
 }
 
-test('safeFetch : 127.0.0.1 refusé sans injection, accepté avec ; DNS : toutes les adresses vérifiées', async (t) => {
+test('safeFetch : 127.0.0.1 refusé sans injection, accepté avec ; DNS : toutes les adresses vérifiées, ports filtrés', async (t) => {
   const srv = await localServer(t);
   srv.routes.set('/ok', { body: 'bonjour' });
+  const port = Number(new URL(srv.base).port);
   await assert.rejects(S.safeFetch(srv.url('/ok')), /privées ou locales/);
   const res = await S.safeFetch(srv.url('/ok'), { allowLoopback: true });
   assert.equal(res.status, 200);
   assert.equal(res.body.toString(), 'bonjour');
   // Un domaine dont UNE des adresses est privée est refusé (aucune requête).
-  let fetched = 0;
-  const fetchImpl = async () => {
-    fetched += 1;
-    return new Response('x');
-  };
   const lookup = (addresses) => async (host, opts) => {
     assert.deepEqual(opts, { all: true, verbatim: true });
     return addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
   };
-  for (const addrs of [['10.0.0.1'], ['93.184.216.34', '192.168.0.10'], ['::1'], ['::ffff:169.254.169.254'], ['fd00::5']]) {
-    await assert.rejects(S.safeFetch('https://flux.exemple.fr/rss', { lookup: lookup(addrs), fetchImpl }), /adresse privée/, addrs.join(','));
+  const named = `http://flux.exemple.fr:${port}/ok`;
+  for (const addrs of [['10.0.0.1'], ['93.184.216.34', '192.168.0.10'], ['::1'], ['::ffff:169.254.169.254'], ['fd00::5'], ['127.0.0.1']]) {
+    await assert.rejects(S.safeFetch(named, { lookup: lookup(addrs), allowedPorts: [port] }), /adresse privée/, addrs.join(','));
   }
-  await assert.rejects(S.safeFetch('https://flux.exemple.fr/rss', { lookup: async () => { throw new Error('ENOTFOUND'); }, fetchImpl }), /introuvable/);
-  assert.equal(fetched, 0);
-  // Adresses publiques : la requête part, en redirection manuelle.
-  let options = null;
-  const ok = await S.safeFetch('https://flux.exemple.fr/rss', { lookup: lookup(['93.184.216.34', '2606:2800:220:1::1']), fetchImpl: async (url, o) => { options = o; return new Response('ok'); } });
-  assert.equal(ok.body.toString(), 'ok');
-  assert.equal(options.redirect, 'manual');
+  await assert.rejects(S.safeFetch(named, { lookup: async () => { throw new Error('ENOTFOUND'); }, allowedPorts: [port] }), /introuvable/);
+  assert.equal(srv.hits.length, 1, 'requête envoyée vers une adresse refusée');
+  // Adresse validée : le socket se connecte à EXACTEMENT cette adresse (nom d'hôte conservé dans Host).
+  const ok = await S.safeFetch(named, { lookup: lookup(['127.0.0.1']), allowLoopback: true, allowedPorts: [port] });
+  assert.equal(ok.body.toString(), 'bonjour');
+  assert.equal(srv.hits.at(-1).headers.host, `flux.exemple.fr:${port}`);
   // IP littérale : aucune résolution DNS.
   await S.safeFetch(srv.url('/ok'), { allowLoopback: true, lookup: () => assert.fail('résolution inutile') });
+  // Ports : 80, 443, 8080 et 8443 seulement (jamais SSH, SMTP… d'un hôte public).
+  assert.deepEqual(S.ALLOWED_PORTS, [80, 443, 8080, 8443]);
+  await assert.rejects(S.safeFetch('https://flux.exemple.fr:22/', { lookup: lookup(['93.184.216.34']) }), /port 22 refusé/);
+  await assert.rejects(S.safeFetch(named, { lookup: lookup(['93.184.216.34']) }), new RegExp(`port ${port} refusé`));
   // Schémas et identifiants refusés.
   await assert.rejects(S.safeFetch('file:///etc/passwd'), /http\(s\)/);
   await assert.rejects(S.safeFetch('https://a:b@flux.exemple.fr/'), /identifiants/);
+});
+
+test('safeFetch : DNS rebinding — l\'adresse est revalidée À LA CONNEXION (plus de seconde résolution non vérifiée)', async (t) => {
+  const srv = await localServer(t);
+  srv.routes.set('/admin', { body: '<rss><channel><title>interne</title></channel></rss>' });
+  const port = Number(new URL(srv.base).port);
+  // Résolveur à TTL 0 : d'abord une adresse publique (vérification), puis 127.0.0.1 (connexion).
+  for (const protocol of ['http', 'https']) {
+    const answers = [];
+    let n = 0;
+    const lookup = async () => {
+      const address = n++ % 2 === 0 ? '93.184.216.34' : '127.0.0.1';
+      answers.push(address);
+      return [{ address, family: 4 }];
+    };
+    await assert.rejects(S.safeFetch(`${protocol}://rebind.attaquant.exemple:${port}/admin`, { lookup, allowedPorts: [port] }), /adresse privée ou locale/, protocol);
+    assert.deepEqual(answers, ['93.184.216.34', '127.0.0.1'], `${protocol} : résolution de connexion non vérifiée`);
+  }
+  assert.equal(srv.hits.length, 0, 'le serveur interne a été atteint');
+  // guardedLookup (signature de dns.lookup) : toutes les adresses rendues, ou erreur.
+  const guarded = S.guardedLookup({ lookup: async () => [{ address: '93.184.216.34', family: 4 }, { address: '2606:2800:220:1::1', family: 6 }], allowLoopback: false });
+  const all = await new Promise((resolve, reject) => guarded('flux.exemple.fr', { all: true }, (err, list) => (err ? reject(err) : resolve(list))));
+  assert.deepEqual(all.map((a) => a.address), ['93.184.216.34', '2606:2800:220:1::1']);
+  const one = await new Promise((resolve, reject) => guarded('flux.exemple.fr', {}, (err, address, family) => (err ? reject(err) : resolve([address, family]))));
+  assert.deepEqual(one, ['93.184.216.34', 4]);
+  const mixed = S.guardedLookup({ lookup: async () => [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.8', family: 4 }], allowLoopback: false });
+  await assert.rejects(new Promise((resolve, reject) => mixed('flux.exemple.fr', { all: true }, (err, list) => (err ? reject(err) : resolve(list)))), /adresse privée/);
+});
+
+test('safeFetch : corps compressé (gzip, deflate, br) décodé sous le même plafond, encodage inconnu et en-têtes énormes refusés', async (t) => {
+  const zlib = require('node:zlib');
+  const srv = await localServer(t);
+  const doc = Buffer.from('<rss><channel><title>Été « compressé »</title></channel></rss>'.repeat(50));
+  const bodies = { gzip: zlib.gzipSync(doc), deflate: zlib.deflateSync(doc), deflateraw: zlib.deflateRawSync(doc), br: zlib.brotliCompressSync(doc) };
+  for (const [name, body] of Object.entries(bodies)) {
+    srv.routes.set(`/${name}`, { headers: { 'content-encoding': name === 'deflateraw' ? 'deflate' : name }, body });
+  }
+  const bomb = zlib.gzipSync(Buffer.alloc(8 * 1024 * 1024));
+  srv.routes.set('/bombe', { headers: { 'content-encoding': 'gzip' }, body: bomb });
+  srv.routes.set('/bombe-br', { headers: { 'content-encoding': 'br' }, body: zlib.brotliCompressSync(Buffer.alloc(8 * 1024 * 1024)) });
+  srv.routes.set('/zstd', { headers: { 'content-encoding': 'zstd' }, body: 'x' });
+  srv.routes.set('/entetes', (req, res) => {
+    res.writeHead(200, { 'x-enorme': 'a'.repeat(40_000) });
+    res.end('x');
+  });
+  for (const name of Object.keys(bodies)) {
+    const res = await S.safeFetch(srv.url(`/${name}`), { allowLoopback: true });
+    assert.ok(res.body.equals(doc), name);
+  }
+  assert.equal(srv.hits.at(-1).headers['accept-encoding'], 'gzip, deflate, br');
+  assert.ok(bomb.length < 100_000);
+  await assert.rejects(S.safeFetch(srv.url('/bombe'), { allowLoopback: true }), /trop volumineux/);
+  await assert.rejects(S.safeFetch(srv.url('/bombe-br'), { allowLoopback: true }), /trop volumineux/);
+  await assert.rejects(S.safeFetch(srv.url('/zstd'), { allowLoopback: true }), /non pris en charge/);
+  await assert.rejects(S.safeFetch(srv.url('/entetes'), { allowLoopback: true }), /connexion impossible/);
 });
 
 test('safeFetch : redirections revalidées (privée refusée), 3 sauts au plus, relatives suivies', async (t) => {
@@ -356,7 +411,7 @@ function fakeWorld({ channelType = ChannelType.GuildText } = {}) {
     id: GUILD,
     available: true,
     channels: { cache: new Collection([[CHAN, channel]]) },
-    roles: { cache: new Collection([[ROLE, { id: ROLE, name: 'Notifs' }], [GUILD, { id: GUILD, name: '@everyone' }]]) },
+    roles: { cache: new Collection([[ROLE, { id: ROLE, name: 'Notifs', mentionable: true }], [GUILD, { id: GUILD, name: '@everyone' }]]) },
     members: { me: null },
   };
   const client = { guilds: { cache: new Collection([[GUILD, guild]]) }, services: { logging: { send: async (...args) => logs.push(args) } } };
