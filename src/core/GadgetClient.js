@@ -40,6 +40,7 @@ const { BirthdayRepository } = require('../database/repositories/BirthdayReposit
 const { AfkRepository } = require('../database/repositories/AfkRepository');
 const { HighlightRepository } = require('../database/repositories/HighlightRepository');
 const { EconomyRepository } = require('../database/repositories/EconomyRepository');
+const { GameScoreRepository } = require('../database/repositories/GameScoreRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -71,6 +72,7 @@ const { AfkService } = require('../services/AfkService');
 const { HighlightService } = require('../services/HighlightService');
 const { SnipeService } = require('../services/SnipeService');
 const { EconomyService } = require('../services/EconomyService');
+const { GameService } = require('../services/GameService');
 
 const logger = createLogger('client');
 
@@ -145,6 +147,7 @@ class GadgetClient extends Client {
       afk: new AfkRepository(db),
       highlights: new HighlightRepository(db),
       economy: new EconomyRepository(db),
+      gameScores: new GameScoreRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -190,6 +193,8 @@ class GadgetClient extends Client {
       snipe: new SnipeService({ client: this, config: configService }),
       // Économie : synchrone (transactions SQLite), aucun minuteur à arrêter.
       economy: new EconomyService({ economy: this.repositories.economy, config: configService }),
+      // Mini-jeux (/jeu) : parties en mémoire (minuteurs unref, arrêtés dans shutdown), scores en base.
+      games: new GameService({ client: this, scores: this.repositories.gameScores }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -315,6 +320,8 @@ class GadgetClient extends Client {
       ['Arrêt des absences', () => s.afk?.stop()],
       ['Arrêt des alertes de mots-clés', () => s.highlights?.stop()],
       ['Arrêt du snipe', () => s.snipe?.stop()],
+      // Mini-jeux : nettoyage périodique et minuteurs (défis, questions) annulés.
+      ['Arrêt des mini-jeux', () => s.games?.stop()],
       ['Vidage des tickets', () => s.tickets?.flush?.()],
       ['Vidage des giveaways', () => s.giveaways?.flush?.()],
       ['Vidage des projets', () => s.projects?.flush?.()],

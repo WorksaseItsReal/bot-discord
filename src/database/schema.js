@@ -664,6 +664,28 @@ const migrations = [
     `,
   },
   {
+    id: 24,
+    name: 'game_scores',
+    up: `
+      -- Mini-jeux (/jeu) : bilan par serveur, membre et jeu (morpion, puissance4, pendu,
+      -- quiz, devine). Les parties elles-mêmes vivent en mémoire (GameService) ; seuls
+      -- les résultats sont conservés, pour /jeu classement.
+      CREATE TABLE IF NOT EXISTS game_scores (
+        guild_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        game       TEXT NOT NULL,
+        wins       INTEGER NOT NULL DEFAULT 0,
+        losses     INTEGER NOT NULL DEFAULT 0,
+        draws      INTEGER NOT NULL DEFAULT 0,
+        points     INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, game, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_game_scores_board ON game_scores (guild_id, game, points DESC, wins DESC);
+      CREATE INDEX IF NOT EXISTS idx_game_scores_user ON game_scores (guild_id, user_id);
+    `,
+  },
+  {
     id: 25,
     name: 'temp_roles_backoff_birthday_guards',
     up: `
