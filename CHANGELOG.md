@@ -41,7 +41,8 @@ Ce projet suit un versionnage sémantique.
   remerciement des boosters) ; présence du bot réglable (`PRESENCE_STATUSES`, `PRESENCE_INTERVAL_MINUTES`).
 - Migrations #13 (signalements), #14 (invitations), #15 (starboard, sticky), #16 (rôles temporaires, annonces, anniversaires),
   #17 (départs des niveaux), #18 (économie), #19 (statistiques), #20 (outils des membres), #21 (strikes datés, levées automatiques),
-  #22 (flux RSS, compteurs des fils automatiques), #23 (candidatures, notes des tickets, conditions de giveaway), #24 (scores des mini-jeux), #25 (réessais des rôles temporaires, garde des anniversaires).
+  #22 (flux RSS, compteurs des fils automatiques), #23 (candidatures, notes des tickets, conditions de giveaway), #24 (scores des mini-jeux), #25 (réessais des rôles temporaires, garde des anniversaires),
+  #27 (battement de la collecte des statistiques).
 
 ### Changed
 - **`/channel` et `/emoji` passent en sous-commandes** : l'affichage devient `/channel info` et `/emoji info` (relancer `npm run deploy`).
@@ -58,6 +59,12 @@ Ce projet suit un versionnage sémantique.
 - Signalements : « Supprimer » exige « Gérer les messages » dans le salon du message signalé, plus dans celui de la carte.
 - Annonces : permission de mention de l'auteur revérifiée à chaque envoi programmé.
 - Starboard : jamais de repost d'un salon ou d'un fil privé dans un starboard public ; images spoiler jamais affichées en clair.
+- **Flux RSS** : adresse validée au moment même de la connexion (plus de DNS rebinding vers le réseau interne), ports 80/443/8080/8443,
+  décompression plafonnée à 1 Mo, analyse linéaire ; mention revérifiée à chaque publication ; l'auteur doit avoir accès au salon.
+- Rôles attribués automatiquement (boutique, menus de rôles, niveaux, candidatures, rôle vocal…) refusés s'ils ont une permission
+  sensible dans une surcharge de salon. `/snipe` et les alertes respectent les fils privés. `/statistiques` ne montre plus
+  l'activité des salons privés aux membres. `/channel cloner` contrôlé comme `creer`. Raison d'absence soumise aux filtres de liens.
+- AntiRaid : `/channel supprimer`, `/role delete` et les expulsions de `/activite` comptent comme des actions destructrices.
 
 ### Fixed
 - **Starboard et sticky** : plus de carte orpheline ni de doublon, plus d'auto-étoile par super-réaction ; sticky sans ping-pong entre bots.
@@ -75,6 +82,22 @@ Ce projet suit un versionnage sémantique.
 - **Divers** : compteurs bornés face aux limites de renommage de Discord ; compteurs et vocaux temporaires exclus des sauvegardes ;
   tickets archivés sans téléchargement à l'arrêt ; texte fait d'espaces refusé proprement dans les embeds ; `/diagnostics` signale
   aussi la catégorie des vocaux temporaires et le rôle gestionnaire des projets supprimés.
+
+### Fixed (revue n° 5)
+- **`/afk` et filtre des pseudos** : le préfixe [AFK] n'est plus renommé « Membre XXXX » et le pseudo est rendu au retour.
+- **Économie** : machine à sous à espérance exacte quelle que soit la mise (« Presque remboursé »), remboursement exact d'un rôle
+  non attribué, gain au-delà du plafond jamais négatif, taxe arrondie au supérieur. **Jeux** : parties et snipe arrêtés à la
+  suppression d'un fil ; classement non gonflable (abandon immédiat, nul contre le bot, quiz en solo).
+- **Modération** : softban relu avant le ban (ne lève plus un ban posé pendant la confirmation) ; `/lockdown enable duree` et
+  `/lock duree` refusés sur un verrou sans échéance (un lockdown de l'AntiRaid n'est plus levé à l'échéance) ; levées
+  automatiques sérialisées avec `/lock` ; `/channel sujet|nsfw` acquittés avant l'appel.
+- **Statistiques** : calcul différé, cache de 60 s, délai entre deux clics ; `/activite` bloquée après une coupure de collecte
+  de plus de 6 h (migration 27) et limitée à la liste affichée ; sessions vocales fantômes fermées.
+- **Candidatures** : un ping par formulaire toutes les 10 min, pas de décision sur sa propre candidature, avertissement si le
+  salon de réception est public.
+- **Automatisations** : rôle vocal fiable lors de connexions/déconnexions rapides (rattrapage périodique et à la reconnexion),
+  un article refusé par Discord n'arrête plus le flux, fils automatiques bornés, file de publication fidèle à la configuration.
+- **Alertes** : index développé une fois par mot-clé (10 000 abonnés : 202 ms → 4 ms par message).
 
 ## [0.5.2] — Non publié — Revue n° 3 et tests de bout en bout
 
