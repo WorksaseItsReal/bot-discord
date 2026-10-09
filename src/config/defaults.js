@@ -139,6 +139,8 @@ const defaultGuildConfig = Object.freeze({
     // Archive des transcripts (tickets ET ModMail) : pièces jointes ≤ 8 Mo (24 Mo au total)
     // re-téléversées avec le .txt. false : seuls leurs liens figurent (comportement historique).
     archiveAttachments: false,
+    // Notation : à la fermeture, l'auteur reçoit en MP 5 boutons ⭐ (1 à 5) + commentaire facultatif.
+    ratings: true,
   },
   modmail: {
     enabled: false,

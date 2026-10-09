@@ -18,6 +18,7 @@ const { discordTimestamp } = require('../../utils/time');
 const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { supportRoles, MAX_REASONS } = require('../../services/TicketService');
+const { starBar, formatAverage, formatAvgDuration, parseStars, parseTicketId, MAX_COMMENT } = require('../../services/TicketRatingService');
 const { UserError } = require('../../core/errors');
 const { describeApiError } = require('../../core/apiErrors');
 
@@ -26,7 +27,11 @@ const { describeApiError } = require('../../core/apiErrors');
  * Les actions DANS un ticket restent sur /ticket (fermer, ajouter, renommer…).
  * « Gérer le serveur » est revérifiée à chaque clic.
  *
- * Vues : home · setup · panel · reasons · open
+ * Vues : home · setup · panel · reasons · open · stats
+ *
+ * Notation des tickets (boutons envoyés en MP à l'auteur d'un ticket fermé, hors serveur) :
+ *   cmd:tickets:rate:<ticket>:<1-5> · cmd:tickets:ratecomment:<ticket> · cmd:tickets:ratenote:<ticket>
+ * L'auteur est revérifié en base (ticket_ratings), jamais déduit du message.
  */
 
 const SECTION = 'tickets';
@@ -41,7 +46,12 @@ const NAV = [
   { value: 'panel', label: 'Panneau', emoji: '📣', description: 'Salon et message du panneau d\'ouverture' },
   { value: 'reasons', label: 'Motifs', emoji: '🏷️', description: 'Motifs proposés à l\'ouverture d\'un ticket' },
   { value: 'open', label: 'Tickets ouverts', emoji: '📂', description: 'Liste des tickets en cours, avec liens' },
+  { value: 'stats', label: 'Statistiques', emoji: '📊', description: 'Notes, tickets par membre du staff, délais moyens' },
 ];
+
+/** Périodes de la vue « Statistiques » (jours, 0 = depuis toujours). */
+const PERIODS = { 0: 'Depuis toujours', 30: '30 derniers jours', 7: '7 derniers jours' };
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------- helpers purs
 
@@ -152,6 +162,13 @@ const has = (cache, id) => Boolean(id) && (!cache || cache.has(id));
 
 // ---------------------------------------------------------------- vues
 
+/** Note moyenne (accueil) : « ⭐ 4,5 / 5 (12 avis) », ou l'état de la notation. */
+function ratingSummary(client, guildId, cfg) {
+  if (cfg.ratings === false) return '🔴 Notation désactivée';
+  const summary = client.services.ticketRatings?.stats(guildId).summary;
+  return summary?.rated ? `⭐ **${formatAverage(summary.avgRating)}**\n${summary.rated} avis` : '*Aucun avis*';
+}
+
 function homeView(client, guild, notice) {
   const cfg = cfgOf(client, guild.id);
   const channels = guild.channels?.cache;
@@ -187,6 +204,7 @@ function homeView(client, guild, notice) {
           field(ICONS.count, 'Limite par membre', `**${cfg.maxPerUser || 1}**`),
           field(ICONS.tag, 'Motifs', cfg.reasons?.length ? `**${cfg.reasons.length}**` : '*Aucun*'),
           field('📎', 'Pièces jointes', cfg.archiveAttachments ? '🟢 Archivées\n(8 Mo max. chacune, 24 Mo au total)' : '🔴 Liens seulement'),
+          field(ICONS.star, 'Note moyenne', ratingSummary(client, guild.id, cfg)),
         ],
         footer: 'Actions dans un ticket : /ticket (fermer, ajouter, renommer…)',
       }),
@@ -381,9 +399,92 @@ function openView(client, guild, notice) {
   };
 }
 
+function statsView(client, guild, notice, days = 0) {
+  const cfg = cfgOf(client, guild.id);
+  const period = Object.hasOwn(PERIODS, days) ? Number(days) : 0;
+  const since = period ? Date.now() - period * DAY_MS : 0;
+  const ratings = client.services.ticketRatings;
+  const { summary, staff, distribution, comments } = ratings
+    ? ratings.stats(guild.id, since)
+    : { summary: { closed: 0, rated: 0, avgRating: null, avgClaimMs: null, avgCloseMs: null }, staff: [], distribution: [0, 0, 0, 0, 0], comments: [] };
+  const enabled = cfg.ratings !== false;
+  const avg = formatAverage(summary.avgRating);
+  const rate = summary.closed ? Math.round((summary.rated / summary.closed) * 100) : 0;
+  const staffLines = staff.map((st, i) => {
+    const note = st.rated ? `⭐ **${formatAverage(st.avgRating)}** (${st.rated} avis)` : '*pas encore noté*';
+    return `${i + 1}. <@${st.staffId}> · **${st.tickets}** ticket(s) · ${note} · prise en charge ${formatAvgDuration(st.avgClaimMs)}`;
+  });
+  const total = distribution.reduce((a, b) => a + b, 0);
+  const bars = total ? distribution.map((n, i) => `${i + 1} ⭐ ${'▰'.repeat(Math.round((n / total) * 10)).padEnd(10, '▱')} ${n}`).reverse().join('\n') : null;
+  const commentLines = comments.map((c) => `${starBar(c.rating)} <@${c.user_id}> · « ${truncate(String(c.comment).replace(/\s+/g, ' '), 150)} »`);
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: ICONS.stats,
+        title: `Statistiques des tickets · ${PERIODS[period]}`,
+        description: [
+          notice ? `${notice}\n` : null,
+          `Notation ${enabled ? '🟢 **activée** : l\'auteur reçoit en MP 5 boutons ⭐ à la fermeture de son ticket.' : '🔴 **désactivée** : aucun MP n\'est envoyé à la fermeture.'}`,
+          subtext('Tickets fermés depuis la mise à jour du bot (les délais de prise en charge sont mesurés depuis cette version).'),
+        ],
+        fields: [
+          field(ICONS.lock, 'Tickets fermés', `**${summary.closed}**`),
+          field(ICONS.star, 'Note moyenne', avg ? `**${avg}**\n${summary.rated} avis · ${rate} %` : '*Aucun avis*'),
+          field(ICONS.stats, 'Ouverts au total', `**${cfg.stats?.opened ?? 0}**`),
+          field('🙋', 'Prise en charge moy.', formatAvgDuration(summary.avgClaimMs)),
+          field(ICONS.duration, 'Durée moyenne', formatAvgDuration(summary.avgCloseMs)),
+          field('📂', 'En cours', `**${openTickets(client, guild.id).length}**`),
+          wide(ICONS.moderator, 'Par membre du staff (prise en charge)', staffLines.length ? truncate(staffLines.join('\n'), 1024) : '*Aucun ticket pris en charge sur la période*'),
+          bars ? wide(ICONS.star, 'Répartition des notes', `\`\`\`\n${bars}\n\`\`\``) : null,
+          commentLines.length ? wide('💬', 'Derniers commentaires', truncate(commentLines.join('\n'), 1024)) : null,
+        ],
+        footer: 'Notes : 1 (décevante) à 5 (excellente) · une note par ticket, par son auteur',
+      }),
+    ],
+    components: [
+      navRow('stats'),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('cmd:tickets:period')
+          .setPlaceholder('Période…')
+          .addOptions(Object.entries(PERIODS).map(([value, label]) => ({ value, label, emoji: ICONS.date, default: Number(value) === period }))),
+      ),
+      ...buttonRows(
+        enabled
+          ? actionButton({ command: 'tickets', action: 'ratings', args: ['off'], label: 'Notation ✅', emoji: ICONS.star })
+          : actionButton({ command: 'tickets', action: 'ratings', args: ['on'], label: 'Notation ❌', emoji: ICONS.star }),
+        actionButton({ command: 'tickets', action: 'go', args: [period ? `stats.${period}` : 'stats'], label: 'Actualiser', emoji: ICONS.refresh, style: ButtonStyle.Primary }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+/** Texte du formulaire de commentaire (MP). */
+function ratingModal(ticketId) {
+  return new ModalBuilder()
+    .setCustomId(`cmd:tickets:ratenote:${ticketId}`)
+    .setTitle(`Avis sur le ticket #${ticketId}`.slice(0, 45))
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('commentaire')
+          .setLabel('Votre commentaire')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(MAX_COMMENT)
+          .setPlaceholder('Qu\'avez-vous apprécié ? Que pourrions-nous améliorer ?'),
+      ),
+    );
+}
+
 function render(client, guild, view = 'home', notice) {
-  const [name] = String(view).split(/[:.]/);
+  const [name, arg] = String(view).split(/[:.]/);
   switch (name) {
+    case 'stats':
+      return statsView(client, guild, notice, Number(arg) || 0);
     case 'setup':
       return setupView(client, guild, notice);
     case 'panel':
@@ -442,6 +543,8 @@ module.exports = {
   parseReasons,
   reasonsToText,
   publishFailure,
+  /** Notation d'un ticket fermé : boutons envoyés en MP (hors serveur). */
+  dmButtons: ['rate', 'ratecomment', 'ratenote'],
   data: new SlashCommandBuilder()
     .setName('tickets')
     .setDescription('Ouvre le tableau de bord des tickets : salons, staff, panneau, motifs, statistiques.')
@@ -600,6 +703,54 @@ module.exports = {
       // Tableau : ConfigService le remplace en entier.
       client.services.config.update(interaction.guildId, { tickets: { reasons } });
       await interaction.update(reasonsView(client, interaction.guild, `${ICONS.success} ${reasons.length} motif(s) enregistré(s). Republiez le panneau pour l'appliquer.`));
+    },
+    /** Période de la vue « Statistiques ». */
+    async period(interaction, client) {
+      guard(interaction);
+      const days = Number(interaction.values?.[0] ?? 0);
+      if (!Object.hasOwn(PERIODS, days)) throw new UserError('Période inconnue.');
+      await interaction.update(statsView(client, interaction.guild, null, days));
+    },
+    /** cmd:tickets:ratings:<on|off> — MP de notation à la fermeture. */
+    async ratings(interaction, client, [state]) {
+      guard(interaction);
+      if (state !== 'on' && state !== 'off') throw new UserError('Ce bouton est invalide.');
+      const ratings = state === 'on';
+      client.services.config.update(interaction.guildId, { tickets: { ratings } });
+      const notice = ratings
+        ? `${ICONS.success} Notation activée : l'auteur d'un ticket fermé recevra 5 boutons ⭐ en MP.`
+        : `${ICONS.success} Notation désactivée : plus aucun MP à la fermeture (les statistiques restent tenues).`;
+      await interaction.update(statsView(client, interaction.guild, notice));
+    },
+
+    // ------------------------------------------------------------ notation (MP, hors serveur)
+
+    /** cmd:tickets:rate:<ticket>:<1-5> — note du ticket par son auteur (vérifié en base). */
+    async rate(interaction, client, [ticketRaw, starsRaw]) {
+      const ticketId = parseTicketId(ticketRaw);
+      const stars = parseStars(starsRaw);
+      const service = client.services.ticketRatings;
+      const row = service.rate(ticketId, interaction.user.id, stars);
+      await interaction.update(service.thanksPayload(row));
+      await service.log(row);
+    },
+    /** cmd:tickets:ratecomment:<ticket> — formulaire de commentaire (après la note). */
+    async ratecomment(interaction, client, [ticketRaw]) {
+      const ticketId = parseTicketId(ticketRaw);
+      const row = client.services.ticketRatings.ownRow(ticketId, interaction.user.id);
+      if (row.rating == null) throw new UserError('Notez d\'abord le ticket avec les étoiles.');
+      if (row.comment != null) throw new UserError('Vous avez déjà commenté ce ticket.');
+      await interaction.showModal(ratingModal(ticketId));
+    },
+    /** cmd:tickets:ratenote:<ticket> — commentaire envoyé. */
+    async ratenote(interaction, client, [ticketRaw]) {
+      const ticketId = parseTicketId(ticketRaw);
+      const service = client.services.ticketRatings;
+      const row = service.comment(ticketId, interaction.user.id, textValue(interaction, 'commentaire'));
+      const payload = service.thanksPayload(row);
+      if (interaction.isFromMessage?.()) await interaction.update(payload);
+      else await interaction.reply(payload);
+      await service.log(row, { comment: true });
     },
     /** Retire tous les motifs (retour au bouton simple). */
     async reasonsclear(interaction, client) {

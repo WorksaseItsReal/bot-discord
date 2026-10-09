@@ -4,8 +4,8 @@ class GiveawayRepository {
   /** @param {import('better-sqlite3').Database} db */
   constructor(db) {
     this.insertStmt = db.prepare(
-      `INSERT INTO giveaways (guild_id, channel_id, message_id, prize, winners, host_id, required_role, forbidden_role, ends_at, created_at)
-       VALUES (@guildId, @channelId, @messageId, @prize, @winners, @hostId, @requiredRole, @forbiddenRole, @endsAt, @createdAt)`,
+      `INSERT INTO giveaways (guild_id, channel_id, message_id, prize, winners, host_id, required_role, forbidden_role, min_level, min_invites, min_days, ends_at, created_at)
+       VALUES (@guildId, @channelId, @messageId, @prize, @winners, @hostId, @requiredRole, @forbiddenRole, @minLevel, @minInvites, @minDays, @endsAt, @createdAt)`,
     );
     this.setMessageStmt = db.prepare('UPDATE giveaways SET message_id = ? WHERE id = ?');
     this.byIdStmt = db.prepare('SELECT * FROM giveaways WHERE id = ?');
@@ -34,8 +34,9 @@ class GiveawayRepository {
     });
   }
 
+  /** Conditions minLevel / minInvites / minDays (migration 23) facultatives. */
   create(data) {
-    return Number(this.insertStmt.run({ ...data, createdAt: Date.now() }).lastInsertRowid);
+    return Number(this.insertStmt.run({ minLevel: null, minInvites: null, minDays: null, ...data, createdAt: Date.now() }).lastInsertRowid);
   }
 
   setMessage(id, messageId) {

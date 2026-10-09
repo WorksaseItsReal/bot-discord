@@ -12,6 +12,9 @@ const { UserError } = require('../core/errors');
  * Actions communes (commande « _ ») :
  *   cmd:_:delete:<ownerId>  supprime le message (auteur ou « Gérer les messages »)
  *   cmd:_:noop:<x>          étiquette désactivée (jamais cliquable)
+ *
+ * Une commande réservée aux serveurs peut autoriser certaines actions en MP en les
+ * listant dans `dmButtons` (ex : /tickets → notation d'un ticket fermé).
  */
 module.exports = {
   isSafeArg,
@@ -34,7 +37,9 @@ module.exports = {
     if (typeof handler !== 'function') {
       throw new UserError('Ce bouton n\'est plus disponible. Relancez la commande.');
     }
-    if (cmd.guildOnly !== false && !interaction.inGuild()) {
+    // `dmButtons` : actions d'une commande de serveur utilisables en MP (ex : notation d'un
+    // ticket fermé) ; le handler revérifie lui-même l'utilisateur en base.
+    if (cmd.guildOnly !== false && !interaction.inGuild() && !cmd.dmButtons?.includes(action)) {
       throw new UserError('Cette action n\'est disponible que sur un serveur.');
     }
     return handler(interaction, client, args);

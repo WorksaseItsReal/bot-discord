@@ -43,6 +43,8 @@ const { EconomyRepository } = require('../database/repositories/EconomyRepositor
 const { GameScoreRepository } = require('../database/repositories/GameScoreRepository');
 const { TimedActionRepository } = require('../database/repositories/TimedActionRepository');
 const { ActivityRepository } = require('../database/repositories/ActivityRepository');
+const { ApplicationRepository } = require('../database/repositories/ApplicationRepository');
+const { TicketRatingRepository } = require('../database/repositories/TicketRatingRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -77,6 +79,8 @@ const { EconomyService } = require('../services/EconomyService');
 const { GameService } = require('../services/GameService');
 const { TimedLockService } = require('../services/TimedLockService');
 const { ActivityService } = require('../services/ActivityService');
+const { ApplicationService } = require('../services/ApplicationService');
+const { TicketRatingService } = require('../services/TicketRatingService');
 
 const logger = createLogger('client');
 
@@ -154,6 +158,8 @@ class GadgetClient extends Client {
       gameScores: new GameScoreRepository(db),
       timedActions: new TimedActionRepository(db),
       activity: new ActivityRepository(db),
+      applications: new ApplicationRepository(db),
+      ticketRatings: new TicketRatingRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -163,6 +169,9 @@ class GadgetClient extends Client {
     const antiraid = new AntiRaidService({ client: this, config: configService, logging });
     const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging, antiraid });
     const strikes = new StrikeService(this.repositories.strikes, configService);
+    // Notation des tickets : prévenue par TicketService à chaque fermeture.
+    const ticketRatings = new TicketRatingService({ client: this, ratings: this.repositories.ticketRatings, config: configService, logging });
+    const tickets = new TicketService({ tickets: this.repositories.tickets, config: configService, logging, ratings: ticketRatings });
     this.services = {
       config: configService,
       logging,
@@ -172,7 +181,8 @@ class GadgetClient extends Client {
       automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents, quarantines: this.repositories.automodQuarantines }),
       antiraid,
       lockdown: new LockdownService({ locks: this.repositories.locks, logging, timed: this.repositories.timedActions }),
-      tickets: new TicketService({ tickets: this.repositories.tickets, config: configService, logging }),
+      tickets,
+      ticketRatings,
       giveaways: new GiveawayService({ client: this, giveaways: this.repositories.giveaways }),
       suggestions: new SuggestionService({ client: this, suggestions: this.repositories.suggestions, config: configService }),
       backup: new BackupService({ backups: this.repositories.backups }),
@@ -205,6 +215,8 @@ class GadgetClient extends Client {
       timedLocks: new TimedLockService({ client: this, timed: this.repositories.timedActions }),
       // Statistiques du serveur : compteurs en mémoire, écrits par lots (30 s et à l'arrêt).
       activity: new ActivityService({ client: this, activity: this.repositories.activity, config: configService }),
+      // Candidatures (/candidatures, /candidature) : formulaires, cartes du staff, entretiens.
+      applications: new ApplicationService({ client: this, applications: this.repositories.applications, config: configService, logging, tickets }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -338,6 +350,8 @@ class GadgetClient extends Client {
       ['Vidage des tickets', () => s.tickets?.flush?.()],
       ['Vidage des giveaways', () => s.giveaways?.flush?.()],
       ['Vidage des projets', () => s.projects?.flush?.()],
+      // Notation des tickets : plus de nouveaux MP, envois en cours attendus.
+      ['Vidage des notes de tickets', () => s.ticketRatings?.flush?.()],
     ];
     const late = await this.#settleAll(tasks, this.shutdownDeadlineMs);
     if (late.length) logger.warn(`Arrêt : échéance de ${this.shutdownDeadlineMs} ms atteinte, toujours en cours : ${late.join(', ')}.`);
