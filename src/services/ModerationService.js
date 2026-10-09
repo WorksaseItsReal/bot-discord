@@ -292,6 +292,9 @@ async function settleAndAnnounce(interaction, { label, embed, buttons = [] }) {
   });
 }
 
+/** Levées de sanction en cours via un bouton (`type:serveur:membre`). */
+const revoking = new Set();
+
 /**
  * Fabrique du handler de bouton de levée de sanction (cmd:<unban|unmute|untimeout>:revoke:<userId>).
  * Revérifie la permission du cliqueur, valide l'identifiant (customId contrôlé par le client),
@@ -305,15 +308,23 @@ function revokeHandler({ permission, type, done, run }) {
   return async function revoke(interaction, client, [rawUserId]) {
     requirePermission(interaction, permission);
     const userId = snowflake(rawUserId, 'membre');
-    // Acquitte le clic AVANT les appels API (fetch, levée, log) : le délai de 3 s ne peut plus expirer.
-    await interaction.deferUpdate();
-    const user = await run(interaction, client, userId);
-    const id = user?.id ?? userId;
-    await settleAndAnnounce(interaction, {
-      label: `${done} par ${interaction.user.username}`,
-      embed: sanctionCard({ type, user, userId: id, moderator: interaction.user }),
-      buttons: [historyButton(id)],
-    });
+    // Double clic (ou deux modérateurs) : une seule levée, un seul log.
+    const key = `${type}:${interaction.guildId}:${userId}`;
+    if (revoking.has(key)) throw new UserError('Cette sanction est déjà en cours de levée.');
+    revoking.add(key);
+    try {
+      // Acquitte le clic AVANT les appels API (fetch, levée, log) : le délai de 3 s ne peut plus expirer.
+      await interaction.deferUpdate();
+      const user = await run(interaction, client, userId);
+      const id = user?.id ?? userId;
+      await settleAndAnnounce(interaction, {
+        label: `${done} par ${interaction.user.username}`,
+        embed: sanctionCard({ type, user, userId: id, moderator: interaction.user }),
+        buttons: [historyButton(id)],
+      });
+    } finally {
+      revoking.delete(key);
+    }
   };
 }
 

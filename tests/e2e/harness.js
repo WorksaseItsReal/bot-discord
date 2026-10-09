@@ -14,7 +14,8 @@
  *
  * Critères d'échec relevés par `problems()` : log `error` du bot, rejet non géré,
  * avertissement de dépréciation, interaction jamais acquittée (ou après 3 s),
- * violation de limite / appel refusé par Discord, texte suspect (« undefined »…).
+ * violation de limite / appel refusé par Discord, texte suspect (« undefined »…),
+ * mention de masse effective (@everyone/@here ou rôle que allowed_mentions laisserait notifier).
  *
  * Utilisation : `const h = await createHarness(); h.configureAll();`
  *   `await h.slash('ban', [{ name: 'membre', type: 6, value: IDS.users.target }])`,
@@ -308,6 +309,11 @@ async function createHarness(opts = {}) {
       fake.dispatchNow('INTERACTION_CREATE', raw, label);
       rec.interaction = interactionObjects.get(raw.id) ?? null;
       await this.settle({ rec });
+      // Composant sans gestionnaire (collector terminé ou réservé à un autre membre) :
+      // le routeur répond « bouton expiré » après 2,5 s, au-delà de la fenêtre de settle.
+      if (rec.ackType == null && raw.type === 3 && !client.componentHandler?.resolve(raw.data.custom_id)) {
+        await this.waitFor(() => rec.ackType != null, { timeout: 3_000 });
+      }
       return rec;
     },
 
@@ -595,6 +601,7 @@ async function createHarness(opts = {}) {
         late,
         violations: fake.violations.map((v) => `[${v.label}] ${v.method} ${v.route} : ${v.problems.join(' ; ')}`),
         suspicious: fake.suspicious.map((v) => `[${v.label}] ${v.method} ${v.route} : ${v.problems.join(' ; ')}`),
+        massMentions: fake.massMentions.map((v) => `[${v.label}] ${v.method} ${v.route} : ${v.problems.join(' ; ')}`),
       };
     },
 
@@ -618,6 +625,7 @@ async function createHarness(opts = {}) {
       unhandled.length = 0;
       fake.violations.length = 0;
       fake.suspicious.length = 0;
+      fake.massMentions.length = 0;
       this.sent = [];
     },
 

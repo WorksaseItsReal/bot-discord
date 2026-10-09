@@ -55,6 +55,10 @@ class FakeDiscord {
     this.violations = [];
     /** Textes suspects envoyés (« undefined », « [object Object] », mention vide…). */
     this.suspicious = [];
+    /** Mentions de masse effectives (@everyone/@here, rôle) que Discord notifierait. */
+    this.massMentions = [];
+    /** Rôles qui ne doivent jamais être notifiés, même via une liste explicite (saisies hostiles). */
+    this.forbiddenPings = new Set();
     /** Routes non simulées (réponse par défaut) : à compléter dans le harnais. */
     this.unmocked = [];
     /** Erreurs injectées : { match(call) → bool, status, code, message, times } */
@@ -131,6 +135,10 @@ class FakeDiscord {
     if (call.body && method !== 'GET') {
       const found = L.findSuspiciousText(call.body);
       if (found.length) this.suspicious.push({ method, route, problems: found, label: call.label });
+      if (method === 'POST' || method === 'PATCH') {
+        const pings = L.findMassMentions(call.body, this.forbiddenPings);
+        if (pings.length) this.massMentions.push({ method, route, problems: pings, label: call.label });
+      }
     }
 
     const injected = this.injections.find((inj) => inj.times > 0 && inj.match(call));
@@ -202,7 +210,12 @@ class FakeDiscord {
 
   dispatchNow(t, d, label = scenario.getStore() ?? this.label) {
     const ws = this.client.ws;
-    scenario.run(label, () => ws.handlePacket({ op: 0, t, d: json(d), s: null }, ws.shards.get(0)));
+    // Comme WebSocketManager : `raw` est émis (synchrone) juste avant le traitement du paquet.
+    scenario.run(label, () => {
+      const packet = { op: 0, t, d: json(d), s: null };
+      this.client.emit('raw', packet, 0);
+      ws.handlePacket(packet, ws.shards.get(0));
+    });
   }
 
   #audit(actionType, targetId, call, changes = [], options = undefined) {
@@ -518,8 +531,7 @@ class FakeDiscord {
     });
     r('DELETE', '/channels/:channel', (p, call) => {
       const ch = this.channel(p.channel, call);
-      this.channels.delete(ch.id);
-      this.dispatch('CHANNEL_DELETE', ch);
+      this.deleteChannel(ch.id, { now: false });
       this.#audit(12, ch.id, call);
       return ch;
     });
@@ -774,15 +786,7 @@ class FakeDiscord {
     r('DELETE', '/guilds/:guild/roles/:role', (p, call) => {
       const role = this.#role(p.role, call);
       this.#assertRoleBelowBot(role, call);
-      this.roles.delete(role.id);
-      for (const m of this.members.values()) m.roles = m.roles.filter((x) => x !== role.id);
-      // Discord retire aussi les surcharges de permissions de ce rôle.
-      for (const ch of this.channels.values()) {
-        if (!ch.permission_overwrites?.some((o) => o.id === role.id)) continue;
-        ch.permission_overwrites = ch.permission_overwrites.filter((o) => o.id !== role.id);
-        this.dispatch('CHANNEL_UPDATE', ch);
-      }
-      this.dispatch('GUILD_ROLE_DELETE', { guild_id: this.guildId, role_id: role.id });
+      this.deleteRole(role.id, { now: false });
       this.#audit(32, role.id, call);
     });
     r('GET', '/guilds/:guild/audit-logs', (p, call) => {
@@ -1008,23 +1012,28 @@ class FakeDiscord {
       if (userId === this.guild.owner_id && 'nick' in b) throw this.#error(call, 403, 50013, 'Missing Permissions');
       this.#assertManageable(userId, call);
     }
+    // Une valeur inchangée ne produit pas d'entrée d'audit (comme Discord).
     const changes = [];
     if ('nick' in b) {
-      changes.push({ key: 'nick', old_value: m.nick ?? undefined, new_value: b.nick ?? undefined });
+      if ((m.nick || null) !== (b.nick || null)) changes.push({ key: 'nick', old_value: m.nick ?? undefined, new_value: b.nick ?? undefined });
       m.nick = b.nick || null;
     }
     if ('communication_disabled_until' in b) {
-      changes.push({ key: 'communication_disabled_until', old_value: m.communication_disabled_until ?? undefined, new_value: b.communication_disabled_until ?? undefined });
+      if ((m.communication_disabled_until ?? null) !== (b.communication_disabled_until ?? null)) {
+        changes.push({ key: 'communication_disabled_until', old_value: m.communication_disabled_until ?? undefined, new_value: b.communication_disabled_until ?? undefined });
+      }
       m.communication_disabled_until = b.communication_disabled_until;
     }
     // @everyone (implicite) est ignoré par Discord ; discord.js l'envoie via roles.remove([...]).
+    const rolesBefore = [...m.roles].sort().join(',');
     if ('roles' in b) m.roles = [...new Set(b.roles)].filter((r) => r !== this.guildId);
+    const rolesChanged = 'roles' in b && [...m.roles].sort().join(',') !== rolesBefore;
     if ('mute' in b) m.mute = Boolean(b.mute);
     if ('deaf' in b) m.deaf = Boolean(b.deaf);
     if ('channel_id' in b) this.setVoice(userId, b.channel_id);
     this.dispatch('GUILD_MEMBER_UPDATE', this.memberWithGuild(m));
     if (changes.length) this.#audit(24, userId, call, changes);
-    if ('roles' in b) this.#audit(25, userId, call);
+    if (rolesChanged) this.#audit(25, userId, call);
     return m;
   }
 
@@ -1033,6 +1042,8 @@ class FakeDiscord {
     const role = this.#role(roleId, call);
     if (role.managed || roleId === this.guildId) throw this.#error(call, 400, 50028, 'Invalid Role');
     this.#assertRoleBelowBot(role, call);
+    // Rôle déjà présent (ou déjà absent) : Discord répond 204 sans événement ni entrée d'audit.
+    if (m.roles.includes(roleId) === add) return;
     m.roles = add ? [...new Set([...m.roles, roleId])] : m.roles.filter((r) => r !== roleId);
     this.dispatch('GUILD_MEMBER_UPDATE', this.memberWithGuild(m));
     this.#audit(25, userId, call, [{ key: add ? '$add' : '$remove', new_value: [{ id: role.id, name: role.name }] }]);
@@ -1097,6 +1108,41 @@ class FakeDiscord {
     const msg = this.buildMessage({ channelId: hook.channel_id, body: call.body, files: call.files, author, extra: { webhook_id: hook.id } });
     this.#echoMessage(msg, 'MESSAGE_CREATE');
     return call.query.wait === 'true' ? msg : undefined;
+  }
+
+  /**
+   * Supprime un salon comme Discord : les salons d'une catégorie supprimée en sortent
+   * (parent_id null, CHANNEL_UPDATE), puis CHANNEL_DELETE. `now` : émission immédiate
+   * (suppression faite par un humain) ou différée (réponse à une requête du bot).
+   */
+  deleteChannel(id, { now = true } = {}) {
+    const ch = this.channels.get(id);
+    if (!ch) return null;
+    this.channels.delete(id);
+    const emit = (t, d) => (now ? this.dispatchNow(t, d) : this.dispatch(t, d));
+    for (const child of this.channels.values()) {
+      if (child.parent_id !== id) continue;
+      child.parent_id = null;
+      emit('CHANNEL_UPDATE', child);
+    }
+    emit('CHANNEL_DELETE', ch);
+    return ch;
+  }
+
+  /** Supprime un rôle comme Discord : retiré des membres et des surcharges de salons. */
+  deleteRole(id, { now = true } = {}) {
+    const role = this.roles.get(id);
+    if (!role) return null;
+    const emit = (t, d) => (now ? this.dispatchNow(t, d) : this.dispatch(t, d));
+    this.roles.delete(id);
+    for (const m of this.members.values()) m.roles = m.roles.filter((x) => x !== id);
+    for (const ch of this.channels.values()) {
+      if (!ch.permission_overwrites?.some((o) => o.id === id)) continue;
+      ch.permission_overwrites = ch.permission_overwrites.filter((o) => o.id !== id);
+      emit('CHANNEL_UPDATE', ch);
+    }
+    emit('GUILD_ROLE_DELETE', { guild_id: this.guildId, role_id: id });
+    return role;
   }
 
   /** Déplace un membre en vocal (ou le déconnecte) et émet VOICE_STATE_UPDATE. */

@@ -63,7 +63,7 @@ module.exports = {
       embed.setColor(parseColor(color) ?? TONES.brand);
       if (image) embed.setImage(image);
       if (thumbnail) embed.setThumbnail(thumbnail);
-      if (footer) embed.setFooter({ text: footer });
+      if (footer?.trim()) embed.setFooter({ text: footer });
 
       const channel = interaction.options.getChannel('salon') || interaction.channel;
       // L'auteur doit lui-même pouvoir écrire dans le salon cible (pas d'envoi « par procuration »).

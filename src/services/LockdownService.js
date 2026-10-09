@@ -153,6 +153,19 @@ class LockdownService {
   constructor({ locks, logging }) {
     this.locks = locks;
     this.logging = logging;
+    /** Serveurs dont un verrouillage ou une levée globale est en cours (double clic, deux admins). */
+    this.busy = new Set();
+  }
+
+  /** Exécute `fn` seul pour ce serveur : enable/disable simultanés se marcheraient dessus. */
+  async #exclusive(guildId, fn) {
+    if (this.busy.has(guildId)) throw new UserError('Un verrouillage ou une levée du serveur est déjà en cours. Patientez quelques secondes.');
+    this.busy.add(guildId);
+    try {
+      return await fn();
+    } finally {
+      this.busy.delete(guildId);
+    }
   }
 
   /**
@@ -237,10 +250,12 @@ class LockdownService {
    * @param {{ log?: boolean }} [opts] log=false : l'appelant publie sa propre carte (AntiRaid)
    */
   async enable(guild, moderator, reason = 'Lockdown', { log = true } = {}) {
-    const channels = [...guild.channels.cache.values()].filter((c) => LOCKABLE_TYPES.has(c.type) && c.manageable);
-    const n = await inBatches(channels, (c) => this.lockChannel(c, moderator, reason, { scope: SCOPES.lockdown }));
-    if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }), undefined, { event: 'lockdown' });
-    return n;
+    return this.#exclusive(guild.id, async () => {
+      const channels = [...guild.channels.cache.values()].filter((c) => LOCKABLE_TYPES.has(c.type) && c.manageable);
+      const n = await inBatches(channels, (c) => this.lockChannel(c, moderator, reason, { scope: SCOPES.lockdown }));
+      if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }), undefined, { event: 'lockdown' });
+      return n;
+    });
   }
 
   /**
@@ -248,18 +263,20 @@ class LockdownService {
    * (les /lock individuels restent, à lever avec /unlock), par lots de 5.
    */
   async disable(guild, moderator) {
-    const rows = this.locks.list(guild.id).filter(isLockdownLock);
-    const n = await inBatches(rows, async (lock) => {
-      const channel = guild.channels.cache.get(lock.channel_id);
-      if (!channel?.permissionOverwrites) {
-        this.locks.delete(guild.id, lock.channel_id); // salon supprimé entre-temps
-        return false;
-      }
-      await this.unlockChannel(channel, 'Fin du lockdown');
-      return true;
+    return this.#exclusive(guild.id, async () => {
+      const rows = this.locks.list(guild.id).filter(isLockdownLock);
+      const n = await inBatches(rows, async (lock) => {
+        const channel = guild.channels.cache.get(lock.channel_id);
+        if (!channel?.permissionOverwrites) {
+          this.locks.delete(guild.id, lock.channel_id); // salon supprimé entre-temps
+          return false;
+        }
+        await this.unlockChannel(channel, 'Fin du lockdown');
+        return true;
+      });
+      await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }), undefined, { event: 'lockdown' });
+      return n;
     });
-    await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }), undefined, { event: 'lockdown' });
-    return n;
   }
 
   /** Nombre de salons verrouillés par un lockdown en cours. */
