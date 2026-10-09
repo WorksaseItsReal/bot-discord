@@ -30,6 +30,9 @@ const { AutomodEventRepository } = require('../database/repositories/AutomodEven
 const { AutomodQuarantineRepository } = require('../database/repositories/AutomodQuarantineRepository');
 const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { LevelRepository } = require('../database/repositories/LevelRepository');
+const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
+const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
+const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -48,6 +51,9 @@ const { ProjectService } = require('../services/ProjectService');
 const { LogSetupService } = require('../services/LogSetupService');
 const { WelcomeService } = require('../services/WelcomeService');
 const { LevelService } = require('../services/LevelService');
+const { TempRoleService } = require('../services/TempRoleService');
+const { AnnouncementService } = require('../services/AnnouncementService');
+const { BirthdayService } = require('../services/BirthdayService');
 
 const logger = createLogger('client');
 
@@ -103,6 +109,9 @@ class GadgetClient extends Client {
       automodQuarantines: new AutomodQuarantineRepository(db),
       modNotes: new ModNoteRepository(db),
       levels: new LevelRepository(db),
+      tempRoles: new TempRoleRepository(db),
+      announcements: new ScheduledAnnouncementRepository(db),
+      birthdays: new BirthdayRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -131,6 +140,10 @@ class GadgetClient extends Client {
       logSetup: new LogSetupService({ config: configService }),
       welcome: new WelcomeService({ client: this, config: configService, logging }),
       levels: new LevelService({ client: this, levels: this.repositories.levels, config: configService }),
+      // Tâches planifiées : chacune est une étape isolée du SchedulerService.
+      tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
+      announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
+      birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));

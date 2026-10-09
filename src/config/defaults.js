@@ -212,6 +212,16 @@ const defaultGuildConfig = Object.freeze({
     ignoredRoles: [],       // rôles sans XP
     multipliers: [],        // [{ roleId, multiplier }] : le plus élevé du membre s'applique
   },
+  // Anniversaires (/anniversaire config). Variables du message : {membre} {pseudo} {serveur} {age}
+  // (la ligne contenant {age} n'est affichée que si le membre a accepté de montrer son âge).
+  birthdays: {
+    enabled: false,
+    channelId: null,          // salon des messages d'anniversaire (null : aucun message)
+    message: null,            // null = message par défaut (services/BirthdayService.js)
+    roleId: null,             // rôle « anniversaire » porté 24 h
+    timeZone: 'Europe/Paris', // fuseau IANA du serveur (date du jour)
+    hour: 9,                  // heure locale d'envoi (0-23)
+  },
 });
 
 module.exports = { defaultGuildConfig };
