@@ -1,11 +1,11 @@
 {
   "name": "inspecteur-gadget-bot",
-  "version": "0.2.0",
+  "version": "0.6.0",
   "description": "Inspecteur Gadget — bot Discord de gestion tout-en-un (modération, sécurité, automod, antiraid, logs, tickets, giveaways, utilitaires) construit avec discord.js.",
   "type": "commonjs",
   "main": "src/index.js",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "start": "node src/index.js",
@@ -14,7 +14,10 @@
     "deploy:global": "node scripts/deploy-commands.js --global",
     "check": "node scripts/healthcheck.js",
     "migrate": "node scripts/migrate.js",
-    "test": "node --test"
+    "backup:db": "node scripts/backup-db.js",
+    "test": "node --test",
+    "test:e2e": "node --test tests/e2e/*.test.js",
+    "test:chaos": "node tests/e2e/chaos.run.js"
   },
   "keywords": [
     "discord",
@@ -28,7 +31,7 @@
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.8.1",
-    "discord.js": "^14.16.3",
+    "discord.js": "^14.22.0",
     "dotenv": "^16.4.5"
   }
 }

@@ -1,0 +1,28 @@
+# Jamais dans l'image : secrets, données, dépendances locales, historique
+.env
+.env.*
+!.env.example
+node_modules
+data
+backups
+transcripts
+logs
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+
+# Inutile à l'exécution
+.git
+.github
+.claude
+.cursor
+.vscode
+.idea
+tests
+docs
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore

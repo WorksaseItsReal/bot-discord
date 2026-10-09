@@ -1,27 +1,54 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const { card, wide, ICONS, status, actionButton, buttonRows } = require('../../utils/ui');
+const { fitList } = require('../../services/LoggingService');
+const { UserError } = require('../../core/errors');
+
+/** Carte de la whitelist, avec une ligne de retour optionnelle en tête. */
+function whitelistCard(wl, notice) {
+  const users = wl.users ?? [];
+  const roles = wl.roles ?? [];
+  return card({
+    tone: 'info',
+    section: 'security',
+    icon: '🔐',
+    title: 'Whitelist de sécurité',
+    description: [
+      notice ? `${ICONS.success} ${notice}` : null,
+      'Ces membres et rôles échappent aux sanctions automatiques de l\'AntiRaid.',
+    ],
+    fields: [
+      wide(ICONS.user, `Utilisateurs (${users.length})`, fitList(users.map((u) => `<@${u}>`)) ?? '*Aucun*'),
+      wide(ICONS.role, `Rôles (${roles.length})`, fitList(roles.map((r) => `<@&${r}>`)) ?? '*Aucun*'),
+    ],
+  });
+}
 
 /**
  * Whitelist de sécurité : les utilisateurs/rôles whitelistés échappent aux
  * sanctions automatiques de l'AntiRaid.
  */
+/** Raccourci vers le tableau de bord AntiRaid (réservé aux administrateurs, comme /antiraid). */
+function antiraidShortcut(interaction) {
+  if (!interaction.memberPermissions?.has?.(PermissionFlagsBits.Administrator)) return [];
+  return buttonRows(actionButton({ command: 'antiraid', action: 'go', args: ['whitelist'], label: 'Ouvrir l\'AntiRaid', emoji: '🚨' }));
+}
+
 module.exports = {
   category: 'security',
   data: new SlashCommandBuilder()
     .setName('whitelist')
     .setDescription('Gère la whitelist de sécurité (AntiRaid).')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
     .addSubcommand((s) =>
       s.setName('add').setDescription('Ajoute un utilisateur ou un rôle.')
         .addUserOption((o) => o.setName('utilisateur').setDescription('Utilisateur'))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle')))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle de confiance (ignoré par l\'AntiRaid)')))
     .addSubcommand((s) =>
       s.setName('remove').setDescription('Retire un utilisateur ou un rôle.')
         .addUserOption((o) => o.setName('utilisateur').setDescription('Utilisateur'))
-        .addRoleOption((o) => o.setName('role').setDescription('Rôle')))
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle de confiance (ignoré par l\'AntiRaid)')))
     .addSubcommand((s) => s.setName('list').setDescription('Affiche la whitelist.')),
 
   async execute(interaction, client) {
@@ -31,24 +58,25 @@ module.exports = {
     const wl = config.get(guildId).whitelist;
 
     if (sub === 'list') {
-      return interaction.reply({
-        embeds: [embeds.security('🔐 Whitelist').addFields(
-          { name: 'Utilisateurs', value: wl.users.map((u) => `<@${u}>`).join(' ') || '—' },
-          { name: 'Rôles', value: wl.roles.map((r) => `<@&${r}>`).join(' ') || '—' },
-        )],
-        ephemeral: true,
-      });
+      return interaction.reply({ embeds: [whitelistCard(wl)], components: antiraidShortcut(interaction), ephemeral: true });
     }
 
     const user = interaction.options.getUser('utilisateur');
     const role = interaction.options.getRole('role');
-    if (!user && !role) return interaction.reply({ embeds: [embeds.warning('Fournissez un utilisateur ou un rôle.')], ephemeral: true });
+    if (!user && !role) return interaction.reply({ embeds: [status.warn('Indiquez un utilisateur ou un rôle.')], ephemeral: true });
 
     const users = new Set(wl.users);
     const roles = new Set(wl.roles);
-    if (user) sub === 'add' ? users.add(user.id) : users.delete(user.id);
-    if (role) sub === 'add' ? roles.add(role.id) : roles.delete(role.id);
+    const add = sub === 'add';
+    // @everyone whitelisterait tout le serveur ; un rôle géré (bot, boost…) n'est pas maîtrisé par le serveur.
+    if (add && role?.id === guildId) throw new UserError('Le rôle @everyone ne peut pas être whitelisté : l\'AntiRaid ne protégerait plus rien.');
+    if (add && role?.managed) throw new UserError(`Le rôle ${role} est géré par une intégration : whitelistez plutôt le bot ou l'utilisateur concerné.`);
+    if (user) add ? users.add(user.id) : users.delete(user.id);
+    if (role) add ? roles.add(role.id) : roles.delete(role.id);
     config.update(guildId, { whitelist: { users: [...users], roles: [...roles] } });
-    return interaction.reply(successReply(`Whitelist mise à jour.`, { ephemeral: true }));
+
+    const targets = [user, role].filter(Boolean).map(String).join(' et ');
+    const notice = add ? `${targets} ${user && role ? 'ajoutés' : 'ajouté'} à la whitelist.` : `${targets} ${user && role ? 'retirés' : 'retiré'} de la whitelist.`;
+    return interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], components: antiraidShortcut(interaction), ephemeral: true });
   },
 };

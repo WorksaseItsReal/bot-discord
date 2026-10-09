@@ -7,9 +7,15 @@ class ModmailRepository {
       `INSERT INTO modmail_threads (guild_id, user_id, channel_id, status, created_at)
        VALUES (@guildId, @userId, @channelId, 'open', @createdAt)`,
     );
-    this.openByUserStmt = db.prepare("SELECT * FROM modmail_threads WHERE user_id = ? AND status = 'open'");
-    this.byChannelStmt = db.prepare('SELECT * FROM modmail_threads WHERE channel_id = ?');
-    this.closeStmt = db.prepare("UPDATE modmail_threads SET status = 'closed' WHERE channel_id = ?");
+    this.openByUserStmt = db.prepare("SELECT * FROM modmail_threads WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1");
+    this.byChannelStmt = db.prepare('SELECT * FROM modmail_threads WHERE channel_id = ? ORDER BY id DESC LIMIT 1');
+    this.closeStmt = db.prepare("UPDATE modmail_threads SET status = 'closed' WHERE channel_id = ? AND status = 'open'");
+    this.openByGuildStmt = db.prepare("SELECT * FROM modmail_threads WHERE guild_id = ? AND status = 'open'");
+  }
+
+  /** Conversations ouvertes d'un serveur (réconciliation au démarrage). */
+  listOpenByGuild(guildId) {
+    return this.openByGuildStmt.all(guildId);
   }
 
   create(data) {
@@ -24,8 +30,9 @@ class ModmailRepository {
     return this.byChannelStmt.get(channelId);
   }
 
+  /** @returns {boolean} true si une conversation ouverte a été fermée par cet appel */
   close(channelId) {
-    this.closeStmt.run(channelId);
+    return this.closeStmt.run(channelId).changes > 0;
   }
 }
 

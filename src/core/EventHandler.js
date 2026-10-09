@@ -15,16 +15,26 @@ class EventHandler {
   constructor(client) {
     this.client = client;
     this.count = 0;
+    /** @type {{ file: string, reason: string }[]} modules non chargés */
+    this.failures = [];
   }
 
   loadAll(dir) {
     if (!fs.existsSync(dir)) return 0;
     for (const entry of fs.readdirSync(dir)) {
       if (!entry.endsWith('.js')) continue;
-      const mod = require(path.join(dir, entry));
+      let mod;
+      try {
+        mod = require(path.join(path.resolve(dir), entry));
+      } catch (err) {
+        this.failures.push({ file: entry, reason: err?.message ?? String(err) });
+        logger.error(`Échec du chargement de l'événement ${entry} :`, err);
+        continue;
+      }
       const events = Array.isArray(mod) ? mod : [mod];
       for (const event of events) {
         if (!event?.name || typeof event.execute !== 'function') {
+          this.failures.push({ file: entry, reason: 'structure invalide' });
           logger.warn(`Événement ignoré (structure invalide) : ${entry}`);
           continue;
         }

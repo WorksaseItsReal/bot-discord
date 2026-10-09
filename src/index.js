@@ -3,7 +3,7 @@
 const { GadgetClient } = require('./core/GadgetClient');
 const { validate } = require('./config');
 const { logger } = require('./core/logger');
-const { registerGlobalHandlers } = require('./core/errors');
+const { registerGlobalHandlers, setShutdownHook } = require('./core/errors');
 
 async function main() {
   registerGlobalHandlers(logger);
@@ -17,12 +17,17 @@ async function main() {
   }
 
   const client = new GadgetClient();
+  // Exception non capturée : arrêt propre (scheduler, Discord, base) avant exit(1).
+  setShutdownHook(() => client.shutdown());
 
-  const shutdown = (signal) => {
+  let stopping = false;
+  const shutdown = async (signal) => {
+    if (stopping) return;
+    stopping = true;
     logger.info(`Signal ${signal} reçu, arrêt propre...`);
-    client.services?.scheduler?.stop();
-    client.database?.close();
-    client.destroy();
+    // Garde-fou : si la fermeture bloque, on quitte quand même après 10 s.
+    setTimeout(() => process.exit(0), 10_000).unref();
+    await client.shutdown();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));

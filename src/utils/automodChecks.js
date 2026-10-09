@@ -24,8 +24,9 @@ function isExcessiveCaps(content, { percent = 70, minLength = 10 } = {}) {
   return (upper / letters.length) * 100 >= percent;
 }
 
+/** Mentions de membres, de rôles, et @everyone / @here. */
 function countMentions(content) {
-  return (content.match(/<@!?(\d+)>|<@&(\d+)>/g) || []).length;
+  return (content.match(/<@!?\d+>|<@&\d+>|@(?:everyone|here)\b/g) || []).length;
 }
 
 function isMassMention(content, { limit = 5 } = {}) {
@@ -43,10 +44,33 @@ function isEmojiSpam(content, { limit = 8 } = {}) {
   return countEmojis(content || '') >= limit;
 }
 
+/** RegExp compilée par liste de mots (référence du tableau) : la config est mise en cache. */
+const badWordCache = new WeakMap();
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+}
+
+/**
+ * RegExp « mot entier » pour une liste de mots interdits (insensible à la casse,
+ * frontières Unicode : « con » ne correspond pas à « conseil » ni à « déconné »).
+ * @param {string[]} words
+ * @returns {RegExp|null}
+ */
+function badWordRegex(words) {
+  if (badWordCache.has(words)) return badWordCache.get(words);
+  const parts = [...new Set(words.map((w) => String(w ?? '').trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegExp);
+  const re = parts.length ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join('|')})(?![\\p{L}\\p{N}])`, 'iu') : null;
+  badWordCache.set(words, re);
+  return re;
+}
+
 function containsBadWord(content, words = []) {
-  if (!words.length) return false;
-  const lower = (content || '').toLowerCase();
-  return words.some((w) => w && lower.includes(String(w).toLowerCase()));
+  if (!Array.isArray(words) || !words.length) return false;
+  const re = badWordRegex(words);
+  return Boolean(re && re.test(content || ''));
 }
 
 module.exports = {
@@ -58,6 +82,7 @@ module.exports = {
   countEmojis,
   isEmojiSpam,
   containsBadWord,
+  badWordRegex,
   INVITE_REGEX,
   LINK_REGEX,
 };

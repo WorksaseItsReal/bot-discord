@@ -1,14 +1,82 @@
 'use strict';
 
-const { embeds } = require('../utils/embeds');
+const { truncate, listOrMore } = require('../utils/embeds');
 const { button, row, ButtonStyle } = require('../utils/components');
+const { card, field, wide, ICONS, subtext, actionButton, linkButton, buttonRows } = require('../utils/ui');
 const { discordTimestamp } = require('../utils/time');
 const { pickWinners } = require('../utils/random');
 const { UserError } = require('../core/errors');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('giveaways');
+/** Plafond du nombre de gagnants d'un reroll (option `gagnants`). */
+const MAX_REROLL_WINNERS = 20;
+
+/** Délai de regroupement des mises à jour du compteur de participants. */
+const EDIT_DEBOUNCE_MS = 5_000;
+
+/** Lien direct vers le message d'un giveaway (null si pas encore publié). */
+function giveawayUrl(g) {
+  return g?.message_id ? `https://discord.com/channels/${g.guild_id}/${g.channel_id}/${g.message_id}` : null;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Conditions de participation lisibles. */
+function conditions(g) {
+  const parts = [
+    g.required_role ? `${ICONS.check} Rôle requis : <@&${g.required_role}>` : null,
+    g.forbidden_role ? `${ICONS.ban} Rôle exclu : <@&${g.forbidden_role}>` : null,
+    g.min_level ? `📈 Niveau minimum : **${g.min_level}**` : null,
+    g.min_invites ? `${ICONS.mail} Invitations minimum : **${g.min_invites}**` : null,
+    g.min_days ? `${ICONS.date} Sur le serveur depuis au moins **${plural(g.min_days, 'jour')}**` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join('\n') : 'Aucune : ouvert à tous les membres.';
+}
+
+/** Le giveaway a-t-il au moins une condition de participation ? Pur. */
+function hasConditions(g) {
+  return Boolean(g?.required_role || g?.forbidden_role || g?.min_level || g?.min_invites || g?.min_days);
+}
+
+/**
+ * Conditions non remplies par un membre (rôles, niveau, invitations, ancienneté). Pur.
+ * `level` et `invites` : valeurs du membre (0 si inconnues) ; `joinedAt` : arrivée sur le serveur.
+ * @returns {Array<{ key: 'required_role'|'forbidden_role'|'min_level'|'min_invites'|'min_days', message: string }>}
+ */
+function unmetConditions(g, { member, level = 0, invites = 0, joinedAt = null, now = Date.now() } = {}) {
+  const out = [];
+  const has = (roleId) => Boolean(member?.roles?.cache?.has?.(roleId));
+  if (g.required_role && !has(g.required_role)) out.push({ key: 'required_role', message: `Il faut le rôle <@&${g.required_role}> pour participer à ce giveaway.` });
+  if (g.forbidden_role && has(g.forbidden_role)) out.push({ key: 'forbidden_role', message: `Les membres ayant le rôle <@&${g.forbidden_role}> ne peuvent pas participer à ce giveaway.` });
+  if (g.min_level && (Number(level) || 0) < g.min_level) {
+    out.push({ key: 'min_level', message: `Il faut être au moins **niveau ${g.min_level}** pour participer (vous êtes niveau **${Number(level) || 0}**). Discutez sur le serveur pour gagner de l'XP !` });
+  }
+  if (g.min_invites && (Number(invites) || 0) < g.min_invites) {
+    out.push({ key: 'min_invites', message: `Il faut au moins **${plural(g.min_invites, 'invitation')}** valide${g.min_invites > 1 ? 's' : ''} pour participer (vous en avez **${Number(invites) || 0}**). Les membres invités qui sont repartis ne comptent pas.` });
+  }
+  if (g.min_days) {
+    const since = Number(joinedAt);
+    const readyAt = Number.isFinite(since) && since > 0 ? since + g.min_days * DAY_MS : null;
+    if (!readyAt || readyAt > now) {
+      out.push({
+        key: 'min_days',
+        message: `Il faut être sur le serveur depuis au moins **${plural(g.min_days, 'jour')}** pour participer${readyAt ? ` (vous pourrez participer ${discordTimestamp(readyAt, 'R')})` : ''}.`,
+      });
+    }
+  }
+  return out;
+}
+
+const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
 
 /**
  * Giveaways persistants : création, participation par bouton, fin automatique
  * (via scheduler) et reroll. Tout survit au redémarrage.
+ *
+ * customIds : giveaway:enter:<id> (participation idempotente, rétrocompatible)
+ *             giveaway:leave:<id> (retrait, proposé à un membre déjà inscrit)
+ *             cmd:giveaway:reroll:<id> (nouveau tirage, réservé aux organisateurs)
  */
 class GiveawayService {
   /**
@@ -19,28 +87,119 @@ class GiveawayService {
   constructor({ client, giveaways }) {
     this.client = client;
     this.giveaways = giveaways;
+    /** @type {Map<number, NodeJS.Timeout>} giveaways dont la carte doit être réactualisée */
+    this.pendingEdits = new Map();
+    /** @type {Map<number, Promise<void>>} réactualisations en cours (end() les attend) */
+    this.inflightEdits = new Map();
+    /** @type {Map<number, Promise<unknown>>} fin / reroll en cours, par giveaway (exécutés en série) */
+    this.locks = new Map();
   }
 
-  #render(g) {
+  /** Carte du giveaway en cours. */
+  render(g) {
     const entries = this.giveaways.countEntries(g.id);
-    const embed = embeds.neutral(`🎉 ${g.prize}`)
-      .setDescription(
-        [
-          `Cliquez sur 🎉 pour participer !`,
-          `Fin : ${discordTimestamp(g.ends_at)} (${discordTimestamp(g.ends_at, 'R')})`,
-          `Gagnant(s) : **${g.winners}**`,
-          `Organisé par : <@${g.host_id}>`,
-          g.required_role ? `Rôle requis : <@&${g.required_role}>` : null,
-          `Participants : **${entries}**`,
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      );
-    const components = [row(button({ id: `giveaway:enter:${g.id}`, label: 'Participer', style: ButtonStyle.Primary, emoji: '🎉' }))];
+    const embed = card({
+      tone: 'celebrate',
+      section: 'giveaways',
+      icon: ICONS.gift,
+      title: truncate(g.prize, 200),
+      description: [
+        `Cliquez sur **${ICONS.gift} Participer** pour tenter votre chance !`,
+        subtext('Déjà inscrit ? Le bouton vous proposera de retirer votre participation.'),
+      ],
+      fields: [
+        field('🏆', 'Gagnants', `**${g.winners}**`),
+        field(ICONS.expires, 'Fin', `${discordTimestamp(g.ends_at, 'R')}\n${discordTimestamp(g.ends_at, 'f')}`),
+        field(ICONS.owner, 'Organisateur', `<@${g.host_id}>`),
+        field(ICONS.members, 'Participants', `**${entries}**`),
+        wide(ICONS.list, 'Conditions', conditions(g)),
+      ],
+      footer: `Giveaway #${g.id} · Fin`,
+      timestamp: g.ends_at,
+    });
+    const components = [
+      row(button({ id: `giveaway:enter:${g.id}`, label: entries ? `Participer · ${entries}` : 'Participer', style: ButtonStyle.Primary, emoji: ICONS.gift })),
+    ];
     return { embeds: [embed], components };
   }
 
-  async create(channel, host, { prize, winners, durationMs, requiredRole, forbiddenRole }) {
+  /** Carte du giveaway terminé (remplace le message d'origine). */
+  renderEnded(g, winners) {
+    const entries = this.giveaways.countEntries(g.id);
+    const list = winners.map((w) => `<@${w}>`);
+    return {
+      embeds: [
+        card({
+          tone: winners.length ? 'celebrate' : 'neutral',
+          section: 'giveaways',
+          icon: winners.length ? '🏆' : ICONS.gift,
+          title: truncate(g.prize, 200),
+          description: winners.length
+            ? [`Giveaway terminé ! Bravo à ${listOrMore(list, 20)} 🎉`]
+            : ['Giveaway terminé, sans participant éligible.'],
+          fields: [
+            wide('🏆', winners.length > 1 ? 'Gagnants' : 'Gagnant', winners.length ? listOrMore(list, 20, '\n') : '*Aucun*'),
+            field(ICONS.members, 'Participants', `**${entries}**`),
+            field(ICONS.owner, 'Organisateur', `<@${g.host_id}>`),
+            field(ICONS.date, 'Terminé', discordTimestamp(Date.now(), 'R')),
+          ],
+          footer: `Giveaway #${g.id} · Terminé`,
+        }),
+      ],
+      components: buttonRows(
+        actionButton({ command: 'giveaway', action: 'reroll', args: [g.id], label: 'Relancer', emoji: ICONS.dice, disabled: !entries }),
+      ),
+    };
+  }
+
+  /** Annonce des gagnants (nouveau message dans le salon). */
+  #announcement(g, winners, reroll) {
+    const url = giveawayUrl(g);
+    const list = winners.map((w) => `<@${w}>`);
+    if (!winners.length) {
+      return {
+        embeds: [
+          card({
+            tone: 'neutral',
+            section: 'giveaways',
+            icon: ICONS.gift,
+            title: 'Giveaway terminé sans gagnant',
+            description: `Aucun participant éligible pour **${truncate(g.prize, 200)}**.`,
+            footer: `Giveaway #${g.id}`,
+          }),
+        ],
+        components: url ? buttonRows(linkButton('Voir le giveaway', url, ICONS.link)) : [],
+      };
+    }
+    return {
+      content: list.join(' '),
+      embeds: [
+        card({
+          tone: 'celebrate',
+          section: 'giveaways',
+          icon: reroll ? ICONS.dice : '🏆',
+          title: reroll ? 'Nouveau tirage !' : 'Félicitations !',
+          description: [
+            `${listOrMore(list, 20)} ${winners.length > 1 ? 'remportent' : 'remporte'} **${truncate(g.prize, 200)}** ! 🎉`,
+            subtext(`Contactez ${g.host_id ? `<@${g.host_id}>` : 'l\'organisateur'} pour récupérer votre lot.`),
+          ],
+          fields: [
+            field(ICONS.gift, 'Récompense', truncate(g.prize, 200)),
+            field('🏆', 'Gagnants', `**${winners.length}**`),
+            field(ICONS.owner, 'Organisateur', `<@${g.host_id}>`),
+          ],
+          footer: `Giveaway #${g.id}${reroll ? ' · Reroll' : ''}`,
+        }),
+      ],
+      components: url ? buttonRows(linkButton('Voir le giveaway', url, ICONS.link)) : [],
+    };
+  }
+
+  async create(channel, host, { prize, winners, durationMs, requiredRole, forbiddenRole, minLevel = null, minInvites = null, minDays = null }) {
+    prize = String(prize ?? '').trim();
+    if (!prize) throw new UserError('La récompense ne peut pas être vide.');
+    if (prize.length > 200) throw new UserError('La récompense est trop longue (200 caractères max).');
+    if (!channel?.isTextBased?.()) throw new UserError('Ce salon ne permet pas d\'envoyer de messages.');
     const endsAt = Date.now() + durationMs;
     const id = this.giveaways.create({
       guildId: channel.guild.id,
@@ -51,65 +210,255 @@ class GiveawayService {
       hostId: host.id,
       requiredRole: requiredRole ?? null,
       forbiddenRole: forbiddenRole ?? null,
+      minLevel: minLevel || null,
+      minInvites: minInvites || null,
+      minDays: minDays || null,
       endsAt,
     });
     const g = this.giveaways.get(id);
-    const message = await channel.send(this.#render(g));
+    let message;
+    try {
+      message = await channel.send(this.render(g));
+    } catch (err) {
+      // Pas de ligne orpheline si le message n'a pas pu être publié.
+      this.giveaways.delete(id);
+      throw err;
+    }
     this.giveaways.setMessage(id, message.id);
     return { id, message };
   }
 
-  async toggleEntry(interaction, giveawayId) {
+  /** Récupère un giveaway en vérifiant (si fourni) qu'il appartient bien au serveur. */
+  #getForGuild(giveawayId, guildId) {
     const g = this.giveaways.get(giveawayId);
-    if (!g || g.ended) throw new UserError('Ce giveaway est terminé.');
+    if (!g || (guildId && g.guild_id !== guildId)) throw new UserError('Giveaway introuvable sur ce serveur.');
+    return g;
+  }
+
+  /**
+   * Tire les gagnants en excluant les bots, les comptes introuvables et, au
+   * moment du tirage, les membres partis du serveur ou qui ne remplissent plus
+   * les conditions (rôles requis / interdit, niveau, invitations, ancienneté).
+   */
+  async #drawWinners(g, entries, count) {
+    const shuffled = pickWinners(entries, entries.length);
+    const guild = this.client.guilds?.cache?.get?.(g.guild_id) ?? null;
+    const winners = [];
+    for (const userId of shuffled) {
+      if (winners.length >= count) break;
+      const user = await this.client.users.fetch(userId).catch(() => null);
+      if (!user || user.bot) continue;
+      if (guild && !(await this.#isEligibleMember(guild, g, userId))) continue;
+      winners.push(userId);
+    }
+    return winners;
+  }
+
+  /** Le participant est-il encore membre et conforme aux conditions (rôles, niveau, invitations, ancienneté) ? */
+  async #isEligibleMember(guild, g, userId) {
+    const member = guild.members?.cache?.get(userId) ?? (await guild.members?.fetch?.(userId).catch(() => null));
+    if (!member) return false; // parti du serveur
+    return isEligible(g, member, this.memberStats(g, member));
+  }
+
+  /**
+   * Niveau (LevelRepository), invitations nettes (InviteJoinRepository) et arrivée d'un membre,
+   * lus seulement si le giveaway a la condition correspondante.
+   */
+  memberStats(g, member) {
+    const repos = this.client?.repositories ?? {};
+    const guildId = g.guild_id;
+    const userId = member?.id ?? member?.user?.id;
+    return {
+      level: g.min_level ? repos.levels?.get?.(guildId, userId)?.level ?? 0 : 0,
+      invites: g.min_invites ? repos.inviteJoins?.stats?.(guildId, userId)?.net ?? 0 : 0,
+      joinedAt: member?.joinedTimestamp ?? (member?.joined_at ? Date.parse(member.joined_at) : null),
+    };
+  }
+
+  /** Giveaway en cours du serveur de l'interaction, conditions de participation remplies. */
+  #assertCanEnter(interaction, giveawayId) {
+    const g = this.giveaways.get(giveawayId);
+    if (!g || g.guild_id !== interaction.guildId || g.ended) throw new UserError('Ce giveaway est terminé.');
+    if (interaction.user.bot) throw new UserError('Les bots ne peuvent pas participer.');
     const member = interaction.member;
-    if (g.required_role && !member.roles.cache.has(g.required_role)) {
-      throw new UserError('Vous n\'avez pas le rôle requis pour participer.');
-    }
-    if (g.forbidden_role && member.roles.cache.has(g.forbidden_role)) {
-      throw new UserError('Vous ne pouvez pas participer à ce giveaway.');
-    }
-    const joined = this.giveaways.toggleEntry(giveawayId, member.id);
-    // Met à jour le compteur affiché
-    const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
-    if (channel && g.message_id) {
-      const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-      if (msg) await msg.edit(this.#render(g)).catch(() => {});
-    }
+    const unmet = unmetConditions(g, { member, ...this.memberStats(g, member) });
+    if (unmet.length) throw new UserError(unmet.map((u) => u.message).join('\n'));
+    return g;
+  }
+
+  /**
+   * Inscription idempotente (bouton « Participer ») : un double clic n'annule
+   * jamais une participation.
+   * @returns {Promise<boolean>} true si le membre vient d'être inscrit, false s'il l'était déjà
+   */
+  async enter(interaction, giveawayId) {
+    this.#assertCanEnter(interaction, giveawayId);
+    const joined = this.giveaways.addEntry(giveawayId, interaction.member.id);
+    // Compteur affiché : une seule édition groupée toutes les ~5 s (pas une par clic).
+    if (joined) this.scheduleEdit(giveawayId);
     return joined;
   }
 
-  async end(giveawayId, { reroll = false } = {}) {
+  /**
+   * Retrait explicite (bouton « Se retirer »), sans condition de rôle.
+   * @returns {Promise<boolean>} true si une participation a été retirée
+   */
+  async leave(interaction, giveawayId) {
     const g = this.giveaways.get(giveawayId);
-    if (!g) throw new UserError('Giveaway introuvable.');
-    if (!reroll) this.giveaways.markEnded(giveawayId);
+    if (!g || g.guild_id !== interaction.guildId || g.ended) throw new UserError('Ce giveaway est terminé.');
+    const left = this.giveaways.removeEntry(giveawayId, interaction.user.id);
+    if (left) this.scheduleEdit(giveawayId);
+    return left;
+  }
 
-    const entries = this.giveaways.entries(giveawayId);
-    const winners = pickWinners(entries, g.winners);
-    const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
+  /**
+   * Bascule la participation (ancienne API, conservée pour compatibilité).
+   * @returns {Promise<boolean>} true si le membre participe désormais
+   */
+  async toggleEntry(interaction, giveawayId) {
+    this.#assertCanEnter(interaction, giveawayId);
+    const joined = this.giveaways.toggleEntry(giveawayId, interaction.member.id);
+    this.scheduleEdit(giveawayId);
+    return joined;
+  }
 
-    if (channel?.isTextBased()) {
-      if (!winners.length) {
-        await channel.send({ embeds: [embeds.warning(`Aucun participant pour **${g.prize}**.`, '🎉 Giveaway terminé')] });
-      } else {
-        const mention = winners.map((w) => `<@${w}>`).join(', ');
-        await channel.send({
-          content: mention,
-          embeds: [embeds.success(`Félicitations ${mention} ! Vous gagnez **${g.prize}** 🎉`, reroll ? '🎉 Reroll' : '🎉 Giveaway terminé')],
-        });
-      }
-      if (g.message_id && !reroll) {
-        const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-        if (msg) {
-          await msg
-            .edit({
-              embeds: [embeds.neutral(`🎉 ${g.prize}`).setDescription(`Terminé — gagnant(s) : ${winners.length ? winners.map((w) => `<@${w}>`).join(', ') : 'aucun'}`)],
-              components: [],
-            })
-            .catch(() => {});
-        }
-      }
+  /** Programme la réactualisation de la carte (regroupe les participations rapprochées). */
+  scheduleEdit(giveawayId) {
+    if (this.pendingEdits.has(giveawayId)) return;
+    const timer = setTimeout(() => {
+      this.pendingEdits.delete(giveawayId);
+      const job = this.#refreshLive(giveawayId)
+        .catch(() => {})
+        .finally(() => this.inflightEdits.delete(giveawayId));
+      this.inflightEdits.set(giveawayId, job);
+    }, EDIT_DEBOUNCE_MS);
+    timer.unref?.();
+    this.pendingEdits.set(giveawayId, timer);
+  }
+
+  /**
+   * Arrêt du bot : exécute tout de suite les réactualisations programmées (sinon
+   * le compteur affiché reste faux), annule leurs minuteurs et attend celles en cours.
+   */
+  async flush() {
+    const ids = [...this.pendingEdits.keys()];
+    for (const id of ids) clearTimeout(this.pendingEdits.get(id));
+    this.pendingEdits.clear();
+    await Promise.allSettled([
+      ...this.inflightEdits.values(),
+      ...ids.map((id) => this.#refreshLive(id).catch((err) => logger.warn(`Giveaway #${id} : carte non réactualisée à l'arrêt :`, err?.message ?? err))),
+    ]);
+  }
+
+  /** Annule une réactualisation programmée et attend celle en cours. */
+  async #cancelEdit(giveawayId) {
+    clearTimeout(this.pendingEdits.get(giveawayId));
+    this.pendingEdits.delete(giveawayId);
+    await this.inflightEdits.get(giveawayId);
+  }
+
+  /** Réédite la carte en direct, sauf si le giveaway s'est terminé entre-temps (jamais de « résurrection »). */
+  async #refreshLive(giveawayId) {
+    const current = this.giveaways.get(giveawayId);
+    if (!current || current.ended || !current.message_id) return;
+    const channel = await this.client.channels.fetch(current.channel_id).catch(() => null);
+    const msg = channel?.messages ? await channel.messages.fetch(current.message_id).catch(() => null) : null;
+    if (!msg) return;
+    // Relecture juste avant l'édition : end() a pu passer pendant les appels réseau.
+    const fresh = this.giveaways.get(giveawayId);
+    if (!fresh || fresh.ended) return;
+    await msg.edit(this.render(fresh));
+  }
+
+  /** Nombre de participants (affichage). */
+  countEntries(giveawayId) {
+    return this.giveaways.countEntries(giveawayId);
+  }
+
+  get(giveawayId) {
+    return this.giveaways.get(giveawayId);
+  }
+
+  /**
+   * Termine (ou reroll) un giveaway. Les appels sur un même giveaway sont
+   * exécutés en série (verrou par giveaway) : deux rerolls simultanés ne
+   * peuvent pas tirer les mêmes gagnants.
+   * @param {number} giveawayId
+   * @param {{ reroll?: boolean, guildId?: string, count?: number|null }} [opts]
+   *   guildId : serveur appelant (obligatoire côté commandes) ; count : nombre de gagnants d'un reroll
+   */
+  async end(giveawayId, opts = {}) {
+    const previous = this.locks.get(giveawayId) ?? Promise.resolve();
+    const run = previous.catch(() => {}).then(() => this.#end(giveawayId, opts));
+    this.locks.set(giveawayId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.locks.get(giveawayId) === run) this.locks.delete(giveawayId);
     }
+  }
+
+  async #end(giveawayId, { reroll = false, guildId, count = null } = {}) {
+    const g = this.#getForGuild(giveawayId, guildId);
+    let entries = this.giveaways.entries(giveawayId);
+    let retry = false;
+    if (reroll) {
+      if (!g.ended) throw new UserError('Ce giveaway est encore en cours : terminez-le avant de faire un reroll.');
+    } else if (!this.giveaways.markEnded(giveawayId)) {
+      // Garde atomique : un seul appel (commande, scheduler…) peut terminer le giveaway.
+      // Exception (reprise) : terminé mais annonce jamais publiée (`announced_at`) →
+      // on la retente. Une fois publiée (même sans gagnant), plus aucun nouveau tirage.
+      retry = !wasAnnounced(g, this.giveaways, entries);
+      if (!retry) throw new UserError('Ce giveaway est déjà terminé.');
+    }
+    // Une édition « en direct » tardive ne doit jamais écraser la carte de fin.
+    await this.#cancelEdit(giveawayId);
+
+    const channel = await this.client.channels.fetch(g.channel_id).catch(() => null);
+    const message = g.message_id && channel?.messages ? await channel.messages.fetch(g.message_id).catch(() => null) : null;
+
+    if (reroll) {
+      // Tous les gagnants déjà tirés sont exclus : ceux mémorisés en base (premier tirage
+      // et relances) + ceux lus sur la carte de fin (giveaways antérieurs à la mémorisation).
+      const previous = new Set([...(this.giveaways.winners?.(giveawayId) ?? []), ...previousWinners(message)]);
+      entries = entries.filter((id) => !previous.has(id));
+    }
+    const wanted = reroll && count ? Math.min(Math.max(1, count), MAX_REROLL_WINNERS) : g.winners;
+    // Reprise : les gagnants déjà affichés sur la carte de fin (mémorisés) sont conservés.
+    const kept = retry ? this.giveaways.winners?.(giveawayId) ?? [] : [];
+    const winners = kept.length ? kept : await this.#drawWinners(g, entries, wanted);
+    if (reroll && !winners.length) throw new UserError('Aucun participant éligible pour un reroll (les gagnants précédents, les membres partis et ceux qui ne remplissent plus les conditions sont exclus).');
+
+    let announced = false;
+    if (channel?.isTextBased?.()) {
+      announced = await channel.send(this.#announcement(g, winners, reroll)).then(() => true, (err) => {
+        logger.warn(`Annonce du giveaway #${giveawayId} impossible :`, err?.message ?? err);
+        return false;
+      });
+    } else {
+      logger.warn(`Annonce du giveaway #${giveawayId} impossible : salon ${g.channel_id} introuvable ou non textuel.`);
+    }
+
+    // La carte passe en « terminé » même si l'annonce a échoué (ex : envoi refusé
+    // mais édition possible) : le giveaway ne doit pas sembler encore ouvert.
+    let cardEdited = false;
+    if (message && !reroll) {
+      cardEdited = await message.edit(this.renderEnded(g, winners)).then(() => true, (err) => {
+        logger.warn(`Carte du giveaway #${giveawayId} non mise à jour :`, err?.message ?? err);
+        return false;
+      });
+    }
+    // Gagnants mémorisés dès qu'ils sont visibles (annonce ou carte) : une reprise
+    // les réannonce au lieu d'en tirer d'autres. Invisibles : /giveaway end retire au sort.
+    if (announced || cardEdited) this.giveaways.addWinners?.(giveawayId, winners);
+    if (!announced) {
+      throw new UserError(reroll
+        ? 'Le nouveau tirage n\'a pas pu être annoncé (salon introuvable ou permissions manquantes). Corrigez puis relancez.'
+        : `Le giveaway est terminé mais l'annonce des gagnants a échoué (salon introuvable ou permissions manquantes). Corrigez puis relancez \`/giveaway end id:${giveawayId}\` pour retenter.`);
+    }
+    if (!reroll) this.giveaways.markAnnounced?.(giveawayId);
+    if (retry) logger.info(`Giveaway #${giveawayId} : annonce retentée avec succès.`);
     return winners;
   }
 
@@ -118,4 +467,34 @@ class GiveawayService {
   }
 }
 
-module.exports = { GiveawayService };
+/**
+ * L'annonce de fin a-t-elle déjà été publiée ? `announced_at` (migration 11) fait
+ * foi ; sans cette colonne (faux dépôt), repli sur l'ancienne règle : des
+ * gagnants mémorisés, ou aucun participant.
+ */
+function wasAnnounced(g, repo, entries) {
+  if (g.announced_at != null) return true;
+  if ('announced_at' in g) return false;
+  return !entries.length || (repo.winners?.(g.id) ?? []).length > 0;
+}
+
+/**
+ * Le membre remplit-il les conditions du giveaway ? Pur.
+ * @param {{ level?: number, invites?: number, joinedAt?: number|null, now?: number }} [stats]
+ *   valeurs du membre pour les conditions de niveau, d'invitations et d'ancienneté
+ */
+function isEligible(g, member, stats = {}) {
+  return unmetConditions(g, { member, joinedAt: member?.joinedTimestamp ?? null, ...stats }).length === 0;
+}
+
+/**
+ * Gagnants affichés sur la carte de fin (champ « Gagnant(s) »), seule trace
+ * persistée du tirage : la base ne stocke pas les gagnants.
+ */
+function previousWinners(message) {
+  const embed = message?.embeds?.[0];
+  const fieldValue = embed?.fields?.find((f) => /Gagnant/.test(f.name))?.value ?? '';
+  return [...fieldValue.matchAll(/<@!?(\d{17,20})>/g)].map((m) => m[1]);
+}
+
+module.exports = { GiveawayService, giveawayUrl, conditions, hasConditions, unmetConditions, previousWinners, isEligible, EDIT_DEBOUNCE_MS, MAX_REROLL_WINNERS };
