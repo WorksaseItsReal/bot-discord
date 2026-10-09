@@ -48,6 +48,19 @@ const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete
 const MEMBER_SANCTIONS = new Set(['ban', 'kick']);
 const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
 
+/** Bouton « Réessayer le lockdown » joint aux alertes dont le lockdown automatique a échoué. */
+function retryLockdownButton() {
+  return actionButton({ command: 'lockdown', action: 'enable', label: 'Réessayer le lockdown', emoji: '🚨', style: ButtonStyle.Danger });
+}
+
+/** Texte du champ « Lockdown » d'une alerte de vague d'arrivées. Pur. */
+function lockdownText(lock) {
+  if (lock == null) return 'Non configuré';
+  if (lock.error) return `${ICONS.warning} **Lockdown non appliqué** : ${String(lock.error).slice(0, 200)}`;
+  if (!lock.count) return `${ICONS.warning} **Lockdown non appliqué** : aucun salon verrouillable (permissions ?)`;
+  return `🔒 ${lock.count} salon${lock.count > 1 ? 's' : ''} verrouillé${lock.count > 1 ? 's' : ''}`;
+}
+
 /** Bouton « Lever le lockdown » joint aux alertes qui ont déclenché un lockdown automatique. */
 function liftLockdownButton() {
   return actionButton({ command: 'lockdown', action: 'disable', label: 'Lever le lockdown', emoji: ICONS.unlock, style: ButtonStyle.Success });
@@ -219,7 +232,8 @@ class AntiRaidService {
     const cooling = now - (this.joinAlertAt.get(guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS;
     if (!cooling) {
       this.joinAlertAt.set(guild.id, now);
-      const locked = cfg.action === 'lockdown' ? await this.#tryLockdown(guild) : null;
+      const lock = cfg.action === 'lockdown' ? await this.#tryLockdown(guild) : null;
+      const locked = lock?.count ?? null;
       await this.alert(guild, {
         tone: 'danger',
         icon: '🚨',
@@ -230,9 +244,9 @@ class AntiRaidService {
           field(ICONS.warning, 'Seuil', `${cfg.joinThreshold} en ${cfg.joinWindowSeconds} s`),
           wave
             ? field(cfg.action === 'ban' ? ICONS.ban : ICONS.kick, cfg.action === 'ban' ? 'Bannis' : 'Expulsés', waveSummary(wave))
-            : field(ICONS.lock, 'Lockdown', locked == null ? 'Non configuré' : `🔒 ${locked} salon${locked > 1 ? 's' : ''} verrouillé${locked > 1 ? 's' : ''}`),
+            : field(ICONS.lock, 'Lockdown', lockdownText(lock)),
         ],
-        buttons: locked ? [liftLockdownButton()] : [],
+        buttons: lock && !lock.count ? [retryLockdownButton()] : locked ? [liftLockdownButton()] : [],
       });
     } else if (wave?.punished.length) {
       logger.info(`Vague continue sur ${guild.id} : ${wave.punished.length} arrivant(s) sanctionné(s) (${cfg.action}).`);
@@ -423,13 +437,24 @@ class AntiRaidService {
     return { ok: false };
   }
 
-  /** @returns {Promise<number|null>} salons verrouillés (null si le service est indisponible) */
+  /**
+   * Lockdown automatique. Un verrouillage ou une levée en cours (admin) est ATTENDU puis le
+   * lockdown est appliqué : un raid ne reste jamais sans lockdown faute de verrou libre.
+   * @returns {Promise<{ count: number, error?: string }|null>} null si le service est indisponible
+   */
   async #tryLockdown(guild) {
     // Délègue au LockdownService s'il est disponible. Pas de carte « Lockdown activé » :
     // l'alerte AntiRaid (avec le nombre de salons et le bouton de levée) en tient lieu.
     const lockdown = this.client.services?.lockdown;
     if (!lockdown) return null;
-    return lockdown.enable(guild, guild.members.me, 'AntiRaid automatique', { log: false }).catch(() => 0);
+    try {
+      const n = await lockdown.enable(guild, guild.members.me, 'AntiRaid automatique', { log: false, wait: true });
+      // Salons déjà verrouillés (lockdown manuel juste avant) : le lockdown est bien actif.
+      return { count: n || (lockdown.status?.(guild) ?? 0) };
+    } catch (err) {
+      logger.warn(`Lockdown automatique impossible sur ${guild.id} :`, err?.message);
+      return { count: 0, error: err?.message ?? String(err) };
+    }
   }
 
   /** Dernier déclenchement connu sur ce serveur (null si aucun depuis le démarrage). */

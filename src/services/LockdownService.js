@@ -153,19 +153,35 @@ class LockdownService {
   constructor({ locks, logging }) {
     this.locks = locks;
     this.logging = logging;
-    /** Serveurs dont un verrouillage ou une levée globale est en cours (double clic, deux admins). */
-    this.busy = new Set();
+    /**
+     * Verrouillage ou levée globale en cours, par serveur (double clic, deux admins, AntiRaid).
+     * @type {Map<string, Promise<unknown>>}
+     */
+    this.busy = new Map();
   }
 
-  /** Exécute `fn` seul pour ce serveur : enable/disable simultanés se marcheraient dessus. */
-  async #exclusive(guildId, fn) {
-    if (this.busy.has(guildId)) throw new UserError('Un verrouillage ou une levée du serveur est déjà en cours. Patientez quelques secondes.');
-    this.busy.add(guildId);
-    try {
-      return await fn();
-    } finally {
-      this.busy.delete(guildId);
+  /**
+   * Exécute `fn` seul pour ce serveur : enable/disable simultanés se marcheraient dessus.
+   * @param {{ wait?: boolean }} [opts] wait : attendre l'opération en cours au lieu de refuser
+   *   (lockdown automatique de l'AntiRaid : un raid ne doit jamais rester sans lockdown)
+   */
+  async #exclusive(guildId, fn, { wait = false } = {}) {
+    while (this.busy.has(guildId)) {
+      if (!wait) throw new UserError('Un verrouillage ou une levée du serveur est déjà en cours. Patientez quelques secondes.');
+      await this.busy.get(guildId).catch(() => {});
     }
+    const run = Promise.resolve().then(fn);
+    this.busy.set(guildId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.busy.get(guildId) === run) this.busy.delete(guildId);
+    }
+  }
+
+  /** Un verrouillage ou une levée globale est-il en cours sur ce serveur ? */
+  isBusy(guildId) {
+    return this.busy.has(guildId);
   }
 
   /**
@@ -247,15 +263,16 @@ class LockdownService {
   /**
    * Verrouille tous les salons où l'on peut écrire (textuels, annonces, forums,
    * texte des vocaux), par lots de 5.
-   * @param {{ log?: boolean }} [opts] log=false : l'appelant publie sa propre carte (AntiRaid)
+   * @param {{ log?: boolean, wait?: boolean }} [opts] log=false : l'appelant publie sa propre carte (AntiRaid) ;
+   *   wait : attendre un verrouillage / une levée en cours au lieu de refuser (AntiRaid)
    */
-  async enable(guild, moderator, reason = 'Lockdown', { log = true } = {}) {
+  async enable(guild, moderator, reason = 'Lockdown', { log = true, wait = false } = {}) {
     return this.#exclusive(guild.id, async () => {
       const channels = [...guild.channels.cache.values()].filter((c) => LOCKABLE_TYPES.has(c.type) && c.manageable);
       const n = await inBatches(channels, (c) => this.lockChannel(c, moderator, reason, { scope: SCOPES.lockdown }));
       if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }), undefined, { event: 'lockdown' });
       return n;
-    });
+    }, { wait });
   }
 
   /**

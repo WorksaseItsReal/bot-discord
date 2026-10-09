@@ -172,3 +172,81 @@ test('archive : l\'arrêt du bot abandonne les téléchargements en cours et res
   assert.equal(calls.length, 1, 'téléchargement lancé après l\'arrêt');
   assert.deepEqual(skipped.map((s) => s.reason), ['arrêt du bot', 'arrêt du bot']);
 });
+
+// ------------------------------------------------------------ lockdown automatique et verrou global
+
+const { PermissionFlagsBits: F, ChannelType } = require('discord.js');
+const { LockRepository } = require('../src/database/repositories/LockRepository');
+const { LockdownService } = require('../src/services/LockdownService');
+const { AntiRaidService } = require('../src/services/AntiRaidService');
+
+/** Salon textuel factice ; chaque modification de permissions prend `latency` ms. */
+function lockableChannel(id, guild, latency = 0) {
+  const ow = { allow: { bitfield: 0n }, deny: { bitfield: 0n } };
+  const apply = async (perms) => {
+    if (latency) await sleep(latency);
+    for (const [flag, v] of Object.entries(perms)) {
+      const bit = F[flag];
+      ow.allow.bitfield &= ~bit;
+      ow.deny.bitfield &= ~bit;
+      if (v === true) ow.allow.bitfield |= bit;
+      if (v === false) ow.deny.bitfield |= bit;
+    }
+  };
+  return {
+    id,
+    type: ChannelType.GuildText,
+    manageable: true,
+    guild,
+    isThread: () => false,
+    permissionOverwrites: {
+      cache: new Map([[guild.id, ow]]),
+      edit: async (_t, perms) => apply(perms),
+      delete: async () => apply({ SendMessages: null, SendMessagesInThreads: null, CreatePublicThreads: null, CreatePrivateThreads: null }),
+    },
+    sendDenied: () => Boolean(ow.deny.bitfield & F.SendMessages),
+  };
+}
+
+function lockWorld(latency) {
+  const { db } = memoryDb();
+  const svc = new LockdownService({ locks: new LockRepository(db), logging: { send: async () => {} } });
+  const guild = { id: 'g1', roles: { everyone: { id: 'g1' } }, channels: { cache: new Map() } };
+  const ch = lockableChannel('c1', guild, latency);
+  guild.channels.cache.set(ch.id, ch);
+  return { svc, guild, ch };
+}
+
+test('lockdown automatique : attend une levée en cours puis verrouille (jamais abandonné)', async () => {
+  const { svc, guild, ch } = lockWorld(40);
+  await svc.enable(guild, null, 'Lockdown manuel');
+  assert.ok(ch.sendDenied());
+  const lifting = svc.disable(guild, null); // un admin lève le lockdown…
+  await assert.rejects(svc.enable(guild, null, 'Double clic'), /déjà en cours/);
+  // … pendant qu'une vague arrive : l'AntiRaid attend la levée, puis reverrouille.
+  const n = await svc.enable(guild, null, 'AntiRaid automatique', { log: false, wait: true });
+  await lifting;
+  assert.equal(n, 1);
+  assert.ok(ch.sendDenied(), 'serveur laissé ouvert pendant le raid');
+  assert.equal(svc.status(guild), 1);
+  assert.equal(svc.isBusy(guild.id), false);
+});
+
+test('alerte de vague : lockdown non appliqué signalé, avec bouton de nouvelle tentative', async () => {
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  config.update(GUILD, { antiraid: { enabled: true, action: 'lockdown', joinThreshold: 2, joinWindowSeconds: 10 } });
+  const alerts = [];
+  const client = { user: { id: '999' }, services: { lockdown: { enable: async () => { throw new Error('Missing Permissions'); }, status: () => 0 } } };
+  const antiraid = new AntiRaidService({ client, config, logging: { send: async () => {} } });
+  antiraid.alert = async (guild, payload) => alerts.push(payload);
+  const guild = { id: GUILD, ownerId: '1', members: { me: { id: '999' }, cache: new Map() } };
+  for (const id of ['300000000000000001', '300000000000000002']) {
+    await antiraid.handleJoin({ id, guild, user: { id, bot: false, createdTimestamp: Date.now() - 400 * DAY }, roles: { cache: new Map() } });
+  }
+  assert.equal(alerts.length, 1, 'alerte de vague absente');
+  const lockField = alerts[0].fields.find((f) => /Lockdown/.test(f?.name ?? ''));
+  assert.match(lockField.value, /non appliqué/);
+  const ids = alerts[0].buttons.map((b) => (typeof b.toJSON === 'function' ? b.toJSON() : b).custom_id);
+  assert.deepEqual(ids, ['cmd:lockdown:enable']);
+});
