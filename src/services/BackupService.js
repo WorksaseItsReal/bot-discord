@@ -62,6 +62,34 @@ function resolveOverwrites(overwrites, guild, skipped) {
   return out;
 }
 
+/**
+ * Salons GÉNÉRÉS par le bot, exclus des sauvegardes : salons des compteurs de statistiques
+ * (nom qui change sans cesse) et leur catégorie si elle ne contient qu'eux, vocaux
+ * temporaires (éphémères). Comparés par nom à la restauration, ils seraient recréés figés.
+ * @returns {Set<string>} identifiants
+ */
+function generatedChannelIds(guild) {
+  const out = new Set();
+  const client = guild?.client;
+  let counters = null;
+  try {
+    counters = client?.services?.config?.get?.(guild.id)?.statsCounters ?? null;
+  } catch {
+    counters = null;
+  }
+  for (const c of Object.values(counters?.counters ?? {})) if (c?.channelId) out.add(c.channelId);
+  const tempVoice = client?.repositories?.tempVoice;
+  const channels = [...(guild?.channels?.cache?.values?.() ?? [])];
+  if (typeof tempVoice?.get === 'function') {
+    for (const ch of channels) {
+      if ((ch.type === ChannelType.GuildVoice || ch.type === ChannelType.GuildStageVoice) && tempVoice.get(ch.id)) out.add(ch.id);
+    }
+  }
+  const categoryId = counters?.categoryId;
+  if (categoryId && channels.filter((c) => c.parentId === categoryId).every((c) => out.has(c.id))) out.add(categoryId);
+  return out;
+}
+
 /** Ordre de Discord (position, puis identifiant) : négatif si `a` est sous `b`. Pur. */
 function compareRoles(a, b) {
   if (a.position !== b.position) return a.position - b.position;
@@ -161,9 +189,11 @@ class BackupService {
       .toSorted((a, b) => b.position - a.position)
       .map((r) => ({ name: r.name, color: r.colors?.primaryColor ?? r.color ?? 0, hoist: r.hoist, mentionable: r.mentionable, permissions: r.permissions.bitfield.toString() }));
 
-    // Les fils (threads) ne font pas partie de la structure : jamais sauvegardés.
+    // Les fils (threads) ne font pas partie de la structure : jamais sauvegardés. Les salons
+    // générés par le bot (compteurs, vocaux temporaires) non plus.
+    const generated = generatedChannelIds(guild);
     const channels = [...guild.channels.cache.values()]
-      .filter((c) => !c.isThread?.())
+      .filter((c) => !c.isThread?.() && !generated.has(c.id))
       .toSorted((a, b) => a.rawPosition - b.rawPosition)
       .map((c) => ({
         name: c.name,
@@ -382,4 +412,4 @@ class BackupService {
   }
 }
 
-module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD, planRolePositions, sameOverwrites, resolveOverwrites };
+module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD, planRolePositions, sameOverwrites, resolveOverwrites, generatedChannelIds };

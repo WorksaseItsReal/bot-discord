@@ -63,3 +63,36 @@ test('signalement « Supprimer » : Gérer les messages exigé dans le salon du 
     await h.close();
   }
 });
+
+test('sauvegarde : compteurs, leur catégorie et vocaux temporaires exclus (jamais recréés figés)', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ antiraid: { enabled: false } });
+  try {
+    await h.client.services.counters.create(h.guild, ['members', 'bots']);
+    await h.voice('member', 'hub');
+    const tempId = h.fake.voiceStates.get(IDS.users.member)?.channel_id;
+    assert.ok(tempId && tempId !== IDS.channels.hub, 'vocal temporaire non créé');
+    const cfg = h.client.services.config.get(h.guild.id).statsCounters;
+    const generated = [cfg.categoryId, cfg.counters.members.channelId, cfg.counters.bots.channelId, tempId];
+
+    const backup = h.client.services.backup.create(h.guild, h.client.users.cache.get(IDS.users.admin), 'Test');
+    const names = backup.data.channels.map((c) => c.name);
+    for (const id of generated) {
+      const name = h.guild.channels.cache.get(id)?.name;
+      assert.ok(name, `salon ${id} absent du cache`);
+      assert.ok(!names.includes(name), `« ${name} » sauvegardé`);
+    }
+    assert.ok(names.includes('général'), 'salons ordinaires absents de la sauvegarde');
+
+    // Le compteur change de valeur (renommé) : la restauration ne recrée rien.
+    await h.memberJoin(h.addUser('nouveau'));
+    h.client.services.config.update(h.guild.id, { statsCounters: { counters: { members: { renamedAt: 0 } } } });
+    await h.client.services.counters.update(h.guild);
+    const res = await h.client.services.backup.restore(h.guild, backup.id);
+    assert.equal(res.channels, 0, `salons recréés : ${res.channels}`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
