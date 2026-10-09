@@ -37,6 +37,8 @@ const { StickyRepository } = require('../database/repositories/StickyRepository'
 const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
 const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
+const { FeedRepository } = require('../database/repositories/FeedRepository');
+const { AutoThreadCounterRepository } = require('../database/repositories/AutoThreadCounterRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -64,6 +66,8 @@ const { AutoResponderService } = require('../services/AutoResponderService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
+const { FeedService } = require('../services/FeedService');
+const { AutomationService } = require('../services/AutomationService');
 
 const logger = createLogger('client');
 
@@ -126,6 +130,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleRepository(db),
       announcements: new ScheduledAnnouncementRepository(db),
       birthdays: new BirthdayRepository(db),
+      feeds: new FeedRepository(db),
+      autoThreadCounters: new AutoThreadCounterRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -165,6 +171,10 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
       birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
+      // Flux RSS / YouTube (/flux) : seule source de requêtes HTTP sortantes (FEEDS_NETWORK=off la coupe).
+      feeds: new FeedService({ client: this, feeds: this.repositories.feeds, networkEnabled: config.feedsNetwork }),
+      // Automatisations (/automatisations) : publication automatique, fils, rôle vocal, boosts.
+      automations: new AutomationService({ client: this, config: configService, counters: this.repositories.autoThreadCounters }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -191,7 +201,7 @@ class GadgetClient extends Client {
   async startOperations(opts = config) {
     if (opts === config) {
       // Valeur présente mais rejetée par la config (hors bornes, non numérique) : on le signale.
-      const env = { HEALTH_PORT: 'healthPort', DB_BACKUP_INTERVAL_HOURS: 'dbBackupIntervalHours', DB_BACKUP_KEEP: 'dbBackupKeep' };
+      const env = { HEALTH_PORT: 'healthPort', DB_BACKUP_INTERVAL_HOURS: 'dbBackupIntervalHours', DB_BACKUP_KEEP: 'dbBackupKeep', PRESENCE_INTERVAL_MINUTES: 'presenceIntervalMinutes' };
       for (const [name, key] of Object.entries(env)) {
         const raw = process.env[name]?.trim();
         if (raw && Number(raw) !== opts[key]) logger.warn(`${name}=${raw} invalide : ignoré (voir .env.example).`);
@@ -275,7 +285,7 @@ class GadgetClient extends Client {
     }
     // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
     // En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
-    await this.#settleAll(['autoResponses', 'sticky', 'starboard'], 'stop', 'Arrêt du service');
+    await this.#settleAll(['autoResponses', 'sticky', 'starboard', 'automations', 'feeds'], 'stop', 'Arrêt du service');
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
     // pour rester sous le garde-fou d'arrêt.

@@ -35,6 +35,8 @@ process.env.OWNER_IDS = IDS.users.botOwner;
 process.env.CLIENT_ID = IDS.users.bot;
 delete process.env.HEALTH_PORT;
 delete process.env.DB_BACKUP_INTERVAL_HOURS;
+// Jamais de requête HTTP réelle (flux RSS) : les tests branchent un serveur local au besoin.
+process.env.FEEDS_NETWORK = 'off';
 
 const { ClientUser, ClientApplication, WebSocketShard, Status, PermissionsBitField } = require('discord.js');
 const { GadgetClient } = require('../../src/core/GadgetClient');

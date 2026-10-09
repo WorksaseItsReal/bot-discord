@@ -45,6 +45,14 @@ const config = {
   dbBackupDir: process.env.DB_BACKUP_DIR || '',
   dbBackupKeep: parseNumberEnv(process.env.DB_BACKUP_KEEP, { min: 1, max: 10_000 }) ?? 14,
   dbBackupIntervalHours: parseNumberEnv(process.env.DB_BACKUP_INTERVAL_HOURS, { min: 0.1, max: 24 * 24, integer: false }),
+  /**
+   * Lecture des flux RSS (/flux) : seule fonction qui fait des requêtes HTTP sortantes.
+   * FEEDS_NETWORK=off la coupe (hébergement sans accès sortant, tests).
+   */
+  feedsNetwork: !/^(off|false|0|non|no)$/i.test(String(process.env.FEEDS_NETWORK ?? '').trim()),
+  /** Présence du bot (statuts tournants, réglage global) : voir src/utils/presence.js. */
+  presenceStatuses: process.env.PRESENCE_STATUSES || '',
+  presenceIntervalMinutes: parseNumberEnv(process.env.PRESENCE_INTERVAL_MINUTES, { min: 1, max: 1440, integer: false }),
   env: process.env.NODE_ENV || 'development',
   version: require('../../package.json').version,
   colors: {

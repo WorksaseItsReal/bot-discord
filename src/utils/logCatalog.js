@@ -66,8 +66,8 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '🏠',
     label: 'Serveur',
     channel: 'serveur',
-    description: 'Paramètres du serveur et emojis.',
-    events: { serverUpdate: 'Paramètres du serveur', emojiCreate: 'Emojis ajoutés', emojiDelete: 'Emojis supprimés' },
+    description: 'Paramètres du serveur, emojis, flux RSS et automatisations.',
+    events: { serverUpdate: 'Paramètres du serveur', emojiCreate: 'Emojis ajoutés', emojiDelete: 'Emojis supprimés', feeds: 'Flux RSS (ajouts, retraits, désactivations)', automations: 'Automatisations (publication, fils, boosts : alertes)' },
   },
 });
 
