@@ -96,12 +96,17 @@ function renderResponse(template, { member = '', server = '' } = {}) {
     .slice(0, 2000);
 }
 
-/** Première image d'un message (pièce jointe image, puis image ou miniature d'embed). Pur. */
+/**
+ * Première image d'un message (pièce jointe image, puis image ou miniature d'embed). Les
+ * images marquées spoiler (« SPOILER_… ») ne sont jamais reprises en clair. Pur.
+ */
 function firstImage(message) {
   const attachments = message?.attachments?.values?.() ?? message?.attachments ?? [];
   for (const a of attachments) {
+    const rawName = String(a?.name ?? a?.filename ?? '');
+    if (a?.spoiler || /^SPOILER_/i.test(rawName)) continue;
     const type = a?.contentType ?? a?.content_type ?? '';
-    const name = String(a?.name ?? a?.filename ?? a?.url ?? '').toLowerCase().split('?')[0];
+    const name = String(rawName || a?.url || '').toLowerCase().split('?')[0];
     if (/^image\//.test(type) || /\.(png|jpe?g|gif|webp)$/.test(name)) return a.url ?? null;
   }
   for (const e of message?.embeds ?? []) {

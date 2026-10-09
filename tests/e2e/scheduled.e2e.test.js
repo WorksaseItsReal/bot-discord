@@ -227,6 +227,8 @@ test('anniversaires : configuration, définition, message du jour unique, rôle 
     await h.memberJoin(leaver);
     await h.slash('anniversaire', sub('definir', [opt('jour', 4, day), opt('mois', 4, today.month)]), { as: leaver.id });
     await h.memberLeave(leaver.id);
+    // Une date enregistrée le jour même n'est jamais fêtée ce jour-là (anti-abus) : dates « d'hier ».
+    h.client.database.db.prepare('UPDATE birthdays SET date_changed_at = ?').run(Date.now() - 2 * 86_400_000);
 
     let mark = h.fake.messageLog.length;
     await h.client.services.scheduler.tick();

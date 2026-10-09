@@ -21,6 +21,8 @@ const PERMANENT_CODES = new Set([10003, 10004, 50001, 50013, 50035, 50083]);
 const DRAFT_TTL_MS = DAY_MS;
 /** Un envoi unique bloqué par des erreurs transitoires est abandonné 24 h après l'échéance. */
 const MAX_LATE_MS = DAY_MS;
+/** Membre ou utilisateur inconnu : l'auteur a quitté le serveur. */
+const GONE_CODES = new Set([10007, 10013]);
 
 /** Mention d'une annonce : contenu et `allowedMentions` explicites. Pur. */
 function mentionOf(row) {
@@ -77,6 +79,8 @@ function channelIssue(guild, channelId) {
 /**
  * Annonces programmées : publication à l'échéance (étape du SchedulerService),
  * répétitions, envoi manuel, désactivation si le salon devient inutilisable.
+ * Chaque publication réserve la ligne (`scheduled` → `sending`) avant l'envoi : un double
+ * clic ou le scheduler au même instant ne publient jamais deux fois (deux @everyone).
  */
 class AnnouncementService {
   /**
@@ -85,6 +89,36 @@ class AnnouncementService {
   constructor({ client, announcements }) {
     this.client = client;
     this.repo = announcements;
+    // Arrêt brutal pendant un envoi : la réservation est rendue (au pire un envoi en double,
+    // jamais une annonce bloquée à vie).
+    const reset = announcements?.resetSending?.() ?? 0;
+    if (reset) logger.warn(`${reset} annonce(s) interrompue(s) pendant leur envoi : reprogrammée(s).`);
+  }
+
+  /**
+   * L'auteur peut-il TOUJOURS mentionner ce rôle (@everyone ou rôle non mentionnable) ?
+   * Revérifié à chaque publication programmée : un auteur rétrogradé ou parti ne pingue plus.
+   * @returns {Promise<string|null>} raison du refus (définitif), ou null
+   */
+  async #authorMentionIssue(guild, row) {
+    if (!row.role_id) return null;
+    const everyone = row.role_id === guild.id;
+    const role = everyone ? null : guild.roles?.cache?.get(row.role_id);
+    // Rôle mentionnable : aucune permission requise. Rôle supprimé : la mention ne notifie plus personne.
+    if (!everyone && (!role || role.mentionable)) return null;
+    let member = guild.members?.cache?.get(row.author_id);
+    if (!member) {
+      try {
+        member = await guild.members.fetch(row.author_id);
+      } catch (e) {
+        if (GONE_CODES.has(e?.code)) return 'son auteur a quitté le serveur (mention non autorisée)';
+        throw e; // erreur passagère : réessai
+      }
+    }
+    if (member.permissions?.has?.(PermissionFlagsBits.MentionEveryone)) return null;
+    return everyone
+      ? 'son auteur n\'a plus la permission de mentionner @everyone'
+      : 'son auteur n\'a plus la permission de mentionner ce rôle (non mentionnable)';
   }
 
   /**
@@ -108,9 +142,19 @@ class AnnouncementService {
    */
   async sendNow(guild, id, by) {
     const row = this.repo.get(guild.id, id);
+    if (row?.status === 'sending') throw new UserError('Cette annonce est déjà en cours de publication.');
     if (!row || row.status !== 'scheduled') throw new UserError('Cette annonce n\'est plus programmée.');
-    const result = await this.publish(guild, row);
+    // Réservation atomique : le second clic (ou le scheduler) trouve la ligne déjà prise.
+    if (!this.repo.reserve(row.id)) throw new UserError('Cette annonce est déjà en cours de publication.');
+    let result;
+    try {
+      result = await this.publish(guild, row);
+    } catch (e) {
+      this.repo.release(row.id);
+      throw e;
+    }
     if (!result.ok) {
+      this.repo.release(row.id);
       if (result.permanent) await this.#disable(guild, row, result.reason);
       throw new UserError(`Annonce non publiée : ${result.reason}.${result.permanent ? ' Elle a été désactivée.' : ''}`);
     }
@@ -146,21 +190,34 @@ class AnnouncementService {
     if (!guild.available) return;
     const fresh = this.repo.byId(row.id);
     if (fresh?.status !== 'scheduled' || fresh.next_run > Date.now()) return;
-    const result = await this.publish(guild, fresh);
+    // Occurrence suivante calculée AVANT l'envoi : si le calcul échoue, rien n'est publié
+    // (sinon l'annonce, jamais marquée envoyée, repartirait à chaque tick).
+    const next = nextAfter(fresh.anchor_at, fresh.repeat, fresh.time_zone, fresh.runs, Date.now());
+    const mentionIssue = await this.#authorMentionIssue(guild, fresh);
+    if (mentionIssue) return this.#disable(guild, fresh, mentionIssue);
+    if (!this.repo.reserve(fresh.id)) return; // « Envoyer maintenant » en cours
+    let result;
+    try {
+      result = await this.publish(guild, fresh);
+    } catch (e) {
+      this.repo.release(fresh.id);
+      throw e;
+    }
     const now = Date.now();
     if (result.ok) {
-      const next = nextAfter(fresh.anchor_at, fresh.repeat, fresh.time_zone, fresh.runs, now);
-      this.repo.markSent(fresh.id, { now, nextRun: next?.at ?? null, runs: next?.runs ?? fresh.runs + 1 });
-      logger.info(`Annonce #${fresh.id} publiée (serveur ${guild.id})${next ? `, prochaine ${new Date(next.at).toISOString()}` : ''}.`);
+      // Envoi plus long que prévu : l'occurrence suivante doit rester dans le futur.
+      const upcoming = next && next.at <= now ? nextAfter(fresh.anchor_at, fresh.repeat, fresh.time_zone, next.runs, now) : next;
+      this.repo.markSent(fresh.id, { now, nextRun: upcoming?.at ?? null, runs: upcoming?.runs ?? fresh.runs + 1 });
+      logger.info(`Annonce #${fresh.id} publiée (serveur ${guild.id})${upcoming ? `, prochaine ${new Date(upcoming.at).toISOString()}` : ''}.`);
       return;
     }
+    this.repo.release(fresh.id);
     if (result.permanent) return this.#disable(guild, fresh, result.reason);
     this.repo.setError(fresh.id, result.reason);
     if (now - fresh.next_run <= MAX_LATE_MS) return undefined;
     // Trop de retard : une annonce unique est abandonnée, une répétition passe à l'occurrence suivante.
-    const next = nextAfter(fresh.anchor_at, fresh.repeat, fresh.time_zone, fresh.runs, now);
     if (!next) return this.#disable(guild, fresh, `non publiée 24 h après l'échéance (${result.reason})`);
-    this.repo.markSent(fresh.id, { now, nextRun: next.at, runs: next.runs });
+    this.repo.skipTo(fresh.id, { nextRun: next.at, runs: next.runs, error: result.reason });
     return undefined;
   }
 

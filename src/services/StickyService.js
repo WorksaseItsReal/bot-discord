@@ -26,6 +26,9 @@ const SEND_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMes
  * Messages épinglés automatiquement (« sticky ») : un embed réaffiché en bas d'un salon
  * après de l'activité. Anti-rebond : au plus une republication toutes les 15 s par salon,
  * et seulement après N messages (ou, sous ce seuil, après une minute d'activité).
+ * Les messages des bots comptent dans les N, mais une republication exige au moins un
+ * message d'un MEMBRE depuis la précédente : deux bots « sticky » dans un même salon ne
+ * se relancent jamais l'un l'autre.
  * Le message précédent est supprimé. Tout est en base (table sticky_messages) : après un
  * redémarrage, les salons où d'autres messages sont arrivés entre-temps sont rattrapés.
  */
@@ -42,7 +45,7 @@ class StickyService {
     this.idleMs = idleMs;
     /** Ligne par salon (chargées à la première utilisation). @type {Map<string, object>|null} */
     this.rows = null;
-    /** État par salon : { count, firstAt, timer, dueAt, running, posting, lastPostAt }. */
+    /** État par salon : { count, humans, firstAt, timer, dueAt, running, posting, lastPostAt }. */
     this.states = new Map();
     this.stopped = false;
   }
@@ -55,7 +58,7 @@ class StickyService {
   #state(channelId) {
     let s = this.states.get(channelId);
     if (!s) {
-      s = { count: 0, firstAt: null, timer: null, dueAt: 0, running: null, posting: false, lastPostAt: 0 };
+      s = { count: 0, humans: 0, firstAt: null, timer: null, dueAt: 0, running: null, posting: false, lastPostAt: 0 };
       this.states.set(channelId, s);
     }
     return s;
@@ -102,6 +105,7 @@ class StickyService {
     const lastId = row.last_message_id;
     const channel = this.client.channels?.cache?.get(channelId);
     if (lastId && channel?.messages) {
+      this.client.services?.logging?.suppressMessage?.(lastId);
       await channel.messages.delete(lastId).catch((err) => {
         if (!UNKNOWN.has(err?.code)) logger.debug(`Ancien message épinglé ${lastId} non supprimé :`, err?.message);
       });
@@ -120,6 +124,9 @@ class StickyService {
     // Notre propre message épinglé (écho de la passerelle) ne compte pas comme activité.
     if (message.author?.id && message.author.id === this.client?.user?.id && (s.posting || message.id === row.last_message_id)) return false;
     s.count += 1;
+    if (!message.author?.bot && !message.webhookId && !message.system) s.humans += 1;
+    // Que des messages de bots : comptés, mais aucune republication (anti ping-pong entre bots).
+    if (!s.humans) return true;
     s.firstAt ??= Date.now();
     this.#schedule(message.channelId);
     return true;
@@ -156,6 +163,7 @@ class StickyService {
       if (row.last_message_id && channel.lastMessageId === row.last_message_id) continue;
       const s = this.#state(row.channel_id);
       s.count = Math.max(s.count, row.threshold);
+      s.humans = Math.max(s.humans, 1); // auteurs inconnus pendant l'arrêt : rattrapage
       s.firstAt ??= Date.now();
       this.#schedule(row.channel_id);
       n += 1;
@@ -185,10 +193,10 @@ class StickyService {
     s.timer = null;
     if (s.running) {
       // Republication en cours : on retentera après elle (l'activité reste comptée).
-      s.running.finally(() => s.count > 0 && this.#schedule(channelId));
+      s.running.finally(() => s.count > 0 && s.humans > 0 && this.#schedule(channelId));
       return;
     }
-    if (s.count > 0) this.repost(channelId);
+    if (s.count > 0 && s.humans > 0) this.repost(channelId);
   }
 
   /**
@@ -236,9 +244,12 @@ class StickyService {
     row.last_message_id = sent.id;
     this.repo.setLastMessage(channelId, sent.id);
     s.count = 0;
+    s.humans = 0;
     s.firstAt = null;
     s.lastPostAt = Date.now();
     if (previous && previous !== sent.id) {
+      // Suppression par le bot : pas de « Message supprimé » dans les logs (message hors cache).
+      this.client.services?.logging?.suppressMessage?.(previous);
       await channel.messages.delete(previous).catch((err) => {
         if (!UNKNOWN.has(err?.code)) logger.debug(`Ancien message épinglé ${previous} non supprimé :`, err?.message);
       });

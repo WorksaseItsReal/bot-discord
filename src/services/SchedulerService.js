@@ -15,6 +15,12 @@ const REMINDER_MAX_LATE_MS = DAY_MS;
 const LEFT_GUILD_RETENTION_MS = 30 * DAY_MS;
 /** Fréquence de la purge des serveurs quittés. */
 const PURGE_INTERVAL_MS = DAY_MS;
+/**
+ * Budget de temps d'une étape « service » (rôles temporaires, annonces, anniversaires) par
+ * tick : au-delà, l'étape s'interrompt entre deux lignes et reprend au tick suivant, pour
+ * ne pas retarder les autres étapes (débans, mutes, rappels…) ni les ticks suivants.
+ */
+const SERVICE_STAGE_BUDGET_MS = 15_000;
 
 /** Salon définitivement inutilisable (supprimé, accès ou permission retirés). */
 const PERMANENT_CHANNEL_CODES = new Set([10003, 10004, 50001, 50008, 50013, 50024, 50083]);
@@ -38,11 +44,12 @@ class SchedulerService {
    * @param {import('../database/repositories/ReminderRepository').ReminderRepository} deps.reminders
    * @param {number} [deps.intervalMs]
    */
-  constructor({ client, sanctions, reminders, intervalMs = 30_000 }) {
+  constructor({ client, sanctions, reminders, intervalMs = 30_000, stageBudgetMs = SERVICE_STAGE_BUDGET_MS }) {
     this.client = client;
     this.sanctions = sanctions;
     this.reminders = reminders;
     this.intervalMs = intervalMs;
+    this.stageBudgetMs = stageBudgetMs;
     this.timer = null;
     this.running = false;
     this.stopping = false;
@@ -80,6 +87,12 @@ class SchedulerService {
     return this.currentTick;
   }
 
+  /** Interruption d'une étape « service » : arrêt du bot, ou budget de temps épuisé. */
+  #budget() {
+    const deadline = Date.now() + this.stageBudgetMs;
+    return () => this.stopping || Date.now() > deadline;
+  }
+
   async #runStages() {
     const stages = [
       ['tempbans', () => this.#processExpiredTempbans()],
@@ -88,9 +101,9 @@ class SchedulerService {
       ['giveaways', () => this.#processDueGiveaways()],
       ['autobackup', () => this.#processAutobackup()],
       ['purge', () => this.#processLeftGuildPurge()],
-      ['temproles', () => this.client.services?.tempRoles?.processDue({ isStopping: () => this.stopping })],
-      ['announcements', () => this.client.services?.announcements?.processDue({ isStopping: () => this.stopping })],
-      ['birthdays', () => this.client.services?.birthdays?.processDue({ isStopping: () => this.stopping })],
+      ['temproles', () => this.client.services?.tempRoles?.processDue({ isStopping: this.#budget() })],
+      ['announcements', () => this.client.services?.announcements?.processDue({ isStopping: this.#budget() })],
+      ['birthdays', () => this.client.services?.birthdays?.processDue({ isStopping: this.#budget() })],
     ];
     for (const [name, run] of stages) {
       if (this.stopping) return;
@@ -357,4 +370,4 @@ class SchedulerService {
   }
 }
 
-module.exports = { SchedulerService, REMINDER_MAX_LATE_MS, LEFT_GUILD_RETENTION_MS };
+module.exports = { SchedulerService, REMINDER_MAX_LATE_MS, LEFT_GUILD_RETENTION_MS, SERVICE_STAGE_BUDGET_MS };

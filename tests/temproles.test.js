@@ -118,10 +118,14 @@ test('processDue : erreur transitoire → réessai ; hiérarchie insuffisante de
   member.failNext = apiError(500);
   await service.processDue();
   assert.equal(repo.get(GUILD, id).active, 1, 'gardée pour un nouvel essai');
+  assert.ok(repo.get(GUILD, id).next_attempt_at > Date.now(), 'réessai espacé (backoff)');
+  const later = () => client.db.prepare('UPDATE temp_roles SET next_attempt_at = NULL WHERE id = ?').run(id); // 5 min plus tard
+  later();
   guild.roles.cache.get(ROLE.safe).position = 15; // au-dessus du bot
   member.calls.length = 0;
   await service.processDue();
   assert.equal(member.calls.length, 0, 'aucun appel voué à l\'échec');
+  later();
   client.db.prepare('UPDATE temp_roles SET expires_at = ? WHERE id = ?').run(Date.now() - MAX_LATE_MS - 1000, id);
   await service.processDue();
   assert.equal(repo.get(GUILD, id).end_reason, 'failed');

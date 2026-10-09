@@ -367,10 +367,6 @@ module.exports = {
       });
     }
 
-    const user = interaction.options.getUser('membre');
-    const member = await guild.members.fetch(user.id).catch(() => null);
-    if (!member) throw new UserError('Membre introuvable.');
-
     if (sub === 'temporaire') {
       assertManageRoles(interaction);
       if (hasForbiddenPermissions(role)) {
@@ -378,10 +374,18 @@ module.exports = {
       }
       const durationMs = tempDuration(interaction.options.getString('duree'));
       const reason = interaction.options.getString('raison')?.trim() || null;
-      const { id, renewed } = await client.services.tempRoles.grant({ guild, member, role, durationMs, moderator: interaction.user, reason });
+      // Membre, ajout du rôle puis log : plusieurs appels réseau, au-delà des 3 s possibles.
+      await interaction.deferReply();
+      const target = await guild.members.fetch(interaction.options.getUser('membre').id).catch(() => null);
+      if (!target) throw new UserError('Membre introuvable.');
+      const { id, renewed } = await client.services.tempRoles.grant({ guild, member: target, role, durationMs, moderator: interaction.user, reason });
       const row = client.repositories.tempRoles.get(guild.id, id);
-      return interaction.reply(tempCardView(row, { title: renewed ? 'Rôle temporaire renouvelé' : 'Rôle temporaire attribué', moderator: interaction.user, ownerId, durationMs }));
+      return interaction.editReply(tempCardView(row, { title: renewed ? 'Rôle temporaire renouvelé' : 'Rôle temporaire attribué', moderator: interaction.user, ownerId, durationMs }));
     }
+
+    const user = interaction.options.getUser('membre');
+    const member = await guild.members.fetch(user.id).catch(() => null);
+    if (!member) throw new UserError('Membre introuvable.');
 
     if (sub === 'add') {
       if (member.roles.cache.has(role.id)) throw new UserError(`${user} a déjà le rôle ${role}.`);
@@ -391,6 +395,8 @@ module.exports = {
     if (sub === 'remove') {
       if (!member.roles.cache.has(role.id)) throw new UserError(`${user} n'a pas le rôle ${role}.`);
       await member.roles.remove(role, `Par ${interaction.user.tag}`);
+      // Rôle temporaire retiré à la main : plus d'échéance ni de réapplication au retour.
+      client.services.tempRoles?.closeManual(guild.id, member.id, role.id);
       return interaction.reply(membershipView('removed', { member, role, moderator: interaction.user, ownerId }));
     }
   },
@@ -435,13 +441,15 @@ module.exports = {
       const row = activeTempRow(client, interaction, id);
       assertTempAccess(interaction, row);
       const addMs = tempDuration(interaction.fields.getTextInputValue('duree'));
+      // Le log de prolongation est un appel réseau : on acquitte d'abord (délai de 3 s).
+      await interaction.deferUpdate();
       const expiresAt = await client.services.tempRoles.extend(interaction.guild, row.id, addMs, interaction.user);
       if (f === 'card') {
         const fresh = client.repositories.tempRoles.get(interaction.guildId, row.id);
-        await interaction.update(tempCardView(fresh, { title: 'Rôle temporaire prolongé', tone: 'info', ownerId: extra }));
+        await interaction.editReply(tempCardView(fresh, { title: 'Rôle temporaire prolongé', tone: 'info', ownerId: extra }));
         return;
       }
-      await interaction.update(tempListView(client, interaction.guild, f, Number(extra) || 0, `${ICONS.success} Rôle <@&${row.role_id}> de <@${row.user_id}> prolongé jusqu'à ${discordTimestamp(expiresAt, 'f')}.`));
+      await interaction.editReply(tempListView(client, interaction.guild, f, Number(extra) || 0, `${ICONS.success} Rôle <@&${row.role_id}> de <@${row.user_id}> prolongé jusqu'à ${discordTimestamp(expiresAt, 'f')}.`));
     },
 
     /** cmd:role:take:<memberId>:<roleId>:<ownerId> — retire le rôle qui vient d'être ajouté. */
@@ -449,6 +457,7 @@ module.exports = {
       const { role, member } = await resolveButton(interaction, memberId, roleId);
       if (!member.roles.cache.has(role.id)) throw new UserError(`${member} n'a déjà plus le rôle ${role}.`);
       await member.roles.remove(role, `Annulation par ${interaction.user.tag}`);
+      client.services.tempRoles?.closeManual(interaction.guildId, member.id, role.id);
       await interaction.update(membershipView('removed', { member, role, moderator: interaction.user, ownerId }));
     },
 
