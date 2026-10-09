@@ -23,6 +23,7 @@
 - [AutoMod](#-automod)
 - [Logs](#-logs)
 - [Accueil, niveaux et vocaux](#-accueil-niveaux-et-vocaux)
+- [Communauté, signalements et automatisations](#-communauté-signalements-et-automatisations)
 - [Toutes les commandes](#-toutes-les-commandes)
 - [Installation](#-installation)
 - [Exploitation : Docker, supervision, sauvegardes](#-exploitation--docker-supervision-sauvegardes)
@@ -173,7 +174,7 @@ Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, a
 
 - **Bienvenue et départ** : salon, titre, texte, couleur, bannière ; variables `{membre}`, `{pseudo}`, `{serveur}`, `{nombre}`, `{compte}` ; mention du membre et copie en MP facultatives ; aperçu et envoi de test.
 - **Rôles automatiques** séparés humains / bots (10 chacun), hiérarchie vérifiée, rôles Administrateur refusés.
-- **Vérification par bouton** : rôle « vérifié » donné (ou « non vérifié » retiré), question anti-robot (petit calcul ou mot à recopier), âge minimal du compte, log « Vérifications réussies ». Les rôles automatiques ne sont donnés qu'après vérification.
+- **Vérification par bouton** : rôle « vérifié » donné (ou « non vérifié » retiré), question anti-robot écrite en toutes lettres (« Combien font sept plus trois ? », réponse en chiffres ou en lettres), âge minimal du compte, log « Vérifications réussies ». Les rôles automatiques ne sont donnés qu'après vérification.
 - L'accueil passe **après l'AntiRaid** (un raider puni ne reçoit rien) et attend l'acceptation de l'écran d'adhésion Discord ; @everyone et @here ne sont jamais mentionnés.
 
 **Niveaux et XP** (désactivés par défaut) — `/niveaux` (Gérer le serveur) :
@@ -181,9 +182,23 @@ Tapez `/automod` : un panneau interactif s'ouvre et tout se règle depuis là, a
 - 15 à 25 XP par message, une fois par minute et par membre (réglable) ; les bots, messages de moins de 3 caractères et messages supprimés par l'AutoMod ne comptent pas.
 - XP vocale optionnelle : par minute passée micro ouvert, à plusieurs, hors salon AFK.
 - Annonces de niveau (même salon, salon dédié, MP ou désactivées ; `{membre}`, `{niveau}`), rôles de récompense cumulatifs ou seulement le plus haut, multiplicateurs par rôle, salons et rôles exclus, gestion de l'XP (donner, retirer, définir, importer, réinitialiser).
-- Les membres consultent leur carte avec **`/rang [membre]`** et le classement paginé avec **`/classement`**.
+- Les membres consultent leur carte avec **`/rang [membre]`** et le classement paginé avec **`/classement`**. Les membres qui quittent le serveur sortent du classement sans perdre leur XP (rendue s'ils reviennent) ; `/niveaux` › Gérer l'XP › « Membres partis » purge les départs anciens.
 
 **Vocaux temporaires** — rejoindre le salon créateur crée un vocal personnel (permissions de la catégorie conservées), supprimé quand il est vide. Un **panneau de contrôle** est posté dans son chat : 🔒 verrouiller, 👁️ masquer, ✏️ renommer, 👥 limite, 🚪 expulser, ⛔ bannir du salon, ✅ autoriser, 👑 transférer, 🙋 réclamer, 🎚️ débit, 🌍 région. Seuls le propriétaire et les modérateurs s'en servent ; les noms sont filtrés (mots interdits de l'AutoMod compris). Le nom, la limite et le verrou sont mémorisés pour les prochains vocaux. `/tempvoice config` règle le salon créateur, la catégorie, le nom par défaut (`{pseudo}`, `{username}`, `{n}`) et la limite.
+
+---
+
+## 🧩 Communauté, signalements et automatisations
+
+**Signalements et menus contextuels** — clic droit sur un message → Applications → **Signaler le message** : n'importe quel membre signale un message à l'équipe (raison facultative). Une carte arrive dans le salon du staff (`/signalements`, sinon le salon de logs Modération), avec les boutons **Supprimer**, **Avertir**, **Timeout 10 min**, **Classer**, **Rejeter** (permissions et hiérarchie vérifiées). Anti-abus : un signalement toutes les 30 s, un seul par message, ni soi-même ni un bot ; le signaleur peut être masqué. Les modérateurs ont trois menus sur un membre : **Infos du membre**, **Sanctions du membre**, **Note de modération**.
+
+**Invitations et compteurs** — le bot retrouve l'invitation utilisée par chaque arrivant (classique, lien personnalisé, usage unique, bot ajouté par OAuth2) et l'affiche dans le log d'arrivée. `/invitations voir|classement|reinitialiser|reglages` : invitations réelles, départs, fausses (comptes récents), total net. `/compteurs` crée en un clic une catégorie « 📊 Statistiques » de salons vocaux verrouillés qui affichent membres, humains, bots, boosts, salons et rôles (noms modifiables, `{n}`), mis à jour au plus toutes les 10 min (limite Discord).
+
+**Starboard, réponses automatiques, sticky** — `/communaute` (Gérer le serveur) : un message qui atteint N réactions ⭐ est reposté dans un salon dédié (carte avec auteur, contenu, image, lien, compteur en direct ; l'auteur et les bots ne comptent pas ; NSFW cloisonné) ; jusqu'à 25 **réponses automatiques** (mot entier, contient, commence par, exact — jamais d'expression régulière) avec texte et/ou réaction, salons autorisés/exclus et délai. `/sticky definir|retirer|liste` (Gérer les messages) maintient un message épinglé en bas d'un salon, réaffiché après N messages.
+
+**Planifié** — `/role temporaire` donne un rôle pour une durée limitée (retiré à l'échéance, rendu si le membre revient avant la fin ; `/role temporaires` pour lister, retirer, prolonger). `/annonce programmer` publie une annonce (titre, message, couleur, image, rôle) à une date (`14h30`, `25/12 18h`, `+2h`), une fois ou chaque jour/semaine/mois ; `/annonce liste` pour envoyer tout de suite ou supprimer. `/anniversaire definir|retirer|liste` et `/anniversaire config` (salon, message, rôle porté 24 h, fuseau, heure) fêtent les anniversaires une fois par jour et par membre, sans jamais afficher l'âge sans accord.
+
+**Sécurité renforcée** — l'AntiRaid surveille aussi les **expulsions massives** (seuil « Expulsions », désactivé par défaut, 5 en préréglage Strict), faites à la main ou via le bot. `/backup restore` remet les rôles recréés dans l'ordre et peut, sur option, rétablir les permissions des salons existants. `/tickets` peut archiver les **pièces jointes** avec les transcripts (8 Mo par fichier, 24 Mo au total).
 
 ---
 
@@ -193,7 +208,7 @@ Tapez `/help` sur Discord pour un menu interactif, ou `/help commande:<nom>` pou
 Les commandes marquées 🔒 demandent une permission Discord, par exemple « Bannir des membres » pour `/ban`.
 
 <details>
-<summary><b>📊 Informations</b> (12)</summary>
+<summary><b>📊 Informations</b> (13)</summary>
 
 | Commande | Description |
 | --- | --- |
@@ -206,11 +221,12 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/emoji` | Emoji personnalisé en grand, avec son identifiant. |
 | `/membres` | Compteur de membres et membres en ligne. |
 | `/botinfo` | Statistiques et informations techniques du bot. |
+| `/invitations` | Qui a invité qui : `voir`, `classement`, `reinitialiser` 🔒, `reglages` 🔒. |
 
 </details>
 
 <details>
-<summary><b>🔨 Modération</b> (20) 🔒</summary>
+<summary><b>🔨 Modération</b> (21 + 4 menus contextuels) 🔒</summary>
 
 | Commande | Description |
 | --- | --- |
@@ -224,6 +240,8 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/hide` · `/unhide` | Masquer ou réafficher un salon. |
 | `/slowmode` | Mode lent d'un salon, jusqu'à 6 heures. |
 | `/pseudo` | Modifier ou réinitialiser le pseudo d'un membre. |
+| `/signalements` | Tableau de bord des signalements : salon, rôle, anonymat, statistiques, signalements ouverts. |
+| Clic droit → Applications | **Signaler le message** (tous) ; **Infos du membre**, **Sanctions du membre**, **Note de modération** (modérateurs). |
 
 </details>
 
@@ -240,7 +258,7 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 </details>
 
 <details>
-<summary><b>🎫 Communauté</b> (11)</summary>
+<summary><b>🎫 Communauté</b> (14)</summary>
 
 | Commande | Description |
 | --- | --- |
@@ -251,7 +269,10 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 | `/giveaway` 🔒 | Concours avec participation par bouton, fin automatique et nouveau tirage. |
 | `/suggestion` | Idées de la communauté avec votes 👍/👎, acceptées ou refusées par le staff. |
 | `/rolemenu` 🔒 | Menu de rôles que les membres s'attribuent eux-mêmes. |
-| `/role` · `/derank` · `/massrole` 🔒 | Gestion des rôles, retrait complet, attribution en masse. |
+| `/role` · `/derank` · `/massrole` 🔒 | Gestion des rôles (dont `temporaire` et `temporaires`), retrait complet, attribution en masse. |
+| `/communaute` 🔒 | Starboard et réponses automatiques. |
+| `/annonce` 🔒 | Annonces programmées : `programmer`, `liste`. |
+| `/anniversaire` | `definir`, `retirer`, `liste` ; `config` 🔒 pour le salon, le message, le rôle et l'heure. |
 | `/sondage` | Sondage natif Discord, de 2 à 10 réponses, jusqu'à 32 jours. |
 
 </details>
@@ -278,13 +299,14 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 </details>
 
 <details>
-<summary><b>🧰 Outils</b> (10)</summary>
+<summary><b>🧰 Outils</b> (11)</summary>
 
 | Commande | Description |
 | --- | --- |
 | `/embed` 🔒 | Créer et envoyer des embeds personnalisés via un formulaire. |
 | `/custom` 🔒 · `/tag` | Commandes personnalisées avec variables. |
 | `/reminder` | Rappels personnels, conservés même après un redémarrage. |
+| `/sticky` 🔒 | Message épinglé en bas d'un salon : `definir`, `retirer`, `liste`. |
 | `/calcul` | Calculatrice : `(2+3)^2 / sqrt(16)`, fonctions et constantes. |
 | `/timestamp` | Dates Discord affichées dans le fuseau horaire de chaque lecteur (`14h30`, `25/12 18h`, ou une durée `+2h`). |
 | `/couleur` | Aperçu d'une couleur en HEX, RGB et HSL, ou couleur aléatoire. |
@@ -306,14 +328,15 @@ Les commandes marquées 🔒 demandent une permission Discord, par exemple « Ba
 </details>
 
 <details>
-<summary><b>⚙️ Configuration</b> (6) 🔒</summary>
+<summary><b>⚙️ Configuration</b> (7) 🔒</summary>
 
 | Commande | Description |
 | --- | --- |
 | `/logs` | Tableau de bord des logs : salons, événements, création automatique des salons. |
 | `/settings` | Vue d'ensemble, raccourcis vers les tableaux de bord ; `moderation` règle DM, confirmations, raison obligatoire, strikes et paliers, rôle muet. |
 | `/diagnostics` | Analyse la configuration et signale les permissions manquantes. |
-| `/backup` | Sauvegarde, restauration et sauvegarde automatique de la structure du serveur. |
+| `/backup` | Sauvegarde, restauration (ordre des rôles, permissions sur option) et sauvegarde automatique de la structure du serveur. |
+| `/compteurs` | Salons de statistiques (membres, bots, boosts…) mis à jour automatiquement. |
 | `/health` | État technique du bot : latence, base de données, services. |
 | `/projet config` | Réglages du module projets. |
 
@@ -373,6 +396,8 @@ Dans le Developer Portal, onglet **Bot**, activez les deux intents privilégiés
 | `GuildVoiceStates` | Vocaux temporaires, gestion et logs vocaux. |
 | `DirectMessages` | ModMail. |
 | `GuildExpressions` | Logs des emojis. |
+| `GuildInvites` | Suivi des invitations (qui a invité qui). |
+| `GuildMessageReactions` | Starboard. |
 
 ### Inviter le bot
 
