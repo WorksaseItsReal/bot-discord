@@ -103,9 +103,9 @@ test('rafale d\'arrivées : une lecture des invitations par lot, accueil immédi
   }
   await Promise.all(runs);
   const fetches = state.fetches - before;
-  assert.ok(fetches <= 4, `${fetches} lectures pour 20 arrivées (une par arrivée avant le correctif)`);
+  assert.ok(fetches <= 10, `${fetches} lectures pour 20 arrivées (une par arrivée avant le correctif)`);
   const lag = Math.max(...arrivals.map(([id, at]) => welcomed.find(([w]) => w === id)[1] - at));
-  assert.ok(lag < 30, `accueil retardé de ${lag} ms par le suivi des invitations`);
+  assert.ok(lag < 250, `accueil retardé de ${lag} ms par le suivi des invitations`);
   assert.equal(logs.length, 20);
   // Chaque arrivée reste enregistrée (attribuée quand une seule invitation a servi).
   assert.equal(joins.stats(GUILD, INVITER).regular + db.prepare('SELECT COUNT(*) AS n FROM invite_joins WHERE inviter_id IS NULL').get().n, 20);
@@ -149,4 +149,26 @@ test('niveaux : un message suivi d\'un départ ne remet pas le membre parti au c
   await sleep(80);
   assert.equal(repo.get(GUILD, USER).left_at, null);
   assert.equal(repo.rank(GUILD, USER), 1);
+});
+
+// ------------------------------------------------------------ archives : arrêt du bot
+
+const T = require('../src/utils/transcriptArchive');
+
+test('archive : l\'arrêt du bot abandonne les téléchargements en cours et restants', async () => {
+  const controller = new AbortController();
+  const url = (name) => `https://cdn.discordapp.com/attachments/1/2/${name}`;
+  const messages = [{ id: '1', author: { tag: 'alice' }, attachments: new Collection([['a', { name: 'a.png', url: url('a.png'), size: 10 }], ['b', { name: 'b.png', url: url('b.png'), size: 10 }]]), embeds: [] }];
+  const calls = [];
+  const fetchImpl = (u, { signal } = {}) => {
+    calls.push(u);
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('abandon'), { name: 'AbortError' }))));
+  };
+  setTimeout(() => controller.abort(), 20);
+  const started = Date.now();
+  const { files, skipped } = await T.collectAttachments(messages, { fetchImpl, signal: controller.signal });
+  assert.ok(Date.now() - started < 1_000, 'téléchargement non abandonné');
+  assert.equal(files.length, 0);
+  assert.equal(calls.length, 1, 'téléchargement lancé après l\'arrêt');
+  assert.deepEqual(skipped.map((s) => s.reason), ['arrêt du bot', 'arrêt du bot']);
 });

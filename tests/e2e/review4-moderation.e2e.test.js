@@ -9,6 +9,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PermissionFlagsBits: P } = require('discord.js');
 const { createHarness, IDS } = require('./harness');
+const { nextId } = require('./lib/ids');
 
 const REPORT = 'Signaler le message';
 const botMessages = (h, mark, pred = () => true) => h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m && m.author.id === h.client.user.id && pred(m));
@@ -91,6 +92,40 @@ test('sauvegarde : compteurs, leur catégorie et vocaux temporaires exclus (jama
     await h.client.services.counters.update(h.guild);
     const res = await h.client.services.backup.restore(h.guild, backup.id);
     assert.equal(res.channels, 0, `salons recréés : ${res.channels}`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/** Pièce jointe brute (format API) d'un message utilisateur. */
+const rawAttachment = (channelId, filename, size) => ({ id: nextId(), filename, size, url: `https://cdn.discordapp.com/attachments/${channelId}/${nextId()}/${filename}`, proxy_url: `https://media.discordapp.net/attachments/${channelId}/1/${filename}`, content_type: 'image/png' });
+
+test('arrêt du bot pendant la fermeture d\'un ticket : archive sans téléchargement, salon supprimé', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ tickets: { archiveAttachments: true } });
+  try {
+    const downloads = [];
+    // Téléchargement qui ne se termine qu'à l'abandon (CDN lent).
+    h.client.services.tickets.fetch = (url, { signal } = {}) => {
+      downloads.push(url);
+      return new Promise((resolve, reject) => signal?.addEventListener('abort', () => reject(Object.assign(new Error('abandon'), { name: 'AbortError' }))));
+    };
+    const channel = await h.client.services.tickets.create(h.guild, h.client.users.cache.get(IDS.users.member));
+    await h.settle();
+    await h.userMessage({ as: 'member', channel: channel.id, content: 'Capture', extra: { attachments: [rawAttachment(channel.id, 'capture.png', 2048)] } });
+    const mark = h.fake.calls.length;
+    await h.slash('ticket', [{ name: 'close', type: 1, options: [] }], { as: 'member', channel: channel.id });
+    const started = Date.now();
+    await h.client.services.tickets.flush(); // arrêt du bot pendant le délai de fermeture
+    assert.ok(Date.now() - started < 2_000, `fermeture trop lente à l'arrêt : ${Date.now() - started} ms`);
+    await h.settle();
+    assert.equal(downloads.length, 0, 'pièce jointe téléchargée pendant l\'arrêt');
+    const archive = h.fake.calls.slice(mark).find((c) => c.route === `/channels/${IDS.channels.logs}/messages` && c.files.length);
+    assert.ok(archive, 'transcript non archivé');
+    assert.deepEqual(archive.files.map((f) => f.name).filter((n) => !n.endsWith('.txt')), []);
+    assert.ok(!h.fake.channels.has(channel.id), 'salon du ticket non supprimé');
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();

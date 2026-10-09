@@ -539,7 +539,8 @@ class TicketService {
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
     if (this.closing.has(channel.id)) throw new UserError('Ce ticket est déjà en cours de fermeture.');
     this.closing.add(channel.id);
-    const job = { flushed: false, skip: null, done: null };
+    // abort : interrompt les téléchargements de pièces jointes en cours à l'arrêt du bot.
+    const job = { flushed: false, skip: null, done: null, abort: new AbortController() };
     this.closeJobs.set(channel.id, job);
     job.done = this.#close(channel, closedBy, ticket, { delayMs, onAccepted }, job).finally(() => {
       this.closing.delete(channel.id);
@@ -557,6 +558,8 @@ class TicketService {
     for (const job of jobs) {
       job.flushed = true;
       job.skip?.();
+      // Arrêt : pas de téléchargement de pièces jointes (le salon doit être supprimé à temps).
+      job.abort?.abort();
     }
     await Promise.allSettled(jobs.map((j) => j.done));
   }
@@ -590,7 +593,9 @@ class TicketService {
       });
     }
     const cfg = this.config.get(channel.guild.id).tickets;
-    const archiveAttachments = cfg.archiveAttachments === true;
+    // Arrêt du bot (flush) : archive sans télécharger les pièces jointes (liens seulement),
+    // sinon les téléchargements dépassent le délai d'arrêt et le salon n'est jamais supprimé.
+    const archiveAttachments = cfg.archiveAttachments === true && !job.flushed;
     const { content: transcript, messages } = await this.#transcript(channel, { archiveAttachments });
     const closedAt = Date.now();
     this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
@@ -606,6 +611,7 @@ class TicketService {
           archiveAttachments,
           guild: channel.guild,
           fetchImpl: this.fetch,
+          signal: job.abort?.signal,
           card: (summary) => this.closureCard(ticket, closedBy, closedAt, channel, summary),
           continuation: (part, total) => archiveContinuationCard(`Ticket #${ticket.id}`, part, total),
         }).catch(() => {});

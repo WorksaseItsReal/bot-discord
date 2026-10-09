@@ -80,7 +80,7 @@ function attachmentsOf(message) {
  * @returns {Promise<{ files: Array<{ attachment: Buffer, name: string, size: number, original: string, author: string }>,
  *   skipped: Array<{ name: string, reason: string }> }>}
  */
-async function collectAttachments(messages, { fetchImpl = globalThis.fetch, fileMax = ARCHIVE_FILE_MAX, totalMax = ARCHIVE_TOTAL_MAX, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {}) {
+async function collectAttachments(messages, { fetchImpl = globalThis.fetch, fileMax = ARCHIVE_FILE_MAX, totalMax = ARCHIVE_TOTAL_MAX, timeoutMs = DOWNLOAD_TIMEOUT_MS, signal = null } = {}) {
   const files = [];
   const skipped = [];
   let total = 0;
@@ -90,6 +90,11 @@ async function collectAttachments(messages, { fetchImpl = globalThis.fetch, file
     if (seen.has(att.url)) continue;
     seen.add(att.url);
     const skip = (reason) => skipped.push({ name: att.name, reason });
+    // Arrêt du bot : les téléchargements restants sont abandonnés (listés comme non archivés).
+    if (signal?.aborted) {
+      skip('arrêt du bot');
+      continue;
+    }
     if (!isDiscordCdn(att.url)) {
       skip('lien hors de Discord');
       continue;
@@ -103,7 +108,8 @@ async function collectAttachments(messages, { fetchImpl = globalThis.fetch, file
       continue;
     }
     try {
-      const res = await fetchImpl(att.url, { signal: AbortSignal.timeout(timeoutMs) });
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const res = await fetchImpl(att.url, { signal: signal ? AbortSignal.any([timeout, signal]) : timeout });
       if (!res?.ok) throw new Error(`HTTP ${res?.status ?? '?'}`);
       const declared = Number(res.headers?.get?.('content-length'));
       if (Number.isFinite(declared) && declared > fileMax) {
@@ -122,8 +128,11 @@ async function collectAttachments(messages, { fetchImpl = globalThis.fetch, file
       total += buffer.length;
       files.push({ attachment: buffer, name: archiveName(att.name, files.length), size: buffer.length, original: att.name, author: att.author });
     } catch (err) {
-      const timeout = err?.name === 'TimeoutError' || err?.name === 'AbortError';
-      skip(timeout ? 'délai de téléchargement dépassé' : `téléchargement impossible (${String(err?.message ?? err).slice(0, 60)})`);
+      if (signal?.aborted) skip('arrêt du bot');
+      else {
+        const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+        skip(timedOut ? 'délai de téléchargement dépassé' : `téléchargement impossible (${String(err?.message ?? err).slice(0, 60)})`);
+      }
     }
   }
   return { files, skipped };
@@ -177,16 +186,17 @@ function appendix({ archived = [], skipped = [] }) {
  *   continuation?: (part: number, total: number) => object,
  *   fetchImpl?: typeof fetch,
  *   guild?: import('discord.js').Guild,
- * }} opts
+ *   signal?: AbortSignal,
+ * }} opts  signal : abandonne les téléchargements (arrêt du bot)
  * @returns {Promise<{ archived: number, skipped: Array<{ name: string, reason: string }> } | null>} résumé (null : option désactivée)
  */
-async function sendTranscriptArchive(channel, { transcript, messages = [], archiveAttachments = false, card, continuation, fetchImpl, guild }) {
+async function sendTranscriptArchive(channel, { transcript, messages = [], archiveAttachments = false, card, continuation, fetchImpl, guild, signal = null }) {
   const txt = (content) => ({ attachment: Buffer.from(content, 'utf8'), name: transcript.name });
   if (!archiveAttachments) {
     await channel.send({ embeds: fitEmbeds([card(null)]), files: [txt(transcript.content)] });
     return null;
   }
-  const { files, skipped } = await collectAttachments(messages, { fetchImpl });
+  const { files, skipped } = await collectAttachments(messages, { fetchImpl, signal });
   const txtBytes = Buffer.byteLength(transcript.content, 'utf8') + 4096; // annexe comprise (marge)
   const batches = batchFiles(files, { maxBytes: uploadLimit(guild ?? channel.guild), reservedBytes: txtBytes, reservedSlots: 1 });
   let archived = files;

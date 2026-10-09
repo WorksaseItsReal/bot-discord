@@ -207,6 +207,16 @@ test('vérification : question anti-robot en toutes lettres, réponse en lettres
   }
 });
 
+/**
+ * Écourte le délai de fermeture des tickets SANS simuler un arrêt du bot (flush() archive
+ * alors sans télécharger les pièces jointes), puis attend la fin des fermetures.
+ */
+async function skipCloseDelay(h) {
+  const jobs = [...h.client.services.tickets.closeJobs.values()];
+  for (const job of jobs) job.skip?.();
+  await Promise.allSettled(jobs.map((j) => j.done));
+}
+
 /** Pièce jointe brute (format API) d'un message utilisateur. */
 const rawAttachment = (channelId, filename, size) => ({ id: nextId(), filename, size, url: `https://cdn.discordapp.com/attachments/${channelId}/${nextId()}/${filename}`, proxy_url: `https://media.discordapp.net/attachments/${channelId}/1/${filename}`, content_type: 'image/png' });
 
@@ -245,7 +255,7 @@ test('transcripts : pièces jointes archivées sur option (tickets et ModMail), 
     });
     const mark = h.fake.calls.length;
     await h.slash('ticket', sub('close'), { as: 'member', channel: channel.id });
-    await h.client.services.tickets.flush(); // délai de fermeture (5 s) écourté
+    await skipCloseDelay(h); // délai de fermeture (5 s) écourté, sans arrêt du bot
     await h.settle();
     const archive = h.fake.calls.slice(mark).find((c) => c.route === `/channels/${IDS.channels.logs}/messages` && c.files.length);
     assert.ok(archive, 'archive non publiée');
@@ -279,7 +289,7 @@ test('transcripts : pièces jointes archivées sur option (tickets et ModMail), 
     await h.userMessage({ as: 'target', channel: channel2.id, content: 'fichier', extra: { attachments: [rawAttachment(channel2.id, 'capture.png', 2048)] } });
     const mark3 = h.fake.calls.length;
     await h.slash('ticket', sub('close'), { as: 'target', channel: channel2.id });
-    await h.client.services.tickets.flush();
+    await skipCloseDelay(h);
     await h.settle();
     const plain = h.fake.calls.slice(mark3).find((c) => c.route === `/channels/${IDS.channels.logs}/messages` && c.files.length);
     assert.equal(plain.files.length, 1);
