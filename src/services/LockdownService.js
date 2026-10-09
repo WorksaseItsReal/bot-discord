@@ -4,6 +4,7 @@ const { PermissionFlagsBits, ChannelType } = require('discord.js');
 const { card, field, wide, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { snowflake } = require('../utils/buttonGuard');
+const { discordTimestamp } = require('../utils/time');
 const { UserError } = require('../core/errors');
 
 /** Présentation des actions sur un salon (lock, unlock, hide, unhide). */
@@ -18,7 +19,7 @@ const CHANNEL_ACTIONS = {
  * Carte de résultat d'une action sur un salon.
  * @param {'lock'|'unlock'|'hide'|'unhide'} kind
  */
-function channelCard(kind, channel, moderator) {
+function channelCard(kind, channel, moderator, extraFields = []) {
   const meta = CHANNEL_ACTIONS[kind];
   return card({
     tone: meta.tone,
@@ -29,6 +30,7 @@ function channelCard(kind, channel, moderator) {
     fields: [
       field(ICONS.channel, 'Salon', `${channel}`),
       field(ICONS.moderator, 'Modérateur', moderator?.id ? `<@${moderator.id}>` : '—'),
+      ...extraFields,
     ],
   });
 }
@@ -37,7 +39,7 @@ function channelCard(kind, channel, moderator) {
  * Carte de verrouillage / déverrouillage de tout le serveur (lockall, lockdown, logs).
  * @param {{ enabled: boolean, count: number, moderator?: {id:string}|null, reason?: string|null, section?: string }} opts
  */
-function serverLockCard({ enabled, count, moderator, reason, section = 'security' }) {
+function serverLockCard({ enabled, count, moderator, reason, section = 'security', until = null }) {
   const plural = count > 1 ? 's' : '';
   return card({
     tone: enabled ? 'danger' : 'success',
@@ -52,6 +54,7 @@ function serverLockCard({ enabled, count, moderator, reason, section = 'security
     fields: [
       field(ICONS.count, enabled ? 'Salons verrouillés' : 'Salons restaurés', `**${count}**`),
       field(ICONS.moderator, 'Par', moderator?.id ? `<@${moderator.id}>` : '—'),
+      until ? field(ICONS.expires, 'Levée automatique', `${discordTimestamp(until, 'f')}\n${discordTimestamp(until, 'R')}`) : null,
       reason ? wide(ICONS.reason, 'Raison', truncate(reason, 1024)) : null,
     ],
   });
@@ -149,10 +152,13 @@ class LockdownService {
    * @param {object} deps
    * @param {import('../database/repositories/LockRepository').LockRepository} deps.locks
    * @param {import('./LoggingService').LoggingService} deps.logging
+   * @param {import('../database/repositories/TimedActionRepository').TimedActionRepository} [deps.timed]
+   *   levées programmées (/lock duree, /lockdown enable duree) : annulées par une levée manuelle
    */
-  constructor({ locks, logging }) {
+  constructor({ locks, logging, timed = null }) {
     this.locks = locks;
     this.logging = logging;
+    this.timed = timed;
     /**
      * Verrouillage ou levée globale en cours, par serveur (double clic, deux admins, AntiRaid).
      * @type {Map<string, Promise<unknown>>}
@@ -221,8 +227,10 @@ class LockdownService {
    * Déverrouille un salon en restaurant l'état sauvegardé de chaque permission.
    * Sans état sauvegardé (salon non verrouillé par le bot) : on ne retire que le
    * refus d'écriture (SendMessages → neutre), sans toucher aux autres réglages.
+   * Une levée automatique programmée pour ce salon (/lock duree) est close.
+   * @param {{ timerReason?: string }} [opts] motif de clôture de la levée programmée
    */
-  async unlockChannel(channel, reason) {
+  async unlockChannel(channel, reason, { timerReason = 'cancelled' } = {}) {
     assertOverwritable(channel);
     const saved = this.locks.get(channel.guild.id, channel.id);
     if (saved) {
@@ -230,6 +238,16 @@ class LockdownService {
       this.locks.delete(channel.guild.id, channel.id);
     } else {
       await restoreEveryone(channel, { SendMessages: null }, reason);
+    }
+    this.#cancelTimer(channel.guild.id, 'lock', channel.id, timerReason);
+  }
+
+  /** Clôt une levée programmée (best-effort : la base ne doit pas faire échouer l'action). */
+  #cancelTimer(guildId, kind, targetId, reason = 'cancelled') {
+    try {
+      this.timed?.cancel(guildId, kind, targetId, reason);
+    } catch {
+      // levée programmée introuvable ou base indisponible : sans conséquence ici
     }
   }
 
@@ -268,6 +286,9 @@ class LockdownService {
    */
   async enable(guild, moderator, reason = 'Lockdown', { log = true, wait = false } = {}) {
     return this.#exclusive(guild.id, async () => {
+      // Un nouveau lockdown (AntiRaid, /lockall…) annule une levée programmée : elle lèverait
+      // ce verrouillage voulu. /lockdown enable duree reprogramme ensuite la sienne.
+      this.#cancelTimer(guild.id, 'lockdown', guild.id, 'replaced');
       const channels = [...guild.channels.cache.values()].filter((c) => LOCKABLE_TYPES.has(c.type) && c.manageable);
       const n = await inBatches(channels, (c) => this.lockChannel(c, moderator, reason, { scope: SCOPES.lockdown }));
       if (log) await this.logging.send(guild.id, 'security', serverLockCard({ enabled: true, count: n, moderator, reason }), undefined, { event: 'lockdown' });
@@ -278,9 +299,12 @@ class LockdownService {
   /**
    * Lève le lockdown : ne restaure QUE les salons verrouillés par lockall / lockdown
    * (les /lock individuels restent, à lever avec /unlock), par lots de 5.
+   * @param {{ reason?: string|null, timerReason?: string }} [opts] raison affichée dans le log ;
+   *   motif de clôture de la levée programmée (« expired » pour la levée automatique)
    */
-  async disable(guild, moderator) {
+  async disable(guild, moderator, { reason = null, timerReason = 'cancelled' } = {}) {
     return this.#exclusive(guild.id, async () => {
+      this.#cancelTimer(guild.id, 'lockdown', guild.id, timerReason);
       const rows = this.locks.list(guild.id).filter(isLockdownLock);
       const n = await inBatches(rows, async (lock) => {
         const channel = guild.channels.cache.get(lock.channel_id);
@@ -288,10 +312,10 @@ class LockdownService {
           this.locks.delete(guild.id, lock.channel_id); // salon supprimé entre-temps
           return false;
         }
-        await this.unlockChannel(channel, 'Fin du lockdown');
+        await this.unlockChannel(channel, reason ?? 'Fin du lockdown');
         return true;
       });
-      await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator }), undefined, { event: 'lockdown' });
+      await this.logging.send(guild.id, 'security', serverLockCard({ enabled: false, count: n, moderator, reason }), undefined, { event: 'lockdown' });
       return n;
     });
   }

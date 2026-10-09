@@ -94,6 +94,8 @@ module.exports = {
     if (!target) throw new UserError('Ce membre n\'est pas sur le serveur.');
     assertCanRename(interaction.guild, interaction.member, target);
     const before = target.nickname;
+    // Choix d'un modérateur : le filtre des pseudos de l'AutoMod ne le remplace pas.
+    interaction.client?.services?.automod?.allowName?.(interaction.guild.id, target.id, nickname);
     await target.setNickname(nickname, `Pseudo modifié par ${interaction.user.tag}`);
     await interaction.reply({ ...render(target, interaction.user, before, nickname), ephemeral: true });
   },
@@ -109,6 +111,7 @@ module.exports = {
       if (decoded == null) throw new UserError('Impossible de retrouver l\'ancien pseudo.');
       const previous = decoded || null;
       const current = target.nickname;
+      client?.services?.automod?.allowName?.(interaction.guild.id, target.id, previous);
       await target.setNickname(previous, `Pseudo restauré par ${interaction.user.tag}`);
       await interaction.update(render(target, interaction.user, current, previous, { restored: true }));
     },

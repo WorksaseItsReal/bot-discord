@@ -32,7 +32,8 @@ const PERMANENT_USER_CODES = new Set([10013, 50007, 50278]);
  *  - expiration des bans temporaires et des mutes (levée automatique) ;
  *  - déclenchement des rappels arrivés à échéance ;
  *  - fin des giveaways, sauvegardes automatiques, purge des serveurs quittés ;
- *  - rôles temporaires, annonces programmées et anniversaires (services dédiés).
+ *  - rôles temporaires, annonces programmées, anniversaires et levées automatiques
+ *    (lock, mode lent, lockdown) : services dédiés.
  * Tout survit au redémarrage car l'état vit en base. Chaque étape est isolée :
  * une erreur dans l'une n'empêche pas les suivantes.
  */
@@ -104,6 +105,7 @@ class SchedulerService {
       ['temproles', () => this.client.services?.tempRoles?.processDue({ isStopping: this.#budget() })],
       ['announcements', () => this.client.services?.announcements?.processDue({ isStopping: this.#budget() })],
       ['birthdays', () => this.client.services?.birthdays?.processDue({ isStopping: this.#budget() })],
+      ['timedlocks', () => this.client.services?.timedLocks?.processDue({ isStopping: this.#budget() })],
     ];
     for (const [name, run] of stages) {
       if (this.stopping) return;

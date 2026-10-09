@@ -30,7 +30,7 @@ const { isEnforced, sanctionState } = require('../../database/repositories/Sanct
 const LIFT_COMMANDS = { tempban: '/unban', ban: '/unban', mute: '/unmute', timeout: '/untimeout' };
 
 /** Types de sanction filtrables dans l'historique. */
-const SANCTION_TYPES = ['warn', 'mute', 'timeout', 'kick', 'tempban', 'ban'];
+const SANCTION_TYPES = ['warn', 'mute', 'timeout', 'kick', 'softban', 'tempban', 'ban'];
 const FILTERS = ['all', ...SANCTION_TYPES];
 
 /** Présentation de l'état d'une sanction (voir `sanctionState`). */
@@ -240,6 +240,14 @@ function historyView(client, guild, userId, page = 0, filter = 'all', notice) {
   const p = Math.min(Math.max(0, page), pages - 1);
   const list = repo.listPage(guild.id, userId, { type, limit: PER_PAGE, offset: p * PER_PAGE });
   const strikes = client.services.strikes?.getCount(guild.id, userId) ?? 0;
+  // Décroissance : strikes expirés (ne comptent plus) et prochaine expiration.
+  const strikeTotal = client.services.strikes?.getTotal?.(guild.id, userId) ?? strikes;
+  const nextDecay = client.services.strikes?.nextDecayAt?.(guild.id, userId) ?? null;
+  const strikeText = [
+    `**${strikes}**`,
+    strikeTotal > strikes ? subtext(`${strikeTotal - strikes} expiré(s)`) : null,
+    nextDecay ? subtext(`−1 ${discordTimestamp(nextDecay, 'R')}`) : null,
+  ].filter(Boolean).join('\n');
   const noteCount = client.repositories.modNotes?.count(guild.id, userId) ?? 0;
   const last = total ? repo.listPage(guild.id, userId, { limit: 1 })[0] : null;
   const active = repo.listActive(guild.id, userId).filter((s) => sanctionState(s) === 'active');
@@ -302,7 +310,7 @@ function historyView(client, guild, userId, page = 0, filter = 'all', notice) {
         thumbnail: user?.displayAvatarURL?.(),
         fields: [
           field(ICONS.count, 'Sanctions', `**${total}**`),
-          field(ICONS.warn, 'Strikes actuels', `**${strikes}**`),
+          field(ICONS.warn, 'Strikes actuels', strikeText),
           field(NOTE_ICON, 'Notes', `**${noteCount}**`),
           field(ICONS.stats, 'Par type', typeSummary(counts)),
           field(ICONS.date, 'Dernière sanction', last ? `${sanctionIcon(last.type)} ${TYPE_LABELS[last.type] ?? last.type} ${code(`#${last.id}`)}\n${discordTimestamp(last.created_at, 'R')}` : '—'),

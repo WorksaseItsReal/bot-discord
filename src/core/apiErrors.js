@@ -20,6 +20,7 @@ const FRIENDLY = {
   30001: 'Limite de serveurs atteinte.',
   30005: 'Le serveur a atteint le nombre maximal de rôles (250).',
   30007: 'Le salon a atteint le nombre maximal de webhooks.',
+  30008: 'Le serveur a atteint le nombre maximal d\'emojis.',
   30010: 'Nombre maximal de réactions atteint sur ce message.',
   30013: 'Le serveur a atteint le nombre maximal de salons (500).',
   30035: 'Limite de bannissements récents atteinte, réessayez plus tard.',
@@ -31,8 +32,10 @@ const FRIENDLY = {
   50024: 'Action impossible sur ce type de salon.',
   50034: 'Les messages de plus de 14 jours ne peuvent pas être supprimés en masse.',
   50035: 'Données invalides envoyées à Discord (texte trop long ou format incorrect).',
+  50074: 'Ce salon est requis par la communauté du serveur (règles, annonces de Discord) : il ne peut pas être supprimé.',
   50083: 'Action impossible : le fil est archivé.',
   50101: 'Impossible de modifier le pseudo du propriétaire du serveur.',
+  50138: 'Image trop lourde : Discord n\'a pas pu la réduire sous 256 Ko.',
   160002: 'Impossible de répondre à ce message.',
   200000: 'Ce contenu a été bloqué par l\'AutoMod de Discord.',
 };

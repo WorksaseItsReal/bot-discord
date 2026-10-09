@@ -497,7 +497,8 @@ function assertValid(payload, label) {
   }
 }
 
-const FILTER_KEYS = Object.keys(defaultGuildConfig.automod.filters);
+// Filtres de messages (« Pseudos » a sa vue dédiée, sans sanction ni salons : voir tests/admin-tools.test.js).
+const FILTER_KEYS = Object.keys(defaultGuildConfig.automod.filters).filter((k) => k !== 'badNames');
 
 test('vue de chaque filtre : ≤ 5 rangées, exemptions propres, sanction « Expulsion » proposée', async () => {
   const w = dashboardWorld();

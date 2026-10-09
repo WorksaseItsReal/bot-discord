@@ -1,6 +1,7 @@
 'use strict';
 
 const { IDS } = require('./fixtures');
+const { nextId } = require('./ids');
 
 /**
  * Valeurs d'options choisies pour que chaque commande prenne son chemin « succès »
@@ -36,6 +37,16 @@ async function freshMember(h, name) {
   return user.id;
 }
 
+/** Salon textuel jetable (cible de /channel supprimer, renommer…), créé par le faux Discord. */
+async function throwawayChannel(h, name = 'jetable') {
+  const id = nextId();
+  const raw = { id, type: 0, guild_id: h.guild.id, name, position: 50, permission_overwrites: [], parent_id: IDS.channels.catGeneral, flags: 0, topic: null, nsfw: false, last_message_id: null, rate_limit_per_user: 0 };
+  h.fake.channels.set(id, raw);
+  h.fake.dispatchNow('CHANNEL_CREATE', raw, `préparation : salon ${name}`);
+  await h.settle();
+  return id;
+}
+
 const OVERRIDES = {
   'backup create': { nom: 'Sauvegarde e2e' },
   'backup info': { id: latestBackupId },
@@ -58,6 +69,21 @@ const OVERRIDES = {
   'giveaway end': { id: 1 },
   'giveaway reroll': { id: 1 },
   emoji: { emoji: `<:gadget:${IDS.emoji}>` },
+  'emoji info': { emoji: `<:gadget:${IDS.emoji}>` },
+  // Pas de pièce jointe générée : son téléchargement serait refusé (réseau coupé) ; voir tests/e2e/admin-tools.e2e.test.js.
+  'emoji ajouter': { nom: 'emoji_e2e', image: null, url: 'https://example.com/emoji.png' },
+  'emoji supprimer': { emoji: 'introuvable_e2e' },
+  'emoji renommer': { emoji: 'introuvable_e2e', nom: 'nouveau_nom' },
+  'channel creer': { nom: 'salon-e2e', sujet: 'Sujet de test e2e' },
+  'channel supprimer': { salon: (h) => throwawayChannel(h, 'a-supprimer') },
+  'channel cloner': { salon: (h) => throwawayChannel(h, 'a-cloner'), nom: 'copie-e2e' },
+  'channel renommer': { salon: (h) => throwawayChannel(h, 'a-renommer'), nom: 'renomme-e2e' },
+  'channel sujet': { salon: (h) => throwawayChannel(h, 'a-sujet'), texte: 'Nouveau sujet e2e' },
+  'channel nsfw': { salon: (h) => throwawayChannel(h, 'a-nsfw') },
+  'role modifier': { role: IDS.roles.notif, nom: 'Notifications', couleur: '#ff8800', affiche_separement: null, mentionnable: null },
+  'lockdown enable': { duree: '2h' },
+  softban: { membre: (h) => freshMember(h, 'ASoftbannir'), jours_messages: 1 },
+  modstats: { periode: 30, moderateur: null },
   help: { commande: 'ban' },
   inrole: { role: IDS.roles.member },
   roleinfo: { role: IDS.roles.mod },
@@ -75,7 +101,8 @@ const OVERRIDES = {
   pseudo: { pseudo: 'Pseudo e2e' },
   mute: { duree: '1h' },
   timeout: { duree: '10m' },
-  slowmode: { duree: '10s' },
+  slowmode: { duree: '10s', pendant: '1h' },
+  lock: { duree: '30m' },
   'sanctions raison': { raison: 'Nouvelle raison e2e' },
   'sanctions remove': { id: 2 },
   unban: {
@@ -136,4 +163,4 @@ const OVERRIDES = {
   'voice cleanup': { salon: IDS.channels.voice },
 };
 
-module.exports = { OVERRIDES, freshMember };
+module.exports = { OVERRIDES, freshMember, throwawayChannel };

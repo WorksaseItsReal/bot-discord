@@ -24,6 +24,7 @@ const { phishingScore } = require('../../utils/automod/phishing');
 const { extractLinks, hostMatches } = require('../../utils/automod/links');
 const { isValidWord, matchingWords } = require('../../utils/automod/words');
 const { PRESETS } = require('../../utils/automod/presets');
+const { NAME_CHECKS, DEFAULT_NAME_TEMPLATE, replacementName, templateIssue } = require('../../utils/automod/names');
 const native = require('../../services/NativeAutoMod');
 const { UserError } = require('../../core/errors');
 
@@ -58,6 +59,7 @@ const FILTER_LABELS = {
   antiWall: 'Pavés de texte',
   antiZalgo: 'Texte zalgo',
   antiHacked: 'Compte piraté',
+  badNames: 'Pseudos',
 };
 const FILTERS = Object.keys(FILTER_LABELS);
 
@@ -78,10 +80,11 @@ const FILTER_INFO = {
   antiWall: 'Pavés de texte : trop de lignes ou trop de caractères.',
   antiZalgo: 'Texte « zalgo » illisible (diacritiques empilés).',
   antiHacked: 'Repère un compte piraté : mêmes fichiers ou même message dans plusieurs salons en peu de temps, ou lien d\'arnaque très probable. Quarantaine : timeout + suppression de ses messages récents partout.',
+  badNames: 'Vérifie les pseudos à l\'arrivée et à chaque changement : symbole en tête pour remonter dans la liste, mots interdits, usurpation (« admin », « discord », « staff »… ou nom d\'un modérateur imité), pseudo illisible. Le membre est renommé selon le modèle.',
 };
 
 const GROUPS = {
-  security: { label: 'Sécurité', emoji: '🛡️', description: 'Arnaques, comptes piratés, invitations, liens', filters: ['antiPhishing', 'antiHacked', 'antiCrossChannel', 'antiInvite', 'antiLink'] },
+  security: { label: 'Sécurité', emoji: '🛡️', description: 'Arnaques, comptes piratés, invitations, liens, pseudos', filters: ['antiPhishing', 'antiHacked', 'antiCrossChannel', 'antiInvite', 'antiLink', 'badNames'] },
   spam: { label: 'Spam', emoji: '💬', description: 'Spam, flood, doublons, répétitions, mentions', filters: ['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiMassMention'] },
   content: { label: 'Contenu', emoji: '✍️', description: 'Mots interdits, majuscules, emojis, pavés, zalgo', filters: ['badWords', 'antiCaps', 'antiEmojiSpam', 'antiWall', 'antiZalgo'] },
 };
@@ -135,7 +138,8 @@ const NAV = [
 
 /** « 🟢 **Anti-spam** · Timeout (5m) ». Pur. */
 function filterLine(name, fc = {}) {
-  const action = ACTION_LABELS[fc.action] ?? fc.action ?? ACTION_LABELS.delete;
+  // Les pseudos ne sont pas des messages : l'action est toujours un renommage.
+  const action = name === 'badNames' ? 'Renommage' : ACTION_LABELS[fc.action] ?? fc.action ?? ACTION_LABELS.delete;
   return `${fc.enabled ? '🟢' : '🔴'} **${FILTER_LABELS[name] ?? name}** · ${action}${TIMED.has(fc.action) && fc.duration ? ` (${fc.duration})` : ''}`;
 }
 
@@ -323,8 +327,74 @@ function filterExemptions(client, guildId, key) {
 }
 
 /** Vue détaillée d'un filtre : activation, sanction, réglages, exemptions propres (≤ 4 rangées). */
+/** Vérifications du filtre des pseudos, dans l'ordre d'affichage. */
+const NAME_CHECK_KEYS = Object.keys(NAME_CHECKS);
+
+/**
+ * Vue du filtre « Pseudos » : vérifications, modèle de renommage, rôles exemptés
+ * (le staff, le propriétaire et les membres au-dessus de mon rôle le sont d'office).
+ */
+function badNamesView(client, guildId, notice) {
+  const cfg = cfgOf(client, guildId);
+  const fc = cfg.filters?.badNames ?? {};
+  const ex = filterExemptions(client, guildId, 'badNames');
+  const template = fc.template || DEFAULT_NAME_TEMPLATE;
+  const roleMenu = new RoleSelectMenuBuilder().setCustomId('cmd:automod:fexrole:badNames').setPlaceholder('Rôles exemptés de ce filtre (aucun)').setMinValues(0).setMaxValues(MAX_IGNORED);
+  if (ex.roles.length) roleMenu.setDefaultRoles(...ex.roles);
+  return {
+    embeds: [
+      card({
+        tone: fc.enabled ? 'success' : 'neutral',
+        section: 'automod',
+        icon: GROUPS.security.emoji,
+        title: FILTER_LABELS.badNames,
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          FILTER_INFO.badNames,
+          cfg.enabled ? null : subtext('L\'AutoMod est désactivé : activez-le depuis l\'accueil pour que ce filtre agisse.'),
+        ],
+        fields: [
+          field(ICONS.status, 'État', fc.enabled ? '🟢 Actif' : '🔴 Désactivé'),
+          field('✏️', 'Action', `Renommer en ${code(replacementName(template, '000000000000001234'))}`),
+          field(ICONS.tag, 'Modèle', `${code(template)}\n${subtext('{id} : 4 derniers chiffres de l\'identifiant')}`),
+          wide(ICONS.list, 'Vérifications', NAME_CHECK_KEYS.map((k) => `${fc[k] !== false ? '✅' : '❌'} ${NAME_CHECKS[k].emoji} **${NAME_CHECKS[k].label}** · ${NAME_CHECKS[k].description}`).join('\n')),
+          field(ICONS.role, 'Rôles exemptés', fitList(ex.roles.map((r) => `<@&${r}>`), 1000) ?? '*Aucun*'),
+          field(ICONS.shield, 'Toujours exemptés', 'Staff (« Exclure temporairement »), propriétaire, membres au-dessus de mon rôle, bots'),
+        ],
+        footer: 'Il me faut la permission « Gérer les pseudos » · les rôles ignorés de l\'AutoMod sont aussi exemptés',
+      }),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(roleMenu),
+      ...buttonRows(...NAME_CHECK_KEYS.map((k) => actionButton({
+        command: 'automod',
+        action: 'pcheck',
+        args: [k, fc[k] !== false ? 'off' : 'on'],
+        label: `${NAME_CHECKS[k].label} ${fc[k] !== false ? '✅' : '❌'}`,
+        emoji: NAME_CHECKS[k].emoji,
+      }))),
+      ...buttonRows(
+        fc.enabled
+          ? actionButton({ command: 'automod', action: 'ftoggle', args: ['badNames', 'off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'automod', action: 'ftoggle', args: ['badNames', 'on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+        actionButton({ command: 'automod', action: 'fset', args: ['badNames'], label: 'Modèle', emoji: ICONS.settings, style: ButtonStyle.Primary }),
+        actionButton({ command: 'automod', action: 'go', args: ['grp.security'], label: 'Retour', emoji: ICONS.back }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function nameTemplateModal(fc = {}) {
+  return new ModalBuilder()
+    .setCustomId('cmd:automod:ptplsubmit')
+    .setTitle('Pseudos · modèle de renommage')
+    .addComponents(input('template', 'Modèle ({id} = 4 derniers chiffres)', { value: fc.template || DEFAULT_NAME_TEMPLATE, max: 40, required: true, placeholder: DEFAULT_NAME_TEMPLATE }));
+}
+
 function filterView(client, guildId, key, notice) {
   if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
+  if (key === 'badNames') return badNamesView(client, guildId, notice);
   const cfg = cfgOf(client, guildId);
   const fc = cfg.filters?.[key] ?? {};
   const t = THRESHOLDS[key];
@@ -690,7 +760,7 @@ function analyse(client, guild, text) {
   const fake = { guild, author: { id: '0', createdTimestamp: 0 }, content: text, mentions: null, channel: null };
   const results = [];
   for (const key of FILTERS) {
-    if (['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiCrossChannel'].includes(key)) continue;
+    if (['antiSpam', 'antiFlood', 'antiDuplicate', 'antiRepeat', 'antiCrossChannel', 'badNames'].includes(key)) continue;
     // La liste blanche des liens sert aussi à l'anti-arnaques : transmise sans activer l'anti-liens.
     const filters = { antiLink: { ...cfg.filters?.antiLink, enabled: false }, [key]: allOn[key] };
     const hit = client.services.automod.inspect(fake, filters, { temporal: false });
@@ -1108,6 +1178,7 @@ module.exports = {
     async fset(interaction, client, [key]) {
       guard(interaction);
       if (!Object.hasOwn(FILTER_LABELS, key)) throw new UserError('Filtre inconnu.');
+      if (key === 'badNames') return interaction.showModal(nameTemplateModal(cfgOf(client, interaction.guildId).filters?.badNames));
       await interaction.showModal(filterModal(cfgOf(client, interaction.guildId), key));
     },
     async fsetsubmit(interaction, client, [key]) {
@@ -1319,6 +1390,23 @@ module.exports = {
       const ids = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId).slice(0, MAX_IGNORED);
       client.services.config.update(interaction.guildId, { automod: { filters: { [key]: { exemptRoles: ids } } } });
       await interaction.update(filterView(client, interaction.guildId, key, `${ids.length} rôle(s) exempté(s) de ce filtre.`));
+    },
+    /** cmd:automod:pcheck:<vérification>:<on|off> — une vérification du filtre des pseudos (valeur cible). */
+    async pcheck(interaction, client, [check, state]) {
+      guard(interaction);
+      if (!Object.hasOwn(NAME_CHECKS, check)) throw new UserError('Vérification inconnue.');
+      const on = target(state, cfgOf(client, interaction.guildId).filters?.badNames?.[check] !== false);
+      client.services.config.update(interaction.guildId, { automod: { filters: { badNames: { [check]: on } } } });
+      await interaction.update(badNamesView(client, interaction.guildId, `${NAME_CHECKS[check].label} : ${on ? 'vérifié' : 'ignoré'}.`));
+    },
+    /** Formulaire du modèle de renommage des pseudos. */
+    async ptplsubmit(interaction, client) {
+      guard(interaction);
+      const template = interaction.fields.getTextInputValue('template')?.replace(/\s+/g, ' ').trim();
+      const issue = templateIssue(template, cfgOf(client, interaction.guildId).filters?.badWords?.words ?? []);
+      if (issue) throw new UserError(issue);
+      client.services.config.update(interaction.guildId, { automod: { filters: { badNames: { template } } } });
+      await interaction.update(badNamesView(client, interaction.guildId, `Modèle enregistré : ${code(template)}.`));
     },
     /** cmd:automod:hkroles:<on|off> — retirer les rôles pendant une quarantaine. */
     async hkroles(interaction, client, [state]) {

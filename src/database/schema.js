@@ -664,6 +664,47 @@ const migrations = [
     `,
   },
   {
+    id: 21,
+    name: 'strike_events_timed_channel_actions',
+    up: `
+      -- Strikes datés : un strike plus ancien que strikes.decayDays ne compte plus dans le
+      -- palier (filtre par date, rien n'est supprimé). La table strikes reste le total.
+      CREATE TABLE IF NOT EXISTS strike_events (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        amount     INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_strike_events_member ON strike_events (guild_id, user_id, created_at);
+      -- Reprise : les strikes existants sont datés de leur dernière mise à jour (approximation prudente).
+      INSERT INTO strike_events (guild_id, user_id, amount, created_at)
+        SELECT guild_id, user_id, count, updated_at FROM strikes WHERE count > 0;
+
+      -- Actions temporaires sur un salon (/lock, /slowmode) ou le serveur (/lockdown) :
+      -- levées par le scheduler à l'échéance. Une seule ligne active par (serveur, sorte, cible) ;
+      -- pour un lockdown, channel_id = identifiant du serveur.
+      CREATE TABLE IF NOT EXISTS timed_channel_actions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id     TEXT NOT NULL,
+        channel_id   TEXT NOT NULL,
+        kind         TEXT NOT NULL,                 -- lock | slowmode | lockdown
+        data         TEXT NOT NULL DEFAULT '{}',    -- JSON (mode lent : délai posé et délai d'avant)
+        moderator_id TEXT,
+        expires_at   INTEGER NOT NULL,
+        created_at   INTEGER NOT NULL,
+        active       INTEGER NOT NULL DEFAULT 1,
+        ended_at     INTEGER,
+        end_reason   TEXT                           -- expired | cancelled | replaced | changed | gone | failed
+      );
+      CREATE INDEX IF NOT EXISTS idx_timed_channel_actions_due ON timed_channel_actions (active, expires_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_timed_channel_actions_active ON timed_channel_actions (guild_id, kind, channel_id) WHERE active = 1;
+
+      -- /modstats : sanctions d'un serveur sur une période, sans parcours complet.
+      CREATE INDEX IF NOT EXISTS idx_sanctions_guild_created ON sanctions (guild_id, created_at);
+    `,
+  },
+  {
     id: 24,
     name: 'game_scores',
     up: `

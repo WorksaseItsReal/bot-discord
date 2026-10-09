@@ -369,7 +369,7 @@ module.exports = {
           if (!member) throw new UserError('Ce membre n\'est plus sur le serveur.');
           const { id } = await moderation.warn(guild, member, interaction.member, sanctionReason(report));
           const { count } = strikes.add(guild.id, member.id, 1);
-          const step = strikes.pendingEscalation(guild.id, count, moderation.appliedEscalationLevel(guild.id, member.id));
+          const step = strikes.pendingEscalation(guild.id, count, moderation.appliedEscalationLevel(guild.id, member.id, strikes.activeSince(guild.id)));
           const escalation = step ? await applyEscalation(client, interaction, member, step) : null;
           return [`Sanction #${id} · ${count} strike(s)`, escalation?.text].filter(Boolean).join(' · ');
         },

@@ -167,7 +167,7 @@ module.exports = {
               field(ICONS.image, 'Statiques', `**${all.length - animated}**`),
               field('✨', 'Animés', `**${animated}**`),
             ],
-            footer: 'Détail d\'un emoji : /emoji',
+            footer: 'Détail d\'un emoji : /emoji info',
           }),
         ],
         ephemeral: true,

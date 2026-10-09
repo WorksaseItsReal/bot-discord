@@ -836,6 +836,42 @@ class FakeDiscord {
     r('GET', '/guilds/:guild/webhooks', () => [...this.webhooks.values()]);
     r('GET', '/guilds/:guild/integrations', () => []);
     r('GET', '/guilds/:guild/emojis', () => this.guild.emojis);
+    // Emojis du serveur : la passerelle renvoie la liste complète (GUILD_EMOJIS_UPDATE) après chaque changement.
+    const emojisUpdated = () => this.dispatch('GUILD_EMOJIS_UPDATE', { guild_id: this.guildId, emojis: this.guild.emojis ?? [] });
+    const findEmoji = (id, call) => {
+      const emoji = (this.guild.emojis ?? []).find((e) => e.id === id);
+      if (!emoji) throw this.#error(call, 404, 10014, 'Unknown Emoji');
+      return emoji;
+    };
+    r('POST', '/guilds/:guild/emojis', (p, call) => {
+      const b = call.body ?? {};
+      const problems = [];
+      if (!/^[A-Za-z0-9_]{2,32}$/.test(b.name ?? '')) problems.push(`nom d'emoji invalide (${b.name})`);
+      const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(b.image ?? '');
+      if (!m) problems.push('image : data URI (png, jpeg, gif, webp) attendue');
+      else if (Buffer.from(m[2], 'base64').length > 256 * 1024) problems.push('image > 256 Ko');
+      this.#violate(call, problems);
+      const emoji = { id: nextId(), name: b.name, roles: [], require_colons: true, managed: false, animated: m[1] === 'image/gif', available: true, user: this.botUser };
+      this.guild.emojis = [...(this.guild.emojis ?? []), emoji];
+      this.#audit(60, emoji.id, call);
+      emojisUpdated();
+      return emoji;
+    });
+    r('PATCH', '/guilds/:guild/emojis/:emoji', (p, call) => {
+      const emoji = findEmoji(p.emoji, call);
+      const b = call.body ?? {};
+      if (b.name != null && !/^[A-Za-z0-9_]{2,32}$/.test(b.name)) this.#violate(call, [`nom d'emoji invalide (${b.name})`]);
+      if (b.name != null) emoji.name = b.name;
+      this.#audit(61, emoji.id, call);
+      emojisUpdated();
+      return emoji;
+    });
+    r('DELETE', '/guilds/:guild/emojis/:emoji', (p, call) => {
+      const emoji = findEmoji(p.emoji, call);
+      this.guild.emojis = this.guild.emojis.filter((e) => e.id !== emoji.id);
+      this.#audit(62, emoji.id, call);
+      emojisUpdated();
+    });
     r('GET', '/guilds/:guild/stickers', () => []);
     r('GET', '/guilds/:guild/scheduled-events', () => []);
     r('GET', '/guilds/:guild/prune', () => ({ pruned: 0 }));
@@ -952,6 +988,7 @@ class FakeDiscord {
     else if (/^\/guilds\/\d+\/members\/\d+$/.test(route) && method === 'DELETE') inGuild(P.KickMembers);
     else if (/^\/guilds\/\d+\/(bans|bulk-ban)/.test(route)) inGuild(P.BanMembers);
     else if (/^\/guilds\/\d+\/roles/.test(route) && method !== 'GET') inGuild(P.ManageRoles);
+    else if (/^\/guilds\/\d+\/emojis/.test(route) && method !== 'GET') inGuild(P.ManageGuildExpressions);
     else if (/^\/guilds\/\d+\/audit-logs$/.test(route)) inGuild(P.ViewAuditLog);
     else if (/^\/guilds\/\d+\/auto-moderation\//.test(route)) inGuild(P.ManageGuild);
     else if (/^\/guilds\/\d+$/.test(route) && method === 'PATCH') inGuild(P.ManageGuild);

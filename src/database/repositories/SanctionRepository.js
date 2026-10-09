@@ -41,7 +41,23 @@ class SanctionRepository {
        ORDER BY created_at DESC`,
     );
     this.maxEscalationStmt = db.prepare(
-      'SELECT MAX(escalation_step) AS n FROM sanctions WHERE guild_id = ? AND user_id = ? AND escalation_step IS NOT NULL',
+      'SELECT MAX(escalation_step) AS n FROM sanctions WHERE guild_id = ? AND user_id = ? AND escalation_step IS NOT NULL AND created_at >= ?',
+    );
+    // /modstats : sanctions d'une période, par modérateur et par type.
+    this.statsByModTypeStmt = db.prepare(
+      `SELECT moderator_id, type, COUNT(*) AS n FROM sanctions
+       WHERE guild_id = @guildId AND created_at >= @since AND created_at < @until AND (@mod IS NULL OR moderator_id = @mod)
+       GROUP BY moderator_id, type`,
+    );
+    this.statsReasonsStmt = db.prepare(
+      `SELECT lower(trim(reason)) AS reason, COUNT(*) AS n FROM sanctions
+       WHERE guild_id = @guildId AND created_at >= @since AND created_at < @until AND (@mod IS NULL OR moderator_id = @mod)
+         AND reason IS NOT NULL AND trim(reason) != ''
+       GROUP BY lower(trim(reason)) ORDER BY n DESC, reason ASC LIMIT @limit`,
+    );
+    this.statsTimesStmt = db.prepare(
+      `SELECT created_at FROM sanctions
+       WHERE guild_id = @guildId AND created_at >= @since AND created_at < @until AND (@mod IS NULL OR moderator_id = @mod)`,
     );
     this.byUserFilteredStmt = db.prepare(
       `SELECT * FROM sanctions WHERE guild_id = @guildId AND user_id = @userId AND (@type IS NULL OR type = @type)
@@ -196,9 +212,26 @@ class SanctionRepository {
     return this.enforcedByUserStmt.all(guildId, userId, now);
   }
 
-  /** Plus haut palier d'escalade appliqué à un membre (colonne `escalation_step`), 0 si aucun. */
-  maxEscalationStep(guildId, userId) {
-    return this.maxEscalationStmt.get(guildId, userId)?.n ?? 0;
+  /**
+   * Plus haut palier d'escalade appliqué à un membre (colonne `escalation_step`), 0 si aucun.
+   * `since` (décroissance des strikes) : seuls les paliers appliqués depuis cette date comptent.
+   */
+  maxEscalationStep(guildId, userId, since = 0) {
+    return this.maxEscalationStmt.get(guildId, userId, since)?.n ?? 0;
+  }
+
+  /**
+   * Statistiques de modération sur [since, until[ (/modstats).
+   * @param {{ since: number, until?: number, moderatorId?: string|null, reasons?: number }} opts
+   * @returns {{ byModType: Array<{ moderator_id: string, type: string, n: number }>, reasons: Array<{ reason: string, n: number }>, times: number[] }}
+   */
+  stats(guildId, { since, until = Date.now() + 1, moderatorId = null, reasons = 5 } = {}) {
+    const params = { guildId, since, until, mod: moderatorId ?? null };
+    return {
+      byModType: this.statsByModTypeStmt.all(params),
+      reasons: this.statsReasonsStmt.all({ ...params, limit: reasons }),
+      times: this.statsTimesStmt.all(params).map((r) => r.created_at),
+    };
   }
 
   /** Mute actif (sans échéance ou échéance future) d'un membre, le plus récent. */
@@ -212,6 +245,9 @@ class SanctionRepository {
     return this.reasonsLikeStmt.all(guildId, userId, `${escaped}%`).map((r) => r.reason);
   }
 }
+
+/** Sanctions ponctuelles : appliquées une fois, jamais « en vigueur » ni levées (softban = ban + débannissement immédiat). */
+const ONE_SHOT_TYPES = new Set(['warn', 'kick', 'softban']);
 
 /**
  * true si la sanction est encore en vigueur : active avec une expiration future
@@ -228,7 +264,7 @@ function isEnforced(s, now = Date.now()) {
  *  - 'active'   : en vigueur (expiration future, mute sans échéance, ban définitif non levé)
  *  - 'revoked'  : levée (par un modérateur, ou automatiquement : remplacée, débannie hors du bot)
  *  - 'expired'  : arrivée à échéance
- *  - 'done'     : sanction ponctuelle (avertissement, expulsion)
+ *  - 'done'     : sanction ponctuelle (avertissement, expulsion, softban)
  * @returns {'active'|'revoked'|'expired'|'done'}
  */
 function sanctionState(s, now = Date.now()) {
@@ -239,7 +275,7 @@ function sanctionState(s, now = Date.now()) {
   }
   if (s.revoked_by || s.revoke_reason) return 'revoked';
   if (s.expires_at && s.expires_at <= (s.revoked_at ?? now)) return 'expired';
-  return s.type === 'warn' || s.type === 'kick' ? 'done' : 'revoked';
+  return ONE_SHOT_TYPES.has(s.type) ? 'done' : 'revoked';
 }
 
-module.exports = { SanctionRepository, isEnforced, sanctionState };
+module.exports = { SanctionRepository, isEnforced, sanctionState, ONE_SHOT_TYPES };

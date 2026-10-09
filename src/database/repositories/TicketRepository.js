@@ -12,6 +12,20 @@ class TicketRepository {
     this.updateStatusStmt = db.prepare('UPDATE tickets SET status = @status, claimed_by = @claimedBy, closed_at = @closedAt WHERE channel_id = @channelId');
     this.deleteStmt = db.prepare('DELETE FROM tickets WHERE channel_id = ?');
     this.byGuildStmt = db.prepare('SELECT * FROM tickets WHERE guild_id = ?');
+    // /modstats : tickets pris en charge (encore enregistrés : un ticket fermé est supprimé de la table).
+    this.claimedStatsStmt = db.prepare(
+      `SELECT claimed_by, COUNT(*) AS n FROM tickets
+       WHERE guild_id = @guildId AND claimed_by IS NOT NULL AND created_at >= @since AND (@mod IS NULL OR claimed_by = @mod)
+       GROUP BY claimed_by`,
+    );
+  }
+
+  /**
+   * Tickets pris en charge, ouverts depuis `since`, par membre du staff (/modstats).
+   * @returns {Array<{ claimed_by: string, n: number }>}
+   */
+  claimedStats(guildId, { since, moderatorId = null } = {}) {
+    return this.claimedStatsStmt.all({ guildId, since, mod: moderatorId ?? null });
   }
 
   /** Tous les tickets enregistrés d'un serveur (réconciliation au démarrage). */

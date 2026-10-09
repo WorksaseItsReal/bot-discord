@@ -42,6 +42,13 @@ class ReportRepository {
     this.deleteStmt = db.prepare('DELETE FROM reports WHERE guild_id = ? AND id = ?');
     this.countsStmt = db.prepare('SELECT status, COUNT(*) AS n FROM reports WHERE guild_id = ? GROUP BY status');
     this.listStmt = db.prepare('SELECT * FROM reports WHERE guild_id = ? AND status = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?');
+    // /modstats : signalements traités sur une période, par membre du staff et par issue.
+    this.handledStatsStmt = db.prepare(
+      `SELECT handled_by, status, COUNT(*) AS n FROM reports
+       WHERE guild_id = @guildId AND status != 'open' AND handled_by IS NOT NULL
+         AND handled_at >= @since AND handled_at < @until AND (@mod IS NULL OR handled_by = @mod)
+       GROUP BY handled_by, status`,
+    );
     this.addAction = db.transaction((guildId, id, action) => {
       const row = this.getStmt.get(guildId, id);
       if (!row) return null;
@@ -117,6 +124,14 @@ class ReportRepository {
       out.total += n;
     }
     return out;
+  }
+
+  /**
+   * Signalements clos sur [since, until[ (/modstats).
+   * @returns {Array<{ handled_by: string, status: 'handled'|'dismissed', n: number }>}
+   */
+  handledStats(guildId, { since, until = Date.now() + 1, moderatorId = null } = {}) {
+    return this.handledStatsStmt.all({ guildId, since, until, mod: moderatorId ?? null });
   }
 
   /** Signalements d'un statut, du plus récent au plus ancien. */

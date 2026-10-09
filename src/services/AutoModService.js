@@ -1,10 +1,10 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
-const { PermissionFlagsBits } = require('discord.js');
+const { PermissionFlagsBits, AuditLogEvent } = require('discord.js');
 const { parseDuration, formatDuration } = require('../utils/time');
 const { truncate } = require('../utils/embeds');
-const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, subtext } = require('../utils/ui');
+const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, subtext, code } = require('../utils/ui');
 const { logCard, fitList } = require('./LoggingService');
 const { historyButton } = require('./ModerationService');
 const { createLogger } = require('../core/logger');
@@ -13,6 +13,8 @@ const { extractLinks, extractInvites, hostMatches } = require('../utils/automod/
 const { phishingScore } = require('../utils/automod/phishing');
 const { fingerprint } = require('../utils/automod/normalize');
 const shape = require('../utils/automod/detectors');
+const { nameViolation, nameSkeleton, replacementName, DEFAULT_NAME_TEMPLATE, NAME_CHECKS } = require('../utils/automod/names');
+const { fetchExecutor } = require('../utils/audit');
 
 const logger = createLogger('automod');
 
@@ -39,6 +41,19 @@ const POSTED_MAX = 100;
 const POSTED_MAX_MS = 60 * 60 * 1000;
 /** Durée maximale d'un timeout Discord. */
 const MAX_TIMEOUT_MS = 28 * 86_400_000;
+
+/** Pseudos : nos propres renommages (et ceux d'un modérateur via /pseudo) reconnus pendant ce délai. */
+const OWN_RENAME_TTL_MS = 60 * 1000;
+/** Pseudos : noms du staff (squelettes) mis en cache par serveur. */
+const STAFF_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Permissions qui font d'un membre un membre du staff (imitation interdite, exemption). */
+const STAFF_PERMISSIONS = [PermissionFlagsBits.ModerateMembers, PermissionFlagsBits.ManageGuild, PermissionFlagsBits.Administrator];
+const isStaff = (member) => STAFF_PERMISSIONS.some((p) => member?.permissions?.has?.(p));
+
+/** Pseudo affiché d'un membre (pseudo du serveur, sinon nom global, sinon nom d'utilisateur). */
+function shownName(member) {
+  return member?.nickname ?? member?.user?.globalName ?? member?.user?.username ?? '';
+}
 
 /** Champ du log de quarantaine listant les rôles retirés (relu à la levée pour les quarantaines antérieures à la table automod_quarantines). */
 const QUARANTINE_ROLES_FIELD = 'Rôles retirés';
@@ -156,6 +171,12 @@ class AutoModService {
     this.notices = new Map();
     /** @type {Map<string, { at: number, severity: number }>} dernière sanction par membre (rafales) */
     this.lastSanction = new Map();
+    /** @type {Map<string, { nick: string|null, at: number }>} pseudos posés par le bot ou un modérateur (/pseudo) */
+    this.allowedNames = new Map();
+    /** @type {Set<string>} renommages en cours (arrivée + mise à jour simultanées) */
+    this.renaming = new Set();
+    /** @type {Map<string, { at: number, names: Map<string, string> }>} squelettes des noms du staff par serveur */
+    this.staffNames = new Map();
     this.lastPrune = Date.now();
   }
 
@@ -183,6 +204,133 @@ class AutoModService {
     }
     for (const [key, at] of this.notices) if (now - at > NOTICE_COOLDOWN_MS) this.notices.delete(key);
     for (const [key, s] of this.lastSanction) if (now - s.at > BURST_WINDOW_MS) this.lastSanction.delete(key);
+    for (const [key, a] of this.allowedNames) if (now - a.at > OWN_RENAME_TTL_MS) this.allowedNames.delete(key);
+    for (const [key, s] of this.staffNames) if (now - s.at > STAFF_CACHE_TTL_MS) this.staffNames.delete(key);
+  }
+
+  // ---------------------------------------------------------------- pseudos (filtre badNames)
+
+  /**
+   * Pseudo posé volontairement (renommage du bot, /pseudo d'un modérateur) : la mise à jour
+   * qui suit n'est pas filtrée (pas de boucle, pas de choix du staff écrasé).
+   * @param {string|null} nick pseudo posé (null : pseudo retiré)
+   */
+  allowName(guildId, userId, nick) {
+    this.allowedNames.set(this.#key(guildId, userId), { nick: nick ?? null, at: Date.now() });
+  }
+
+  /** Squelettes des noms du staff (hors `exceptId`), mis en cache 5 minutes. */
+  #staffSkeletons(guild, exceptId) {
+    const now = Date.now();
+    let entry = this.staffNames.get(guild.id);
+    if (!entry || now - entry.at > STAFF_CACHE_TTL_MS) {
+      const names = new Map();
+      for (const m of guild.members?.cache?.values?.() ?? []) {
+        if (m.user?.bot || !isStaff(m)) continue;
+        for (const n of new Set([m.nickname, m.user?.globalName, m.user?.username].filter(Boolean))) {
+          const s = nameSkeleton(n);
+          if (s.length >= 3 && !names.has(s)) names.set(s, { name: n, id: m.id });
+        }
+      }
+      entry = { at: now, names };
+      this.staffNames.set(guild.id, entry);
+    }
+    const out = new Map();
+    for (const [s, v] of entry.names) if (v.id !== exceptId) out.set(s, v.name);
+    return out;
+  }
+
+  /** Oublie les noms du staff mis en cache (rôles ou pseudos du staff modifiés). */
+  forgetStaffNames(guildId) {
+    this.staffNames.delete(guildId);
+  }
+
+  /** Membre exempté du filtre des pseudos : staff, rôles ignorés (globaux ou du filtre), bots. */
+  isNameExempt(member, cfg, fc) {
+    if (!member || member.user?.bot) return true;
+    if (member.id === member.guild?.ownerId) return true;
+    if (member.permissions?.has?.(PermissionFlagsBits.ModerateMembers) || isStaff(member)) return true;
+    const roles = [...(cfg.ignoredRoles ?? []), ...(fc.exemptRoles ?? [])];
+    return roles.length > 0 && Boolean(member.roles?.cache?.some?.((r) => roles.includes(r.id)));
+  }
+
+  /**
+   * Vérifie le pseudo d'un membre (arrivée ou modification) et le renomme selon le modèle
+   * en cas d'infraction (dehoist, mots interdits, usurpation, pseudo illisible).
+   * Exemptés : « Exclure temporairement des membres » (staff), propriétaire, membres que
+   * la hiérarchie ne me permet pas de renommer, rôles ignorés. Nos propres renommages
+   * (et ceux d'un modérateur) ne sont jamais refiltrés.
+   * @param {import('discord.js').GuildMember} member
+   * @param {{ previous?: import('discord.js').GuildMember|null, source?: 'join'|'update' }} [opts]
+   * @returns {Promise<{ renamed: boolean, violation: object|null, from?: string, to?: string } | null>}
+   */
+  async checkMemberName(member, { previous = null, source = 'update' } = {}) {
+    const guild = member?.guild;
+    if (!guild || member.user?.bot || member.partial) return null;
+    const cfg = this.config.get(guild.id).automod;
+    const fc = cfg?.filters?.badNames;
+    if (!cfg?.enabled || !fc?.enabled) return null;
+    const key = this.#key(guild.id, member.id);
+    const now = Date.now();
+    if (now - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(now);
+    const name = shownName(member);
+    // Pseudo posé par le bot (renommage) ou par un modérateur (/pseudo) : accepté tel quel.
+    const allowed = this.allowedNames.get(key);
+    if (allowed && now - allowed.at < OWN_RENAME_TTL_MS && allowed.nick === (member.nickname ?? null)) return null;
+    // Mise à jour sans changement de nom (rôles, avatar…) : rien à vérifier.
+    if (source === 'update' && previous && !previous.partial && shownName(previous) === name) return null;
+    if (this.isNameExempt(member, cfg, fc)) return null;
+    const violation = nameViolation(name, fc, { words: cfg.filters?.badWords?.words ?? [], staff: fc.impersonation === false ? null : this.#staffSkeletons(guild, member.id) });
+    if (!violation) return null;
+    const replacement = replacementName(fc.template || DEFAULT_NAME_TEMPLATE, member.id);
+    if (replacement === member.nickname) return null; // déjà renommé
+    if (!member.manageable) return { renamed: false, violation, from: name, to: replacement };
+    const me = guild.members?.me;
+    if (me && !me.permissions?.has?.(PermissionFlagsBits.ManageNicknames)) return { renamed: false, violation, from: name, to: replacement };
+    // Pseudo posé par un modérateur depuis Discord : son choix est respecté (journal d'audit).
+    if (source === 'update' && previous && !previous.partial && previous.nickname !== member.nickname) {
+      const executor = await fetchExecutor(guild, AuditLogEvent.MemberUpdate, member.id);
+      if (executor && executor !== member.id && executor !== this.logging?.client?.user?.id) {
+        const mod = guild.members.cache.get(executor) ?? await guild.members.fetch(executor).catch(() => null);
+        if (mod && isStaff(mod)) return null;
+      }
+    }
+    if (this.renaming.has(key)) return null;
+    this.renaming.add(key);
+    try {
+      this.allowName(guild.id, member.id, replacement);
+      try {
+        await member.setNickname(replacement, truncate(`AutoMod (pseudo) : ${violation.reason}`, 400));
+      } catch (err) {
+        this.allowedNames.delete(key);
+        logger.debug(`Renommage AutoMod de ${member.id} impossible :`, err?.message);
+        return { renamed: false, violation, from: name, to: replacement };
+      }
+    } finally {
+      this.renaming.delete(key);
+    }
+    await this.#logRename(member, violation, name, replacement, source).catch(() => {});
+    return { renamed: true, violation, from: name, to: replacement };
+  }
+
+  async #logRename(member, violation, from, to, source) {
+    const check = NAME_CHECKS[violation.check];
+    const embed = logCard({
+      category: 'automod',
+      tone: 'caution',
+      icon: '✏️',
+      title: 'Pseudo renommé',
+      description: `Le pseudo de ${member} a été remplacé ${source === 'join' ? 'à son arrivée' : 'après une modification'}.`,
+      user: member.user,
+      fields: [
+        field(ICONS.user, 'Membre', userLine(member.user)),
+        field(check?.emoji ?? ICONS.warning, 'Règle', violation.reason),
+        field(ICONS.search, 'Détail', violation.detail ?? '—'),
+        field('⬅️', 'Avant', code(truncate(from || '—', 100))),
+        field('➡️', 'Après', code(to)),
+      ],
+    });
+    await this.logging.send(member.guild.id, 'automod', embed, buttonRows(historyButton(member.id)), { event: 'automodNames' });
   }
 
   /** Oublie la dernière sanction d'un membre (faux positif, quarantaine levée) : la suivante ne sera pas fusionnée. */
@@ -739,4 +887,7 @@ module.exports = {
   QUARANTINE_ROLES_FIELD,
   DUPLICATE_WINDOW_MS,
   BURST_WINDOW_MS,
+  OWN_RENAME_TTL_MS,
+  shownName,
+  isStaff,
 };

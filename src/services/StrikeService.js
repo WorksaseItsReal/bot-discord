@@ -35,9 +35,24 @@ function describeThreshold(t) {
   return `${t.strikes} strikes → ${label}${t.duration ? ` (${t.duration})` : ''}`;
 }
 
+/** Durée d'un jour (décroissance des strikes). */
+const DAY_MS = 86_400_000;
+/** Décroissance maximale réglable (jours). */
+const MAX_DECAY_DAYS = 365;
+
+/** Nombre de jours de décroissance d'une config (0 = jamais), borné. Pur. */
+function decayDaysOf(cfg) {
+  const n = Number(cfg?.strikes?.decayDays ?? 0);
+  return Number.isInteger(n) && n > 0 ? Math.min(n, MAX_DECAY_DAYS) : 0;
+}
+
 /**
  * Système de strikes configurable par serveur. À partir d'un nombre de strikes
  * et des paliers définis dans la config, détermine la sanction à appliquer.
+ *
+ * Décroissance (`strikes.decayDays`, 0 = jamais) : seuls les strikes des N derniers
+ * jours comptent dans le palier. Les strikes sont datés (table strike_events) et
+ * FILTRÉS par date, jamais supprimés : remettre la décroissance à 0 les fait recompter.
  */
 class StrikeService {
   /**
@@ -49,18 +64,52 @@ class StrikeService {
     this.config = configService;
   }
 
-  getCount(guildId, userId) {
+  /** Décroissance du serveur en jours (0 = jamais). */
+  decayDays(guildId) {
+    return decayDaysOf(this.config.get(guildId));
+  }
+
+  /**
+   * Début de la fenêtre des strikes qui comptent (ms), 0 sans décroissance.
+   * Sert aussi à ignorer les paliers d'escalade appliqués avant cette date.
+   */
+  activeSince(guildId, now = Date.now()) {
+    const days = this.decayDays(guildId);
+    return days ? now - days * DAY_MS : 0;
+  }
+
+  /** Strikes qui comptent dans le palier (décroissance appliquée). */
+  getCount(guildId, userId, now = Date.now()) {
+    const since = this.activeSince(guildId, now);
+    return since && this.repo.countSince ? this.repo.countSince(guildId, userId, since) : this.repo.get(guildId, userId);
+  }
+
+  /** Total cumulé, strikes expirés compris. */
+  getTotal(guildId, userId) {
     return this.repo.get(guildId, userId);
   }
 
   /**
+   * Date à laquelle le plus ancien strike encore compté cessera de compter (ou null
+   * sans décroissance / sans strike actif).
+   */
+  nextDecayAt(guildId, userId, now = Date.now()) {
+    const since = this.activeSince(guildId, now);
+    if (!since) return null;
+    const oldest = this.repo.oldestSince?.(guildId, userId, since);
+    return oldest ? oldest + this.decayDays(guildId) * DAY_MS : null;
+  }
+
+  /**
    * Ajoute des strikes et renvoie l'action escaladée éventuelle.
-   * @returns {{ count:number, action:import('./strike-types').StrikeAction|null }}
+   * `count` : strikes qui comptent (décroissance appliquée) ; `total` : cumul.
+   * @returns {{ count:number, total:number, action:object|null }}
    */
   add(guildId, userId, amount = 1) {
-    const count = this.repo.add(guildId, userId, amount);
+    const total = this.repo.add(guildId, userId, amount);
+    const count = this.getCount(guildId, userId);
     const action = this.resolveAction(guildId, count);
-    return { count, action };
+    return { count, total, action };
   }
 
   reset(guildId, userId) {
@@ -107,4 +156,4 @@ class StrikeService {
   }
 }
 
-module.exports = { StrikeService, ACTION_LABELS, ACTION_PERMISSIONS, ESCALATION_PREFIX, escalationReason, parseEscalationLevel, describeThreshold };
+module.exports = { StrikeService, ACTION_LABELS, ACTION_PERMISSIONS, ESCALATION_PREFIX, escalationReason, parseEscalationLevel, describeThreshold, decayDaysOf, MAX_DECAY_DAYS, DAY_MS };

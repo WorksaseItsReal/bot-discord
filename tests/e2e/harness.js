@@ -141,6 +141,11 @@ async function createHarness(opts = {}) {
     }
   }
 
+  // Réseau sortant coupé : un téléchargement du bot (image d'emoji…) passe par `h.fetch`,
+  // qui refuse par défaut ; un test le remplace pour simuler une réponse.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (...args) => h.fetch(...args);
+
   // Objets Interaction discord.js créés, par identifiant.
   const interactionObjects = new Map();
   client.prependListener('interactionCreate', (i) => interactionObjects.set(i.id, i));
@@ -158,6 +163,13 @@ async function createHarness(opts = {}) {
     interactionObjects,
     /** Interactions envoyées : { rec, label } */
     sent: [],
+    /** Requêtes réseau du bot (fetch) : { url, init }. */
+    fetches: [],
+    /** `fetch` vu par le bot : refuse tout par défaut (aucun accès réseau pendant les tests). */
+    async fetch(url, init) {
+      h.fetches.push({ url: String(url), init });
+      throw new TypeError(`fetch failed (réseau coupé dans les tests : ${String(url).slice(0, 80)})`);
+    },
 
     /* ---------------------------------------------------------------- */
     /* Synchronisation                                                   */
@@ -676,6 +688,7 @@ async function createHarness(opts = {}) {
       process.off('warning', onWarning);
       process.off('unhandledRejection', onRejection);
       process.off('uncaughtException', onException);
+      globalThis.fetch = realFetch;
       restoreConsole();
     },
   };

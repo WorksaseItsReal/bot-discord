@@ -229,9 +229,80 @@ function listFilter(filter) {
   throw new UserError('Ce bouton est invalide.');
 }
 
+// ---------------------------------------------------------------- modification
+
+/**
+ * Couleur saisie : « #5865F2 » / « 5865f2 » → nombre, « aucune » / « 0 » → 0 (couleur par défaut).
+ * @returns {number} Lève une UserError si la saisie est invalide. Pur.
+ */
+function parseRoleColor(raw) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (['aucune', 'aucun', 'defaut', 'défaut', '0', 'none'].includes(text)) return 0;
+  if (!HEX_COLOR.test(text)) throw new UserError('Couleur invalide : utilisez un code hexadécimal comme `#5865F2`, ou `aucune`.');
+  return Number.parseInt(text.replace(/^#/, ''), 16);
+}
+
+const yesNo = (v) => (v ? 'Oui' : 'Non');
+
+/**
+ * /role modifier : nom, couleur, affichage séparé, mentionnable. Seules les options
+ * fournies sont modifiées ; la carte montre l'avant → après.
+ */
+async function editRole(interaction, role) {
+  const { options } = interaction;
+  const name = options.getString('nom')?.trim();
+  const rawColor = options.getString('couleur');
+  const hoist = options.getBoolean('affiche_separement');
+  const mentionable = options.getBoolean('mentionnable');
+  const patch = {};
+  const changes = [];
+  if (name != null && name !== '') {
+    if (name !== role.name) {
+      patch.name = name;
+      changes.push(field(ICONS.tag, 'Nom', `${role.name} → **${name}**`));
+    }
+  } else if (options.getString('nom') != null) {
+    throw new UserError('Le nom ne peut pas être vide.');
+  }
+  if (rawColor != null) {
+    const color = parseRoleColor(rawColor);
+    if (color !== primaryColor(role)) {
+      patch.colors = { primaryColor: color };
+      changes.push(field(ICONS.color, 'Couleur', `${hex(role)} → ${color ? code(`#${color.toString(16).padStart(6, '0').toUpperCase()}`) : '*Par défaut*'}`));
+    }
+  }
+  if (hoist !== null && hoist !== Boolean(role.hoist)) {
+    patch.hoist = hoist;
+    changes.push(field('📌', 'Affiché séparément', `${yesNo(role.hoist)} → **${yesNo(hoist)}**`));
+  }
+  if (mentionable !== null && mentionable !== Boolean(role.mentionable)) {
+    patch.mentionable = mentionable;
+    changes.push(field('📣', 'Mentionnable', `${yesNo(role.mentionable)} → **${yesNo(mentionable)}**`));
+  }
+  if (name == null && rawColor == null && hoist === null && mentionable === null) {
+    throw new UserError('Précisez au moins une option : `nom`, `couleur`, `affiche_separement` ou `mentionnable`.');
+  }
+  if (!changes.length) throw new UserError(`${role} a déjà ces réglages : rien à modifier.`);
+  const updated = await role.edit({ ...patch, reason: truncate(`Modifié par ${interaction.user.tag}`, 400) });
+  const after = updated ?? role;
+  return interaction.reply({
+    embeds: [
+      card({
+        tone: primaryColor(after) || 'success',
+        section: 'roles',
+        icon: ICONS.success,
+        title: 'Rôle modifié',
+        description: [`Le rôle ${after} a été mis à jour.`, patch.mentionable ? subtext('Tout membre peut désormais le mentionner (et notifier ses membres).') : null],
+        fields: [...changes, field(ICONS.moderator, 'Par', `${interaction.user}`), field(ICONS.id, 'Identifiant', code(after.id))],
+      }),
+    ],
+  });
+}
+
 module.exports = {
   category: 'roles',
   assertManageableRole,
+  parseRoleColor,
   data: new SlashCommandBuilder()
     .setName('role')
     .setDescription('Gestion des rôles.')
@@ -251,6 +322,13 @@ module.exports = {
     .addSubcommand((s) =>
       s.setName('delete').setDescription('Supprime un rôle.')
         .addRoleOption((o) => o.setName('role').setDescription('Rôle concerné').setRequired(true)))
+    .addSubcommand((s) =>
+      s.setName('modifier').setDescription('Modifie le nom, la couleur ou l\'affichage d\'un rôle.')
+        .addRoleOption((o) => o.setName('role').setDescription('Rôle à modifier').setRequired(true))
+        .addStringOption((o) => o.setName('nom').setDescription('Nouveau nom du rôle').setMaxLength(100))
+        .addStringOption((o) => o.setName('couleur').setDescription('Nouvelle couleur hex (ex : #5865F2) ou « aucune »').setMaxLength(10))
+        .addBooleanOption((o) => o.setName('affiche_separement').setDescription('Afficher ses membres séparément dans la liste'))
+        .addBooleanOption((o) => o.setName('mentionnable').setDescription('Tout le monde peut le mentionner')))
     .addSubcommand((s) => s.setName('list').setDescription('Liste les rôles du serveur.'))
     .addSubcommand((s) =>
       s.setName('temporaire').setDescription('Donne un rôle pour une durée limitée (retiré automatiquement).')
@@ -333,6 +411,8 @@ module.exports = {
 
     const role = interaction.options.getRole('role');
     assertManageableRole(interaction, role);
+
+    if (sub === 'modifier') return editRole(interaction, guild.roles.cache.get(role.id) ?? role);
 
     if (sub === 'delete') {
       const members = role.members?.size ?? 0;

@@ -47,7 +47,8 @@ module.exports = {
     const { id } = await moderation.warn(interaction.guild, member, interaction.member, reason);
     const { count } = strikes.add(guildId, user.id, 1);
 
-    const step = strikes.pendingEscalation(guildId, count, moderation.appliedEscalationLevel(guildId, user.id));
+    // Décroissance : seuls les paliers appliqués dans la fenêtre des strikes encore comptés bloquent.
+    const step = strikes.pendingEscalation(guildId, count, moderation.appliedEscalationLevel(guildId, user.id, strikes.activeSince(guildId)));
     const escalation = step ? await applyEscalation(client, interaction, member, step) : null;
     const next = strikes.nextThreshold(guildId, count);
 

@@ -41,6 +41,7 @@ const { AfkRepository } = require('../database/repositories/AfkRepository');
 const { HighlightRepository } = require('../database/repositories/HighlightRepository');
 const { EconomyRepository } = require('../database/repositories/EconomyRepository');
 const { GameScoreRepository } = require('../database/repositories/GameScoreRepository');
+const { TimedActionRepository } = require('../database/repositories/TimedActionRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -73,6 +74,7 @@ const { HighlightService } = require('../services/HighlightService');
 const { SnipeService } = require('../services/SnipeService');
 const { EconomyService } = require('../services/EconomyService');
 const { GameService } = require('../services/GameService');
+const { TimedLockService } = require('../services/TimedLockService');
 
 const logger = createLogger('client');
 
@@ -148,6 +150,7 @@ class GadgetClient extends Client {
       highlights: new HighlightRepository(db),
       economy: new EconomyRepository(db),
       gameScores: new GameScoreRepository(db),
+      timedActions: new TimedActionRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -165,7 +168,7 @@ class GadgetClient extends Client {
       scheduler: new SchedulerService({ client: this, sanctions: this.repositories.sanctions, reminders: this.repositories.reminders }),
       automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents, quarantines: this.repositories.automodQuarantines }),
       antiraid,
-      lockdown: new LockdownService({ locks: this.repositories.locks, logging }),
+      lockdown: new LockdownService({ locks: this.repositories.locks, logging, timed: this.repositories.timedActions }),
       tickets: new TicketService({ tickets: this.repositories.tickets, config: configService, logging }),
       giveaways: new GiveawayService({ client: this, giveaways: this.repositories.giveaways }),
       suggestions: new SuggestionService({ client: this, suggestions: this.repositories.suggestions, config: configService }),
@@ -195,6 +198,8 @@ class GadgetClient extends Client {
       economy: new EconomyService({ economy: this.repositories.economy, config: configService }),
       // Mini-jeux (/jeu) : parties en mémoire (minuteurs unref, arrêtés dans shutdown), scores en base.
       games: new GameService({ client: this, scores: this.repositories.gameScores }),
+      // Levées automatiques : /lock duree, /slowmode pendant, /lockdown enable duree.
+      timedLocks: new TimedLockService({ client: this, timed: this.repositories.timedActions }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));

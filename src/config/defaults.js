@@ -38,6 +38,9 @@ const defaultGuildConfig = Object.freeze({
   },
   strikes: {
     enabled: true,
+    // Décroissance : les strikes de plus de N jours ne comptent plus dans le palier
+    // (0 = jamais). Ils restent enregistrés (filtre par date, cf. StrikeService).
+    decayDays: 0,
     // Paliers configurables: nombre de strikes -> sanction
     thresholds: [
       { strikes: 3, action: 'mute', duration: '1h' },
@@ -92,6 +95,11 @@ const defaultGuildConfig = Object.freeze({
       // timeout (`duration`) + suppression de ses messages des `purgeMinutes` dernières minutes
       // (+ retrait des rôles si `removeRoles`, rendus à la levée).
       antiHacked: { enabled: false, channels: 3, windowSeconds: 60, minLength: 20, scamScore: 5, action: 'quarantine', duration: '1d', purgeMinutes: 10, removeRoles: false },
+      // Pseudos (groupe Sécurité) : vérifiés à l'arrivée et à chaque changement de nom. Vérifications :
+      // dehoist (symbole/invisible en tête), words (liste des mots interdits), impersonation (« admin »,
+      // « discord »… ou nom du staff imité), unreadable (zalgo, invisibles). Action unique : renommer
+      // selon `template` ({id} = 4 derniers chiffres de l'identifiant). Exemptions : exemptRoles.
+      badNames: { enabled: false, dehoist: true, words: true, impersonation: true, unreadable: true, template: 'Membre {id}' },
     },
     // Exemptions propres à un filtre (en plus des exemptions globales) : chaque filtre accepte
     // `exemptChannels: []` et `exemptRoles: []` (réglables dans la vue du filtre).

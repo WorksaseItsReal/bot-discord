@@ -71,6 +71,15 @@ const SANCTIONS = {
     dmTitle: 'Vous avez été expulsé',
     dm: (g) => `Vous avez été expulsé de **${g}**. Vous pourrez revenir avec une nouvelle invitation.`,
   },
+  softban: {
+    label: 'Softban',
+    tone: 'caution',
+    icon: ICONS.kick,
+    title: 'Membre softbanni',
+    text: (u) => `${u} a été expulsé et ses messages récents ont été supprimés. Il peut revenir avec une nouvelle invitation.`,
+    dmTitle: 'Vous avez été expulsé',
+    dm: (g) => `Vous avez été expulsé de **${g}** et vos messages récents ont été supprimés. Vous pourrez revenir avec une nouvelle invitation.`,
+  },
   ban: {
     label: 'Bannissement',
     tone: 'danger',
@@ -609,6 +618,59 @@ class ModerationService {
     return result;
   }
 
+  /**
+   * Softban : bannissement puis débannissement immédiat, pour supprimer les messages
+   * récents d'un membre (il peut revenir avec une invitation). Enregistré comme une
+   * sanction ponctuelle de type `softban`. Un utilisateur absent du serveur peut être
+   * softbanni (purge de ses messages) s'il n'est pas déjà banni : le débannissement
+   * immédiat lèverait sinon un bannissement voulu.
+   * Si le débannissement échoue (deux essais), la sanction est quand même enregistrée
+   * (le ban a eu lieu) et `unbanned: false` est renvoyé : l'appelant le signale.
+   * @param {{ deleteMessageSeconds?: number, targetMember?: import('discord.js').GuildMember|null }} [opts]
+   * @returns {Promise<{ id: number, unbanned: boolean }>}
+   */
+  async softban(guild, targetUser, moderator, reason, { deleteMessageSeconds = 86_400, targetMember = null } = {}) {
+    if (!SNOWFLAKE.test(String(targetUser?.id ?? ''))) throw new UserError('Utilisateur invalide.');
+    if (targetUser.id === moderator?.id) throw new UserError('Vous ne pouvez pas vous softbannir vous-même.');
+    if (targetMember) {
+      assertCanModerate(moderator, targetMember, guild.members.me, { action: 'softbannir' });
+      if (!targetMember.bannable) {
+        throw new UserError('Je ne peux pas bannir ce membre (rôle trop élevé ou permission « Bannir » manquante).');
+      }
+    } else {
+      // Hors du serveur : refuse s'il est déjà banni (le débannissement immédiat le lèverait).
+      let fetchError = null;
+      const existing = await guild.bans.fetch(targetUser.id).catch((err) => {
+        fetchError = err;
+        return null;
+      });
+      if (existing?.user?.id === targetUser.id) {
+        throw new UserError('Cet utilisateur est **déjà banni** : un softban le débannirait. Rien n\'a été modifié.');
+      }
+      if (fetchError && fetchError.code !== 10026) throw new UserError('Impossible de vérifier les bannissements pour le moment. Réessayez dans quelques secondes.');
+    }
+    const seconds = Math.min(604_800, Math.max(0, Math.floor(deleteMessageSeconds)));
+    const auditReason = truncate(`Softban${reason ? ` : ${reason}` : ''}`, 500);
+    const joinedAt = targetMember?.joinedTimestamp ?? null;
+    let unbanned = false;
+    const result = await this.record(guild, targetUser, moderator, { type: 'softban', reason }, async () => {
+      await this.#asBot('ban', guild.id, targetUser.id, () => guild.bans.create(targetUser.id, { reason: auditReason, deleteMessageSeconds: seconds }));
+      // Débannissement immédiat (deux essais) : un échec ne doit pas annuler l'enregistrement,
+      // le bannissement ayant bien eu lieu.
+      for (let attempt = 0; attempt < 2 && !unbanned; attempt += 1) {
+        try {
+          await this.#asBot('unban', guild.id, targetUser.id, () => guild.bans.remove(targetUser.id, 'Softban : débannissement immédiat'));
+          unbanned = true;
+        } catch (err) {
+          if (err?.code === 10026) unbanned = true; // déjà débanni
+          else logger.warn(`Softban : débannissement de ${targetUser.id} échoué (essai ${attempt + 1}) :`, err?.message);
+        }
+      }
+    });
+    await this.#reportDestructive(guild, moderator, 'ban', targetUser.id, joinedAt);
+    return { id: result.id, unbanned };
+  }
+
   /** Signale un ban ou un kick fait via le bot à l'AntiRaid (best-effort, jamais bloquant). */
   async #reportDestructive(guild, moderator, type, targetId, targetJoinedAt) {
     if (!this.antiraid?.handleDestructive || !moderator?.id) return;
@@ -628,9 +690,11 @@ class ModerationService {
    * Plus haut palier d'escalade déjà appliqué à ce membre (0 si aucun), d'après la
    * colonne dédiée `escalation_step` (jamais d'après le texte libre des raisons,
    * qu'un modérateur pourrait imiter avec /warn).
+   * `since` (décroissance des strikes, StrikeService.activeSince) : un palier appliqué avant
+   * cette date ne bloque plus sa réapplication, ses strikes ne comptant plus.
    */
-  appliedEscalationLevel(guildId, userId) {
-    return this.sanctions.maxEscalationStep(guildId, userId);
+  appliedEscalationLevel(guildId, userId, since = 0) {
+    return this.sanctions.maxEscalationStep(guildId, userId, since);
   }
 
   /**

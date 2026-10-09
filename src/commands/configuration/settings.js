@@ -6,6 +6,13 @@ const { card, field, wide, blank, subtext, status, ICONS, actionButton, buttonRo
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { UserError } = require('../../core/errors');
 const { parseDuration } = require('../../utils/time');
+const { decayDaysOf, MAX_DECAY_DAYS } = require('../../services/StrikeService');
+
+/** « Après 30 jours » / « Jamais ». Pur. */
+function decayText(cfg) {
+  const days = decayDaysOf(cfg);
+  return days ? `Après **${days}** jour${days > 1 ? 's' : ''}` : 'Jamais';
+}
 
 /** Catégories de logs → libellé et icône (catalogue commun, cf. /logs). */
 const LOG_CATEGORIES = Object.freeze(
@@ -220,9 +227,10 @@ function renderModeration(cfg) {
       field(ICONS.mute, 'Rôle muet', m.mutedRoleId ? `<@&${m.mutedRoleId}>` : `${UNSET} Aucun`),
       field('⚖️', 'Strikes', onOff(cfg.strikes?.enabled, 'Activés', 'Désactivés')),
       field(ICONS.count, 'Paliers', `**${thresholds.length}**`),
+      field(ICONS.expires, 'Expiration des strikes', decayText(cfg)),
       wide('📈', 'Paliers de strikes', cfg.strikes?.enabled ? ladder.join('\n') || '*Aucun palier : les strikes sont seulement comptés.*' : '*Système désactivé.*'),
     ],
-    footer: 'Modifier : /settings moderation (raison_obligatoire, strikes, paliers, role_muet…)',
+    footer: 'Modifier : /settings moderation (raison_obligatoire, strikes, paliers, decroissance, role_muet…)',
   });
 }
 
@@ -251,6 +259,12 @@ function readModerationOptions(interaction, client) {
   if (ladder !== null) {
     strikes.thresholds = parseThresholds(ladder);
     edited.add('paliers');
+  }
+  const decay = options.getInteger?.('decroissance') ?? null;
+  if (decay !== null) {
+    if (!Number.isInteger(decay) || decay < 0 || decay > MAX_DECAY_DAYS) throw new UserError(`Décroissance : entre 0 (jamais) et ${MAX_DECAY_DAYS} jours.`);
+    strikes.decayDays = decay;
+    edited.add('decroissance');
   }
   const role = options.getRole('role_muet');
   if (role) {
@@ -311,7 +325,9 @@ function moderationUpdatedView(cfg, edited) {
           field(ICONS.mute, 'Rôle muet', `${m.mutedRoleId ? `<@&${m.mutedRoleId}>` : `${UNSET} Aucun`}${mark('role_muet')}`),
           field('⚖️', 'Strikes', `${onOff(cfg.strikes?.enabled, 'Activés', 'Désactivés')}${mark('strikes')}`),
           field(ICONS.count, 'Paliers', `**${thresholds.length}**${mark('paliers')}`),
+          field(ICONS.expires, 'Expiration des strikes', `${decayText(cfg)}${mark('decroissance')}`),
           wide('📈', 'Paliers de strikes', ladderLines(thresholds).join('\n') || '*Aucun palier : les strikes sont seulement comptés.*'),
+          edited.has('decroissance') ? wide(ICONS.info, 'Décroissance', 'Les strikes plus anciens ne comptent plus dans le palier : ils restent enregistrés (remettre `0` les fait recompter).') : null,
         ],
         footer: '✏️ = modifié',
       }),
@@ -371,6 +387,7 @@ module.exports = {
         .addBooleanOption((o) => o.setName('raison_obligatoire').setDescription('Exiger une raison pour chaque sanction.'))
         .addBooleanOption((o) => o.setName('strikes').setDescription('Activer l\'escalade automatique des sanctions par strikes.'))
         .addStringOption((o) => o.setName('paliers').setDescription('Paliers de strikes, ex : 3=mute 1h, 5=kick, 7=ban (ou « aucun »)').setMaxLength(300))
+        .addIntegerOption((o) => o.setName('decroissance').setDescription('Les strikes de plus de N jours ne comptent plus (0 = jamais)').setMinValue(0).setMaxValue(MAX_DECAY_DAYS))
         .addRoleOption((o) => o.setName('role_muet').setDescription('Rôle utilisé par /mute (sinon un rôle « Muted » est créé).')),
     ),
 
@@ -388,7 +405,7 @@ module.exports = {
       const { patch, edited } = readModerationOptions(interaction, client);
       if (!Object.keys(patch).length) {
         return interaction.reply({
-          embeds: [status.warn('Aucune option fournie. Précisez au moins une option : `dm_sanction`, `confirmation`, `raison_obligatoire`, `strikes`, `paliers` ou `role_muet`.', 'Rien à modifier')],
+          embeds: [status.warn('Aucune option fournie. Précisez au moins une option : `dm_sanction`, `confirmation`, `raison_obligatoire`, `strikes`, `paliers`, `decroissance` ou `role_muet`.', 'Rien à modifier')],
           components: buttonRows(actionButton({ command: 'settings', action: 'moderation', label: 'Voir les options', emoji: ICONS.moderator })),
           ephemeral: true,
         });
