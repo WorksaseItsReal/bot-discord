@@ -1,6 +1,6 @@
 'use strict';
 
-const { PermissionFlagsBits, ActionRowBuilder } = require('discord.js');
+const { PermissionFlagsBits, ActionRowBuilder, ChannelType, ReactionType } = require('discord.js');
 const { card, field, ICONS, linkButton, fitEmbeds } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
@@ -18,6 +18,7 @@ const MIN_EDIT_INTERVAL_MS = 5_000;
 const RECENT_MAX = 1_000;
 /** Codes Discord : message / salon inconnu. */
 const UNKNOWN = new Set([10003, 10008]);
+const UNKNOWN_MESSAGE = 10008;
 
 const SEND_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
 
@@ -26,10 +27,26 @@ const SEND_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMes
  * salon starboard sous forme de carte, mise à jour en direct (avec anti-rebond : une
  * édition au plus toutes les 5 s par message, jamais une par réaction).
  *
- * Ne comptent pas : l'auteur du message (auto-étoile) et les bots. Ne sont jamais
- * repostés : les messages de bots ou système, ceux des salons exclus et du salon
- * starboard lui-même, et ceux d'un salon NSFW si le starboard n'est pas NSFW.
+ * Ne comptent pas : l'auteur du message (auto-étoile, y compris en super-réaction) et
+ * les bots. Ne sont jamais repostés : les messages de bots ou système, ceux des salons
+ * exclus et du salon starboard lui-même, ceux d'un salon NSFW si le starboard n'est
+ * pas NSFW, ceux des fils privés, et ceux d'un salon invisible pour @everyone quand le
+ * starboard, lui, est visible de tous (jamais de fuite d'un salon du staff).
  */
+/**
+ * Le salon d'origine est-il moins visible que le starboard ? (@everyone ne voit pas la
+ * source alors qu'il voit le starboard). Un fil suit son salon parent. Inconnu → non. Pur.
+ */
+function isLessVisible(source, starChannel) {
+  const everyone = source?.guild?.roles?.everyone ?? starChannel?.guild?.roles?.everyone;
+  if (!everyone || typeof source?.permissionsFor !== 'function' || typeof starChannel?.permissionsFor !== 'function') return false;
+  const sees = (channel) => channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel);
+  const sourceVisible = sees(source);
+  const starVisible = sees(starChannel);
+  if (sourceVisible == null || starVisible == null) return false;
+  return !sourceVisible && starVisible;
+}
+
 class StarboardService {
   /**
    * @param {{ client: import('discord.js').Client, starboard: import('../database/repositories/StarboardRepository').StarboardRepository,
@@ -101,11 +118,18 @@ class StarboardService {
       this.repo.delete(asCard.guild_id, asCard.message_id);
       return;
     }
+    // Recompte programmé ou EN COURS : il ne doit plus rien publier (sinon carte orpheline
+    // d'un message supprimé, peut-être par la modération).
+    this.#cancel(`${guildId}:${message.id}`, { deleted: true });
     const row = this.repo.get(guildId, message.id);
     if (!row) return;
-    this.#cancel(`${guildId}:${message.id}`);
     this.repo.delete(guildId, message.id);
     if (row.star_message_id) await this.#deleteCard(guildId, row.star_message_id);
+  }
+
+  /** Le message d'origine a-t-il été supprimé pendant son recompte ? */
+  #wasDeleted(guildId, messageId) {
+    return Boolean(this.entries.get(`${guildId}:${messageId}`)?.deleted);
   }
 
   // ------------------------------------------------------------ anti-rebond
@@ -154,11 +178,17 @@ class StarboardService {
     if (this.recent.size > RECENT_MAX) for (const [k, at] of this.recent) if (now - at > this.minEditIntervalMs) this.recent.delete(k);
   }
 
-  #cancel(key) {
+  #cancel(key, { deleted = false } = {}) {
     const entry = this.entries.get(key);
-    if (entry?.timer) clearTimeout(entry.timer);
-    if (entry && !entry.running) this.entries.delete(key);
-    else if (entry) entry.dirty = false;
+    if (!entry) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.timer = null;
+    if (!entry.running) {
+      this.entries.delete(key);
+      return;
+    }
+    entry.dirty = false;
+    if (deleted) entry.deleted = true; // lu par flush() après chaque attente réseau
   }
 
   /** Arrêt propre : recomptes programmés annulés, ceux en cours attendus. */
@@ -177,22 +207,34 @@ class StarboardService {
 
   /**
    * Étoiles valides : réactions de l'emoji configuré, sans l'auteur ni les bots.
-   * Jusqu'à 100 réactions, le compte est exact (liste des utilisateurs) ; au-delà,
-   * il est estimé à partir du total moins les exclus trouvés dans les 100 premiers.
+   * `count` inclut les super-réactions : les deux listes (normale et super) sont lues,
+   * sinon l'auteur pourrait s'auto-étoiler en super-réaction. Jusqu'à 100 réactions de
+   * chaque type, le compte est exact (utilisateurs distincts) ; au-delà, il est estimé à
+   * partir du total moins les exclus trouvés dans les listes lues.
    */
   async countStars(message, emoji) {
     const reaction = message.reactions?.cache?.find((r) => emojiMatches(emoji, r.emoji));
     const total = reaction?.count ?? 0;
     if (!reaction || total <= 0) return 0;
-    let users = reaction.users?.cache;
-    try {
-      users = await reaction.users.fetch({ limit: 100 });
-    } catch (err) {
-      logger.debug('Réactions illisibles, cache utilisé :', err?.message);
+    const details = reaction.countDetails;
+    const consistent = Boolean(details) && details.normal + details.burst === total;
+    const wanted = consistent ? [[ReactionType.Normal, details.normal], [ReactionType.Burst, details.burst]] : [[ReactionType.Normal, total]];
+    const users = new Map();
+    let complete = true;
+    for (const [type, expected] of wanted) {
+      if (expected <= 0) continue;
+      let list = null;
+      try {
+        list = [...(await reaction.users.fetch({ type, limit: 100 })).values()];
+      } catch (err) {
+        logger.debug('Réactions illisibles, cache utilisé :', err?.message);
+        if (type === ReactionType.Normal) list = [...(reaction.users?.cache?.values?.() ?? [])];
+      }
+      if (!list || list.length < expected) complete = false;
+      for (const u of list ?? []) if (u?.id) users.set(u.id, u);
     }
-    const list = [...(users?.values?.() ?? [])];
-    const excluded = list.filter((u) => u?.bot || u?.id === message.author?.id).length;
-    if (list.length >= total) return Math.max(0, list.length - excluded);
+    const excluded = [...users.values()].filter((u) => u.bot || u.id === message.author?.id).length;
+    if (complete) return Math.max(0, users.size - excluded);
     return Math.max(0, total - excluded);
   }
 
@@ -204,6 +246,8 @@ class StarboardService {
     if (message.channelId === cfg.channelId) return 'salon starboard';
     if (isIgnoredChannel(message.channel, cfg.excludedChannels ?? [])) return 'salon exclu';
     if (isNsfwChannel(message.channel) && !isNsfwChannel(starChannel)) return 'salon NSFW';
+    if (message.channel?.type === ChannelType.PrivateThread) return 'fil privé';
+    if (isLessVisible(message.channel, starChannel)) return 'salon privé';
     return null;
   }
 
@@ -230,6 +274,8 @@ class StarboardService {
 
     const emoji = parseEmoji(cfg.emoji) ?? parseEmoji('⭐');
     const stars = await this.countStars(message, emoji);
+    // Supprimé pendant le recompte (handleDelete a déjà retiré la ligne et la carte).
+    if (this.#wasDeleted(guildId, messageId)) return null;
     const threshold = Math.max(1, cfg.threshold ?? 3);
     const row = this.repo.get(guildId, messageId);
     const base = { guildId, messageId, channelId, authorId: message.author.id };
@@ -238,13 +284,21 @@ class StarboardService {
       if (row?.star_message_id) {
         if (row.stars === stars) return 'unchanged';
         const edited = await this.#editCard(starChannel, row.star_message_id, message, stars, emoji);
-        if (edited) {
+        if (edited === 'ok') {
+          if (this.#wasDeleted(guildId, messageId)) return null;
           this.repo.upsert({ ...base, starMessageId: row.star_message_id, stars });
           return 'updated';
         }
+        // Erreur passagère : la carte existe sans doute encore, on n'en publie pas une seconde.
+        if (edited !== 'gone') return null;
       }
+      if (this.#wasDeleted(guildId, messageId)) return null;
       const sent = await this.#sendCard(starChannel, message, stars, emoji);
       if (!sent) return null;
+      if (this.#wasDeleted(guildId, messageId)) {
+        await this.#deleteCard(guildId, sent.id, starChannel);
+        return null;
+      }
       this.repo.upsert({ ...base, starMessageId: sent.id, stars });
       return 'posted';
     }
@@ -254,7 +308,8 @@ class StarboardService {
       if (row.star_message_id) await this.#deleteCard(guildId, row.star_message_id, starChannel);
       return 'removed';
     }
-    if (row.stars !== stars && (await this.#editCard(starChannel, row.star_message_id, message, stars, emoji))) {
+    if (row.stars !== stars && (await this.#editCard(starChannel, row.star_message_id, message, stars, emoji)) === 'ok') {
+      if (this.#wasDeleted(guildId, messageId)) return null;
       this.repo.upsert({ ...base, starMessageId: row.star_message_id, stars });
       return 'updated';
     }
@@ -314,25 +369,31 @@ class StarboardService {
     }
   }
 
-  /** @returns {Promise<boolean>} faux si la carte n'existe plus (à recréer) */
+  /**
+   * @returns {Promise<'ok'|'gone'|'failed'>} `gone` : la carte n'existe plus (à recréer) ;
+   *   `failed` : erreur passagère ou permission (on ne republie surtout pas : doublon)
+   */
   async #editCard(starChannel, starMessageId, message, stars, emoji) {
     try {
       const { allowedMentions: _ignored, ...payload } = this.render(message, stars, emoji);
       await starChannel.messages.edit(starMessageId, payload);
-      return true;
+      return 'ok';
     } catch (err) {
-      if (!UNKNOWN.has(err?.code)) logger.debug(`Carte du starboard ${starMessageId} non modifiée :`, err?.message);
-      return false;
+      if (err?.code === UNKNOWN_MESSAGE) return 'gone';
+      logger.debug(`Carte du starboard ${starMessageId} non modifiée :`, err?.message);
+      return 'failed';
     }
   }
 
   async #deleteCard(guildId, starMessageId, starChannel = null) {
     const ch = starChannel ?? this.client.guilds?.cache?.get(guildId)?.channels?.cache?.get(this.cfg(guildId).channelId);
     if (!ch?.messages) return;
+    // Suppression par le bot : pas de « Message supprimé » dans les logs (carte hors cache).
+    this.client.services?.logging?.suppressMessage?.(starMessageId);
     await ch.messages.delete(starMessageId).catch((err) => {
       if (!UNKNOWN.has(err?.code)) logger.debug(`Carte du starboard ${starMessageId} non supprimée :`, err?.message);
     });
   }
 }
 
-module.exports = { StarboardService, DEBOUNCE_MS, MIN_EDIT_INTERVAL_MS };
+module.exports = { StarboardService, isLessVisible, DEBOUNCE_MS, MIN_EDIT_INTERVAL_MS };

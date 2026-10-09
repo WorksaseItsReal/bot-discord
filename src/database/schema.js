@@ -663,6 +663,25 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 25,
+    name: 'temp_roles_backoff_birthday_guards',
+    up: `
+      -- Rôles temporaires : prochaine tentative d'une ligne en échec (permission ou hiérarchie
+      -- perdue, erreur passagère). Elle ne monopolise plus l'étape du scheduler.
+      ALTER TABLE temp_roles ADD COLUMN next_attempt_at INTEGER;
+      -- Anniversaires : dernière modification du jour/mois (pas de fête le jour même).
+      ALTER TABLE birthdays ADD COLUMN date_changed_at INTEGER;
+      -- Anniversaire retiré moins de 300 jours après une fête : aucune nouvelle fête avant
+      -- « until ». Seule cette échéance est conservée (jamais la date d'anniversaire).
+      CREATE TABLE IF NOT EXISTS birthday_locks (
+        guild_id TEXT NOT NULL,
+        user_id  TEXT NOT NULL,
+        until    INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
+    `,
+  },
 ];
 
 module.exports = { migrations };

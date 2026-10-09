@@ -20,9 +20,20 @@ class TempRoleRepository {
     this.countGuildStmt = db.prepare('SELECT COUNT(*) AS n FROM temp_roles WHERE guild_id = ? AND active = 1');
     this.countMemberStmt = db.prepare('SELECT COUNT(*) AS n FROM temp_roles WHERE guild_id = ? AND user_id = ? AND active = 1');
     this.activeByMemberPageStmt = db.prepare('SELECT * FROM temp_roles WHERE guild_id = ? AND user_id = ? AND active = 1 ORDER BY expires_at ASC LIMIT ? OFFSET ?');
-    this.dueStmt = db.prepare('SELECT * FROM temp_roles WHERE active = 1 AND expires_at <= ? ORDER BY expires_at ASC LIMIT 200');
+    // Lignes échues, hors lignes en attente de réessai, au plus `perGuild` par serveur : un
+    // serveur où le bot a perdu « Gérer les rôles » ne bloque jamais les autres.
+    this.dueStmt = db.prepare(
+      `SELECT * FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY guild_id ORDER BY expires_at ASC, id ASC) AS rank_in_guild
+         FROM temp_roles
+         WHERE active = 1 AND expires_at <= @now AND (next_attempt_at IS NULL OR next_attempt_at <= @now)
+       ) WHERE rank_in_guild <= @perGuild ORDER BY expires_at ASC, id ASC LIMIT @limit`,
+    );
+    this.deferStmt = db.prepare('UPDATE temp_roles SET next_attempt_at = ? WHERE id = ? AND active = 1');
     this.closeStmt = db.prepare('UPDATE temp_roles SET active = 0, ended_at = ?, end_reason = ? WHERE id = ? AND active = 1');
-    this.setExpiryStmt = db.prepare('UPDATE temp_roles SET expires_at = ?, reason = COALESCE(?, reason), moderator_id = COALESCE(?, moderator_id) WHERE id = ? AND active = 1');
+    this.setExpiryStmt = db.prepare(
+      'UPDATE temp_roles SET expires_at = ?, reason = COALESCE(?, reason), moderator_id = COALESCE(?, moderator_id), next_attempt_at = NULL WHERE id = ? AND active = 1',
+    );
   }
 
   /**
@@ -69,8 +80,14 @@ class TempRoleRepository {
     return (userId ? this.countMemberStmt.get(guildId, userId) : this.countGuildStmt.get(guildId)).n;
   }
 
-  findDue(now = Date.now()) {
-    return this.dueStmt.all(now);
+  /** Lignes à traiter maintenant (plafond global et par serveur). */
+  findDue(now = Date.now(), { perGuild = 25, limit = 200 } = {}) {
+    return this.dueStmt.all({ now, perGuild, limit });
+  }
+
+  /** Reporte la prochaine tentative d'une ligne active. */
+  defer(id, until) {
+    return this.deferStmt.run(until, id).changes > 0;
   }
 
   /** Clôt une ligne active. @returns {boolean} true si elle l'était encore. */

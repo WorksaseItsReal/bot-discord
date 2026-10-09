@@ -75,6 +75,13 @@ const { EconomyService } = require('../services/EconomyService');
 const logger = createLogger('client');
 
 /**
+ * Échéance GLOBALE des arrêts de services (scheduler, niveaux, compteurs, communauté,
+ * vidages) lancés en parallèle : il reste ensuite de quoi fermer la passerelle et la base
+ * sous le garde-fou de 10 s (src/index.js, src/core/errors.js).
+ */
+const SHUTDOWN_DEADLINE_MS = 6_000;
+
+/**
  * Client Discord étendu : conteneur d'injection de dépendances pour la base,
  * les repositories et les services, plus le chargement des commandes/événements.
  */
@@ -94,6 +101,8 @@ class GadgetClient extends Client {
     this.stats = { commandsRun: 0, errors: 0 };
 
     this.database = new DatabaseManager(config.databasePath);
+    /** Échéance des arrêts de services (modifiable par les tests). */
+    this.shutdownDeadlineMs = SHUTDOWN_DEADLINE_MS;
     this.commandHandler = new CommandHandler();
     this.eventHandler = new EventHandler(this);
     this.componentHandler = new ComponentHandler();
@@ -248,16 +257,31 @@ class GadgetClient extends Client {
     return this.shutdownPromise;
   }
 
-  /** Appelle `method` sur plusieurs services EN PARALLÈLE, chaque appel borné à 3 s. */
-  async #settleAll(names, method, label) {
-    await Promise.all(names.map(async (name) => {
+  /**
+   * Lance toutes les tâches EN PARALLÈLE et attend qu'elles finissent, au plus `deadlineMs`
+   * au total (une tâche bloquée n'empêche jamais la suite de l'arrêt).
+   * @param {Array<[string, () => unknown]>} tasks [libellé, fonction]
+   * @returns {Promise<string[]>} libellés des tâches encore en cours à l'échéance
+   */
+  async #settleAll(tasks, deadlineMs) {
+    const pending = new Set(tasks.map(([label]) => label));
+    const runs = tasks.map(async ([label, fn]) => {
       try {
-        const run = this.services?.[name]?.[method]?.();
-        if (run) await Promise.race([run, new Promise((r) => setTimeout(r, 3000).unref?.())]);
+        await fn();
       } catch (err) {
-        logger.warn(`${label} ${name} :`, err?.message);
+        logger.warn(`${label} :`, err?.message);
+      } finally {
+        pending.delete(label);
       }
-    }));
+    });
+    let timer;
+    // Minuteur NON « unref » : il doit réveiller l'arrêt même si plus rien d'autre ne tourne.
+    const deadline = new Promise((r) => {
+      timer = setTimeout(r, deadlineMs);
+    });
+    await Promise.race([Promise.all(runs), deadline]);
+    clearTimeout(timer);
+    return [...pending];
   }
 
   async #doShutdown() {
@@ -273,30 +297,30 @@ class GadgetClient extends Client {
     } catch (err) {
       logger.warn('Arrêt de la sauvegarde automatique :', err?.message);
     }
-    try {
-      // Attendre le tick en cours : il écrit en base, qu'on ne doit pas fermer sous lui.
-      await this.services?.scheduler?.stop();
-    } catch (err) {
-      logger.warn('Arrêt du scheduler :', err?.message);
-    }
-    try {
-      await this.services?.levels?.stop();
-    } catch (err) {
-      logger.warn('Arrêt du suivi des niveaux :', err?.message);
-    }
-    try {
-      await this.services?.counters?.stop();
-    } catch (err) {
-      logger.warn('Arrêt des compteurs de statistiques :', err?.message);
-    }
-    // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
-    // Outils des membres (afk, highlights, snipe) : envois en attente annulés, réponses d'absence
-    // affichées supprimées. En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
-    await this.#settleAll(['autoResponses', 'sticky', 'starboard', 'afk', 'highlights', 'snipe'], 'stop', 'Arrêt du service');
-    // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
-    // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
-    // pour rester sous le garde-fou d'arrêt.
-    await this.#settleAll(['tickets', 'giveaways', 'projects'], 'flush', 'Vidage du service');
+    // Un SEUL passage parallèle, borné globalement (SHUTDOWN_DEADLINE_MS) : arrêt des boucles
+    // (scheduler et niveaux attendent leur tick en cours, qui écrit en base), des compteurs et
+    // de la communauté (minuteurs d'anti-rebond, écritures en cours), et vidage du travail
+    // différé (suppression des tickets fermés promise aux membres, cartes de giveaways et de
+    // projets). Avant, ces attentes s'enchaînaient (3 s + 3 s + 3 s + boucles non bornées) et
+    // le garde-fou de 10 s pouvait tuer le processus avant la fermeture de la base.
+    const s = this.services ?? {};
+    const tasks = [
+      ['Arrêt du scheduler', () => s.scheduler?.stop()],
+      ['Arrêt du suivi des niveaux', () => s.levels?.stop()],
+      ['Arrêt des compteurs de statistiques', () => s.counters?.stop()],
+      ['Arrêt des réponses automatiques', () => s.autoResponses?.stop()],
+      ['Arrêt des messages épinglés', () => s.sticky?.stop()],
+      ['Arrêt du starboard', () => s.starboard?.stop()],
+      // Outils des membres : envois en attente annulés, réponses d'absence affichées supprimées.
+      ['Arrêt des absences', () => s.afk?.stop()],
+      ['Arrêt des alertes de mots-clés', () => s.highlights?.stop()],
+      ['Arrêt du snipe', () => s.snipe?.stop()],
+      ['Vidage des tickets', () => s.tickets?.flush?.()],
+      ['Vidage des giveaways', () => s.giveaways?.flush?.()],
+      ['Vidage des projets', () => s.projects?.flush?.()],
+    ];
+    const late = await this.#settleAll(tasks, this.shutdownDeadlineMs);
+    if (late.length) logger.warn(`Arrêt : échéance de ${this.shutdownDeadlineMs} ms atteinte, toujours en cours : ${late.join(', ')}.`);
     try {
       await this.destroy();
     } catch (err) {

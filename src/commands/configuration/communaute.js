@@ -233,6 +233,7 @@ function starboardView(client, guild, notice) {
           notice ? `${notice}\n` : null,
           `Un message qui reçoit **${sb.threshold ?? 3}** réaction(s) ${sb.emoji || '⭐'} est reposté dans le salon du starboard, avec un compteur mis à jour en direct.`,
           subtext('Ne comptent pas : l\'auteur du message et les bots. Les messages d\'un salon NSFW ne sont repostés que si le starboard est lui aussi NSFW.'),
+          subtext('Confidentialité : les fils privés ne sont jamais repostés, ni les salons invisibles pour @everyone quand le starboard est visible de tous (salons du staff).'),
           warning ? `\n${warning}` : null,
         ],
         fields: [

@@ -12,11 +12,11 @@ const {
 } = require('discord.js');
 const { card, field, wide, ICONS, code, subtext, actionButton, deleteButton, labelButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { truncate } = require('../../utils/embeds');
-const { isValidDayMonth, daysInMonth, formatDayMonth, MONTHS } = require('../../utils/calendar');
+const { isValidDayMonth, daysInMonth, formatDayMonth, isBirthdayOn, MONTHS } = require('../../utils/calendar');
 const { requirePermission } = require('../../services/ModerationService');
 const { ANNOUNCE_CHANNEL_TYPES, channelIssue } = require('../../services/AnnouncementService');
 const { roleIssue } = require('../../services/TempRoleService');
-const { DEFAULT_MESSAGE, VARIABLES, shownAge, renderBirthday, unknownVariables, birthdayCard, upcoming } = require('../../services/BirthdayService');
+const { DEFAULT_MESSAGE, VARIABLES, MIN_DAYS_BETWEEN, shownAge, renderBirthday, unknownVariables, birthdayCard, upcoming } = require('../../services/BirthdayService');
 const { canonicalTimeZone } = require('./annonce');
 const { UserError } = require('../../core/errors');
 
@@ -205,9 +205,13 @@ module.exports = {
           throw new UserError('Cette date de naissance est dans le futur.');
         }
       }
+      const before = repo.get(guild.id, interaction.user.id);
+      const changed = !before || before.day !== day || before.month !== month;
       repo.set({ guildId: guild.id, userId: interaction.user.id, day, month, year, showAge: showAge && year != null });
       client.services.birthdays.invalidate(guild.id);
       const cfg = cfgOf(client, guild.id);
+      // Anti-abus (voir BirthdayService) : une date modifiée n'est pas fêtée le jour même.
+      const todayIsIt = changed && isBirthdayOn({ day, month }, client.services.birthdays.today(guild.id));
       return interaction.reply({
         embeds: [
           card({
@@ -219,6 +223,8 @@ module.exports = {
               `Votre anniversaire : **${formatDayMonth(day, month)}**.`,
               day === 29 && month === 2 ? subtext('Les années non bissextiles, il sera fêté le 28 février.') : null,
               cfg.enabled ? null : subtext('Les anniversaires ne sont pas encore fêtés sur ce serveur (un administrateur peut les activer).'),
+              todayIsIt ? subtext('Date enregistrée aujourd\'hui : elle ne sera pas fêtée aujourd\'hui.') : null,
+              changed && before?.last_celebrated ? subtext(`Un membre est fêté au plus une fois tous les ${MIN_DAYS_BETWEEN} jours.`) : null,
             ],
             fields: [
               field(ICONS.date, 'Date', formatDayMonth(day, month)),
@@ -235,8 +241,24 @@ module.exports = {
     if (sub === 'retirer') {
       const removed = repo.delete(guild.id, interaction.user.id);
       if (!removed) throw new UserError('Aucun anniversaire enregistré pour vous sur ce serveur.');
+      // Fêté il y a moins de 300 jours : la remettre ne refait pas fêter (seule l'échéance est gardée).
+      const locked = client.services.birthdays.afterRemoval(guild.id, removed);
+      await interaction.reply({
+        embeds: [card({
+          tone: 'neutral',
+          section: 'utility',
+          icon: ICONS.delete,
+          title: 'Anniversaire supprimé',
+          description: [
+            'Votre date d\'anniversaire a été effacée de ce serveur.',
+            locked ? subtext(`Vous avez été fêté il y a moins de ${MIN_DAYS_BETWEEN} jours : une nouvelle date ne sera pas fêtée avant ce délai (seule cette échéance est conservée, pas votre date).`) : null,
+          ],
+        })],
+        components: upcomingButton(interaction.user.id),
+        ephemeral: true,
+      });
       await client.services.birthdays.dropRole(guild, removed);
-      return interaction.reply({ embeds: [card({ tone: 'neutral', section: 'utility', icon: ICONS.delete, title: 'Anniversaire supprimé', description: 'Votre date d\'anniversaire a été effacée de ce serveur.' })], components: upcomingButton(interaction.user.id), ephemeral: true });
+      return undefined;
     }
 
     if (sub === 'liste') {

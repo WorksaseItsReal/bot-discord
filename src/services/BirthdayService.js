@@ -3,7 +3,7 @@
 const { escapeMarkdown } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { applyRoles } = require('../utils/memberRoles');
-const { card, ICONS } = require('../utils/ui');
+const { card, field, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { isValidTimeZone } = require('../utils/datetime');
 const { localParts, localDateKey, isLeapYear, isBirthdayOn, nextBirthday, DAY_MS } = require('../utils/calendar');
@@ -16,6 +16,12 @@ const logger = createLogger('birthdays');
 
 /** Durée pendant laquelle le rôle « anniversaire » est porté. */
 const ROLE_DURATION_MS = DAY_MS;
+/**
+ * Au plus une fête par période glissante de 300 jours : changer sa date chaque jour (ou la
+ * retirer puis la remettre) ne fait pas fêter un membre tous les jours. Les changements
+ * restent libres (faute de frappe) ; une date modifiée n'est jamais fêtée le jour même.
+ */
+const MIN_DAYS_BETWEEN = 300;
 const GONE_CODES = new Set([10007, 10013]);
 const UNKNOWN_ROLE = 10011;
 /** Message par défaut. La ligne contenant {age} n'est affichée qu'avec l'accord du membre. */
@@ -64,6 +70,31 @@ function dueToday(rows, local) {
   return rows.filter((r) => isBirthdayOn(r, local));
 }
 
+/** Jours entre deux dates locales « AAAA-MM-JJ » (b - a). Pur. */
+function daysBetweenKeys(a, b) {
+  const t = (key) => {
+    const [y, m, d] = String(key).split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((t(b) - t(a)) / DAY_MS);
+}
+
+/**
+ * Pourquoi ce membre n'est PAS fêté aujourd'hui malgré la date (anti-abus), ou null. Pur.
+ * @param {object} row ligne birthdays
+ * @param {string} dateKey date locale du jour (AAAA-MM-JJ)
+ * @param {string} timeZone fuseau du serveur
+ * @param {number} lockedUntil verrou (anniversaire retiré peu après une fête)
+ */
+function celebrationBlock(row, dateKey, timeZone, { now = Date.now(), lockedUntil = 0 } = {}) {
+  if (row.date_changed_at && localDateKey(row.date_changed_at, timeZone) === dateKey) return 'date enregistrée ou modifiée aujourd\'hui';
+  if (row.last_celebrated && row.last_celebrated !== dateKey && daysBetweenKeys(row.last_celebrated, dateKey) < MIN_DAYS_BETWEEN) {
+    return `déjà fêté il y a moins de ${MIN_DAYS_BETWEEN} jours`;
+  }
+  if (lockedUntil > now) return `anniversaire retiré puis remis moins de ${MIN_DAYS_BETWEEN} jours après une fête`;
+  return null;
+}
+
 /** Prochains anniversaires triés à partir d'une date locale. Pur. */
 function upcoming(rows, local) {
   return rows.map((row) => ({ row, next: nextBirthday(row, local) })).sort((a, b) => a.next.inDays - b.next.inDays || a.row.user_id.localeCompare(b.row.user_id));
@@ -106,6 +137,7 @@ class BirthdayService {
    * @param {{ isStopping?: () => boolean, now?: number }} [opts]
    */
   async processDue({ isStopping = () => false, now = Date.now() } = {}) {
+    this.repo.purgeLocks?.(now);
     await this.#removeExpiredRoles(isStopping, now);
     for (const guild of this.client.guilds.cache.values()) {
       if (isStopping()) return;
@@ -118,7 +150,7 @@ class BirthdayService {
       const dateKey = localDateKey(now, tz);
       if (this.done.get(guild.id) === dateKey) continue;
       try {
-        if (await this.#celebrateGuild(guild, cfg, local, dateKey, isStopping)) this.done.set(guild.id, dateKey);
+        if (await this.#celebrateGuild(guild, cfg, local, dateKey, isStopping, tz, now)) this.done.set(guild.id, dateKey);
       } catch (e) {
         logger.warn(`Anniversaires du serveur ${guild.id} en échec, réessai :`, e?.message ?? e);
       }
@@ -126,13 +158,18 @@ class BirthdayService {
   }
 
   /** @returns {Promise<boolean>} true si tout a été traité (sinon réessai au prochain tick) */
-  async #celebrateGuild(guild, cfg, local, dateKey, isStopping) {
+  async #celebrateGuild(guild, cfg, local, dateKey, isStopping, tz = this.timeZone(guild.id), now = Date.now()) {
     const rows = [...this.repo.onDate(guild.id, local.month, local.day)];
     if (local.month === 2 && local.day === 28 && !isLeapYear(local.year)) rows.push(...this.repo.onDate(guild.id, 2, 29));
     let complete = true;
     for (const row of dueToday(rows, local)) {
       if (isStopping()) return false;
       if (row.last_celebrated === dateKey) continue;
+      const block = celebrationBlock(row, dateKey, tz, { now, lockedUntil: this.repo.lockedUntil?.(guild.id, row.user_id) ?? 0 });
+      if (block) {
+        logger.debug(`Anniversaire de ${row.user_id} (serveur ${guild.id}) non fêté : ${block}.`);
+        continue;
+      }
       try {
         await this.#celebrate(guild, cfg, row, local, dateKey);
       } catch (e) {
@@ -156,7 +193,9 @@ class BirthdayService {
 
   async #celebrate(guild, cfg, row, local, dateKey) {
     const member = await this.#fetchMember(guild, row.user_id);
-    // Membre parti : ignoré (rien n'est mémorisé ; s'il revient le jour même, il sera fêté).
+    // Membre parti : ignoré, rien n'est réservé. Le serveur est toutefois marqué « traité »
+    // pour la journée : un retour le jour même n'est fêté qu'au prochain passage complet
+    // (redémarrage du bot ou modification de la configuration).
     if (!member || member.user?.bot) return;
     // Réservation AVANT l'envoi : jamais deux messages pour la même date.
     if (!this.repo.claim(guild.id, row.user_id, dateKey)) return;
@@ -218,14 +257,59 @@ class BirthdayService {
     }
     if (!guild.available) return;
     const role = row.role_id ? guild.roles.cache.get(row.role_id) : null;
-    const member = role ? await this.#fetchMember(guild, row.user_id) : null;
-    if (role && member?.roles.cache.has(role.id) && !botIssue(guild, role)) {
+    if (!role) {
+      this.repo.clearRole(row.guild_id, row.user_id, now);
+      return;
+    }
+    const late = now - row.role_until;
+    // Le bot ne peut plus gérer ce rôle (permission, hiérarchie) : on attend qu'on la lui
+    // rende, au plus 24 h, puis le staff est prévenu (le rôle ne reste jamais en silence).
+    const issue = botIssue(guild, role);
+    if (issue) {
+      if (late >= DAY_MS) await this.#abandonRole(guild, row, issue.replace(/\*/g, ''), now);
+      return;
+    }
+    const member = await this.#fetchMember(guild, row.user_id);
+    if (member?.roles.cache.has(role.id)) {
       let error = null;
       const { failed } = await applyRoles(member, { remove: [role.id] }, 'Fin de l\'anniversaire', (_id, e) => { error = e; });
-      // Erreur transitoire : réessai, au plus 24 h après l'échéance.
-      if (failed.length && !GONE_CODES.has(error?.code) && error?.code !== UNKNOWN_ROLE && now - row.role_until < DAY_MS) return;
+      if (failed.length && !GONE_CODES.has(error?.code) && error?.code !== UNKNOWN_ROLE) {
+        // Erreur transitoire : réessai, au plus 24 h après l'échéance, puis log.
+        if (late < DAY_MS) return;
+        await this.#abandonRole(guild, row, error?.message ?? 'erreur Discord', now);
+        return;
+      }
     }
     this.repo.clearRole(row.guild_id, row.user_id, now);
+  }
+
+  /** Rôle d'anniversaire impossible à retirer depuis 24 h : ligne effacée, staff prévenu. */
+  async #abandonRole(guild, row, why, now) {
+    if (!this.repo.clearRole(row.guild_id, row.user_id, now)) return;
+    logger.warn(`Rôle d'anniversaire non retiré (serveur ${guild.id}, membre ${row.user_id}) : ${why}`);
+    const embed = logCard({
+      category: 'members',
+      tone: 'warning',
+      icon: ICONS.warning,
+      title: 'Rôle d\'anniversaire non retiré',
+      description: `Je n'ai pas pu retirer le rôle <@&${row.role_id}> à <@${row.user_id}> depuis plus de 24 h (${truncate(why, 200)}). Retirez-le à la main.`,
+      id: row.user_id,
+      fields: [field(ICONS.user, 'Membre', `<@${row.user_id}>`), field(ICONS.role, 'Rôle', `<@&${row.role_id}>`)],
+    });
+    await this.client.services?.logging?.send(guild.id, 'members', embed, undefined, { event: 'memberRoles' }).catch(() => {});
+  }
+
+  /**
+   * Après `/anniversaire retirer` : un membre fêté il y a moins de 300 jours ne peut pas se
+   * faire fêter de nouveau en remettant une date. Seule l'échéance du verrou est conservée.
+   * @returns {boolean} un verrou a été posé
+   */
+  afterRemoval(guildId, row, now = Date.now()) {
+    if (!row?.last_celebrated) return false;
+    const today = localDateKey(now, this.timeZone(guildId));
+    if (daysBetweenKeys(row.last_celebrated, today) >= MIN_DAYS_BETWEEN) return false;
+    this.repo.lock(guildId, row.user_id, now + MIN_DAYS_BETWEEN * DAY_MS);
+    return true;
   }
 
   /** Retire le rôle d'anniversaire en cours (membre qui retire sa date). */
@@ -275,4 +359,7 @@ module.exports = {
   birthdayCard,
   dueToday,
   upcoming,
+  celebrationBlock,
+  daysBetweenKeys,
+  MIN_DAYS_BETWEEN,
 };

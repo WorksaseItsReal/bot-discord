@@ -14,6 +14,11 @@ const logger = createLogger('temproles');
 
 /** Au-delà de ce retard, un retrait impossible (hiérarchie, permission) est abandonné et signalé. */
 const MAX_LATE_MS = 86_400_000;
+/** Ligne en échec (permission, hiérarchie, erreur passagère) : prochaine tentative. */
+const RETRY_MS = 5 * 60_000;
+/** Plafonds par tick du scheduler : par serveur, et au total. */
+const PER_GUILD_PER_TICK = 25;
+const MAX_PER_TICK = 200;
 /** Membre ou utilisateur inconnu : parti du serveur. */
 const GONE_CODES = new Set([10007, 10013]);
 const UNKNOWN_ROLE = 10011;
@@ -147,14 +152,20 @@ class TempRoleService {
    * @param {{ isStopping?: () => boolean, now?: number }} [opts]
    */
   async processDue({ isStopping = () => false, now = Date.now() } = {}) {
-    for (const row of this.repo.findDue(now)) {
+    for (const row of this.repo.findDue(now, { perGuild: PER_GUILD_PER_TICK, limit: MAX_PER_TICK })) {
       if (isStopping()) return;
       try {
         await this.#expire(row);
       } catch (e) {
+        this.#retryLater(row);
         logger.warn(`Retrait du rôle temporaire #${row.id} (serveur ${row.guild_id}) en échec, réessai :`, e?.message ?? e);
       }
     }
+  }
+
+  /** Ligne en échec : réessayée plus tard, sans bloquer les suivantes (ni les autres serveurs). */
+  #retryLater(row) {
+    this.repo.defer(row.id, Date.now() + RETRY_MS);
   }
 
   /** Ligne relue en base : toujours active et échue ? */
@@ -181,11 +192,23 @@ class TempRoleService {
       if (this.client.isReady?.()) this.repo.close(row.id, 'guild_left');
       return;
     }
-    if (!guild.available) return;
+    if (!guild.available) {
+      this.#retryLater(row);
+      return;
+    }
     if (!this.#stillDue(row)) return;
     const role = guild.roles.cache.get(row.role_id);
     if (!role) {
       this.repo.close(row.id, 'role_deleted');
+      return;
+    }
+    // Capacité du bot vérifiée AVANT toute requête : aucun appel voué à l'échec, on attend
+    // qu'on rende la permission (réessai espacé), au plus 24 h.
+    const me = guild.members.me;
+    const late = Date.now() - row.expires_at;
+    if (me && (!me.permissions.has(PermissionFlagsBits.ManageRoles) || role.position >= me.roles.highest.position)) {
+      if (late > MAX_LATE_MS) await this.#abandon(guild, row, null, 'permission « Gérer les rôles » ou hiérarchie insuffisante');
+      else this.#retryLater(row);
       return;
     }
     const member = await this.#fetchMember(guild, row.user_id);
@@ -198,13 +221,6 @@ class TempRoleService {
       this.repo.close(row.id, 'expired');
       return;
     }
-    const me = guild.members.me;
-    const late = Date.now() - row.expires_at;
-    if (me && (!me.permissions.has(PermissionFlagsBits.ManageRoles) || role.position >= me.roles.highest.position)) {
-      // Aucun appel voué à l'échec : on attend qu'on rende la permission, au plus 24 h.
-      if (late > MAX_LATE_MS) await this.#abandon(guild, row, member, 'permission « Gérer les rôles » ou hiérarchie insuffisante');
-      return;
-    }
     // Relecture après le fetch : prolongé ou retiré entre-temps → on ne touche à rien.
     if (!this.#stillDue(row)) return;
     let error = null;
@@ -213,7 +229,10 @@ class TempRoleService {
       if (GONE_CODES.has(error?.code)) this.repo.close(row.id, 'left');
       else if (error?.code === UNKNOWN_ROLE) this.repo.close(row.id, 'role_deleted');
       else if (late > MAX_LATE_MS) await this.#abandon(guild, row, member, error?.message ?? 'erreur Discord');
-      else logger.debug(`Retrait du rôle temporaire #${row.id} échoué (réessai) :`, error?.message);
+      else {
+        this.#retryLater(row);
+        logger.debug(`Retrait du rôle temporaire #${row.id} échoué (réessai) :`, error?.message);
+      }
       return;
     }
     if (!this.repo.close(row.id, 'expired')) return;
@@ -229,6 +248,7 @@ class TempRoleService {
     });
   }
 
+  /** @param {import('discord.js').GuildMember|null} member null : membre non récupéré */
   async #abandon(guild, row, member, why) {
     if (!this.repo.close(row.id, 'failed')) return;
     logger.warn(`Rôle temporaire #${row.id} abandonné (serveur ${row.guild_id}) : ${why}`);
@@ -236,10 +256,21 @@ class TempRoleService {
       tone: 'warning',
       icon: ICONS.warning,
       title: 'Rôle temporaire non retiré',
-      description: `Je n'ai pas pu retirer le rôle <@&${row.role_id}> à ${member} depuis plus de 24 h (${truncate(why, 200)}). Retirez-le à la main.`,
-      user: member.user,
+      description: `Je n'ai pas pu retirer le rôle <@&${row.role_id}> à <@${row.user_id}> depuis plus de 24 h (${truncate(why, 200)}). Retirez-le à la main.`,
+      user: member?.user,
+      userId: row.user_id,
       row,
     });
+  }
+
+  /**
+   * Rôle retiré à la main (/role remove, bouton « Retirer ») : la ligne active est close,
+   * sinon le rôle serait rendu au membre s'il quittait puis revenait avant l'échéance.
+   * @returns {boolean} une ligne active a été close
+   */
+  closeManual(guildId, userId, roleId) {
+    const row = this.repo.activeFor(guildId, userId, roleId);
+    return row ? this.repo.close(row.id, 'removed') : false;
   }
 
   /**
@@ -300,4 +331,4 @@ class TempRoleService {
   }
 }
 
-module.exports = { TempRoleService, roleIssue, botIssue, MAX_LATE_MS };
+module.exports = { TempRoleService, roleIssue, botIssue, MAX_LATE_MS, RETRY_MS, PER_GUILD_PER_TICK };

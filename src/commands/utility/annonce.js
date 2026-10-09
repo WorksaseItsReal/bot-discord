@@ -34,7 +34,8 @@ function canonicalTimeZone(input) {
 
 /**
  * Échéance d'une saisie libre (parseWhen de /timestamp), plus « JJ/MM [heure] » sans
- * année : l'année en cours, ou la suivante si la date est passée. Pur.
+ * année : l'année en cours, ou la suivante si la date est passée (ou n'existe pas cette
+ * année : « 29/02 » une année non bissextile vise la suivante si elle l'est). Pur.
  * @returns {number|null}
  */
 function parseAnnounceDate(input, timeZone = DEFAULT_TZ, now = Date.now()) {
@@ -44,8 +45,7 @@ function parseAnnounceDate(input, timeZone = DEFAULT_TZ, now = Date.now()) {
     const { year } = localParts(now, timeZone);
     for (const y of [year, year + 1]) {
       const ts = parseWhen(`${m[1]}/${m[2]}/${y}${m[3] ? ` ${m[3]}` : ''}`, timeZone, now);
-      if (ts == null) return null;
-      if (ts > now) return ts;
+      if (ts != null && ts > now) return ts;
     }
     return null;
   }
@@ -248,14 +248,17 @@ module.exports = {
       const repo = client.repositories.announcements;
       if (repo.countScheduled(interaction.guildId) >= MAX_SCHEDULED) throw new UserError(`${MAX_SCHEDULED} annonces programmées au maximum.`);
       let runAt = draft.next_run;
+      let runs = 0;
       const now = Date.now();
       if (runAt <= now) {
-        // Aperçu resté ouvert au-delà de l'échéance : une répétition démarre à l'occurrence suivante.
+        // Aperçu resté ouvert au-delà de l'échéance : une répétition démarre à l'occurrence
+        // suivante, sans changer d'ancre (une annonce mensuelle du 31 reste au 31).
         const next = nextAfter(draft.anchor_at, draft.repeat, draft.time_zone, 0, now);
         if (!next) throw new UserError('L\'heure prévue est passée pendant l\'aperçu. Relancez `/annonce programmer`.');
         runAt = next.at;
+        runs = next.runs;
       }
-      if (!repo.schedule(interaction.guildId, draft.id, runAt)) throw new UserError('Ce brouillon a déjà été traité.');
+      if (!repo.schedule(interaction.guildId, draft.id, runAt, { anchorAt: draft.anchor_at, runs })) throw new UserError('Ce brouillon a déjà été traité.');
       const row = repo.get(interaction.guildId, draft.id);
       await interaction.update({
         embeds: [summaryCard(row, { title: 'Annonce programmée', tone: 'success', icon: ICONS.success }), announcementCard(row)],
@@ -282,6 +285,7 @@ module.exports = {
       guard(interaction);
       if (!/^\d{1,10}$/.test(id ?? '')) throw new UserError('Ce bouton est invalide.');
       const row = client.repositories.announcements.get(interaction.guildId, Number(id));
+      if (row?.status === 'sending') throw new UserError('Cette annonce est déjà en cours de publication.');
       if (!row || row.status !== 'scheduled') throw new UserError('Cette annonce n\'est plus programmée.');
       assertMentionAllowed(interaction.guild, row.role_id, interaction.memberPermissions);
       await interaction.deferUpdate();
