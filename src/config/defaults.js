@@ -299,7 +299,8 @@ const defaultGuildConfig = Object.freeze({
     work: { min: 20, max: 80, cooldownMinutes: 60 },
     transfers: { taxPercent: 0, confirmAbove: 1000 }, // taxe détruite ; confirmation au-delà (0 : jamais)
     limits: { maxBet: 1000, maxBalance: 10_000_000 },
-    games: { coinflip: true, slots: true, houseEdgePercent: 5, cooldownSeconds: 10 }, // espérance négative réglable
+    // Jeux d'argent (espérance négative réglable) : désactivés par défaut, à ouvrir dans /economie › Jeux.
+    games: { coinflip: false, slots: false, houseEdgePercent: 5, cooldownSeconds: 10 },
   },
   // Statistiques du serveur (/statistiques) et membres inactifs (/activite). Compteurs uniquement
   // (messages, minutes de vocal, arrivées/départs), jamais le contenu des messages. Les bots et les

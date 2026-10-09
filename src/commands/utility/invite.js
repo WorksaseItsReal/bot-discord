@@ -13,6 +13,8 @@ const INVITE_PERMISSIONS = [
   'ManageGuild', 'ViewChannel', 'SendMessages', 'SendMessagesInThreads', 'EmbedLinks', 'AttachFiles', 'ReadMessageHistory', 'AddReactions',
   'UseExternalEmojis', 'ManageMessages', 'ManageChannels', 'ManageRoles', 'ManageNicknames', 'ManageThreads', 'KickMembers',
   'BanMembers', 'ModerateMembers', 'MuteMembers', 'DeafenMembers', 'MoveMembers', 'ViewAuditLog', 'SendPolls', 'Connect',
+  // /emoji ajouter|supprimer|renommer ; fils automatiques ; entretiens de candidature en fil privé.
+  'ManageGuildExpressions', 'CreatePublicThreads', 'CreatePrivateThreads',
 ];
 
 /** Emoji du bouton « Inviter » (identique dans /invite, /botinfo et /help). */

@@ -12,6 +12,8 @@ const LABELS = {
   ManageNicknames: 'Gérer les pseudos',
   ManageWebhooks: 'Gérer les webhooks',
   ManageThreads: 'Gérer les fils',
+  CreatePublicThreads: 'Créer des fils publics',
+  CreatePrivateThreads: 'Créer des fils privés',
   ManageGuildExpressions: 'Gérer les expressions',
   ManageEvents: 'Gérer les événements',
   KickMembers: 'Expulser des membres',

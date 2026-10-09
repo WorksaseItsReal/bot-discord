@@ -24,7 +24,7 @@ const snapshot = (m) => JSON.parse(JSON.stringify(m));
 async function setup({ enabled = true } = {}) {
   const h = await createHarness();
   h.configureAll();
-  if (enabled) h.configure({ economy: { enabled: true, games: { cooldownSeconds: 0 } } });
+  if (enabled) h.configure({ economy: { enabled: true, games: { coinflip: true, slots: true, cooldownSeconds: 0 } } });
   return h;
 }
 

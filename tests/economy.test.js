@@ -62,6 +62,8 @@ test('migration 18 : tables, contraintes et index ; bloc de configuration dédi�
   assert.equal(d.enabled, false, 'désactivée par défaut');
   assert.equal(d.currency.emoji, '🪙');
   assert.ok(d.games.houseEdgePercent >= 1, 'espérance négative par défaut');
+  assert.equal(d.games.coinflip, false, 'jeux d\'argent désactivés par défaut');
+  assert.equal(d.games.slots, false, 'jeux d\'argent désactivés par défaut');
   assert.equal(EVENT_CATEGORY.economy, 'server');
   assert.ok(CATEGORIES.economy);
   assert.equal(eco.category, 'economy');
@@ -306,7 +308,7 @@ test('service : achats (jeton anti-double-clic, stock, solde, inventaire, rembou
 });
 
 test('service : jeux (mise plafonnée, délai, solde, désactivation, plafond de gain)', () => {
-  const { svc, config } = world({ games: { cooldownSeconds: 10 }, limits: { maxBet: 100, maxBalance: 1000 } });
+  const { svc, config } = world({ games: { coinflip: true, slots: true, cooldownSeconds: 10 }, limits: { maxBet: 100, maxBalance: 1000 } });
   svc.adminAdjust(GUILD, ALICE, 'give', 990, CAROL);
   assert.throws(() => svc.play(GUILD, ALICE, 'coinflip', 101), /Mise maximale/);
   assert.throws(() => svc.play(GUILD, ALICE, 'coinflip', 0), /entier positif/);
@@ -324,7 +326,7 @@ test('service : jeux (mise plafonnée, délai, solde, désactivation, plafond de
 });
 
 test('service : aucun solde négatif, historique cohérent sur 2 000 opérations aléatoires', () => {
-  const { svc, repo } = world({ games: { cooldownSeconds: 0 }, limits: { maxBet: 500, maxBalance: 5000 }, transfers: { taxPercent: 5 } });
+  const { svc, repo } = world({ games: { coinflip: true, slots: true, cooldownSeconds: 0 }, limits: { maxBet: 500, maxBalance: 5000 }, transfers: { taxPercent: 5 } });
   const users = [ALICE, BOB, CAROL];
   const item = svc.addItem(GUILD, { name: 'Objet', price: 40, stock: 30 });
   let rng = 42;

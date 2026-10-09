@@ -715,9 +715,11 @@ module.exports = {
     async toggle(interaction, client, [state]) {
       guard(interaction);
       const enabled = target(state);
+      // Interrupteur idempotent : un double clic ne journalise qu'une fois (seul un vrai changement est loggé).
+      const changed = Boolean(ecoOf(client, interaction.guildId).enabled) !== enabled;
       client.services.config.update(interaction.guildId, { economy: { enabled } });
       await interaction.update(homeView(client, interaction.guild, `${ICONS.success} Économie **${enabled ? 'activée' : 'désactivée'}**.`));
-      await logAdmin(client, interaction, { icon: '🪙', title: `Économie ${enabled ? 'activée' : 'désactivée'}`, tone: enabled ? 'success' : 'warning', description: enabled ? 'Les membres peuvent utiliser `/eco`.' : '`/eco` est désormais refusé aux membres (les soldes sont conservés).' });
+      if (changed) await logAdmin(client, interaction, { icon: '🪙', title: `Économie ${enabled ? 'activée' : 'désactivée'}`, tone: enabled ? 'success' : 'warning', description: enabled ? 'Les membres peuvent utiliser `/eco`.' : '`/eco` est désormais refusé aux membres (les soldes sont conservés).' });
     },
 
     // ------------------------------------------------------------ réglages
@@ -805,10 +807,11 @@ module.exports = {
       guard(interaction);
       if (game !== 'coinflip' && game !== 'slots') throw new UserError('Ce bouton est invalide.');
       const on = target(state);
+      const changed = Boolean(ecoOf(client, interaction.guildId).games?.[game]) !== on;
       client.services.config.update(interaction.guildId, { economy: { games: { [game]: on } } });
       const label = game === 'slots' ? 'Machine à sous' : 'Pile ou face';
       await interaction.update(rulesView(client, interaction.guild, `${ICONS.success} ${label} **${on ? 'activé' : 'désactivé'}**.`));
-      await logAdmin(client, interaction, { icon: '🎲', title: `${label} ${on ? 'activé' : 'désactivé'}`, description: `Jeu de l'économie ${on ? 'ouvert' : 'fermé'} aux membres.` });
+      if (changed) await logAdmin(client, interaction, { icon: '🎲', title: `${label} ${on ? 'activé' : 'désactivé'}`, description: `Jeu de l'économie ${on ? 'ouvert' : 'fermé'} aux membres.` });
     },
 
     // ------------------------------------------------------------ boutique
