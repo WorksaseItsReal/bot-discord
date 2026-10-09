@@ -682,7 +682,8 @@ async function randomWalk(h, { rng, steps, failures, seed, trace = null, onStep 
       }
       h.client.cooldowns.expiries.clear();
       const options = dropDeletedRefs(h, leaf.options, await buildOptions(h, key, leaf.options, overrides, { requiredOnly: rng.chance(0.3) }));
-      if (!options) return null;
+      // Les préparations des surcharges (arrivées…) peuvent déclencher l'antiraid, qui expulse.
+      if (!options || !h.fake.members.has(IDS.users[as])) return null;
       const channel = textChannel();
       const rec = await h.slash(name, wrapPath(leaf.path, options), { as, channel, label: `/${key} (${as})` });
       if (rng.chance(0.8)) remember(await confirmIfAsked(h, rec));
@@ -710,8 +711,10 @@ async function randomWalk(h, { rng, steps, failures, seed, trace = null, onStep 
       return `clic ×${count} ${a.customId} ${a.values?.join(',') ?? ''} (${as})${submitted}`;
     }],
     ['formulaire', 5, async () => {
-      if (!openModals.length) return null;
-      return submitHostile(rng.pick(openModals));
+      // Seul un membre encore présent peut soumettre le formulaire qu'il a ouvert.
+      const usable = openModals.filter((rec) => !rec.raw.member || h.fake.members.has(rec.raw.member.user.id));
+      if (!usable.length) return null;
+      return submitHostile(rng.pick(usable));
     }],
     ['arrivée', 5, async () => {
       const young = rng.chance(0.3);
