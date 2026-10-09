@@ -16,7 +16,8 @@
     "migrate": "node scripts/migrate.js",
     "backup:db": "node scripts/backup-db.js",
     "test": "node --test",
-    "test:e2e": "node --test tests/e2e/*.test.js"
+    "test:e2e": "node --test tests/e2e/*.test.js",
+    "test:chaos": "node tests/e2e/chaos.run.js"
   },
   "keywords": [
     "discord",

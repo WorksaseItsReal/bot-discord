@@ -336,8 +336,46 @@ function findSuspiciousText(body, path = '') {
   return out;
 }
 
+/**
+ * Mentions de masse EFFECTIVES d'un corps envoyé : un `content` contenant
+ * @everyone/@here ou une mention de rôle que `allowed_mentions` laisserait notifier.
+ * Sans `allowed_mentions`, Discord analyse tout le contenu (tout notifie).
+ * Une liste explicite `roles` est un choix délibéré du bot ; elle n'est signalée
+ * que pour un rôle de `forbiddenRoles` (rôle injecté dans une saisie utilisateur).
+ * @param {object} body
+ * @param {Set<string>} [forbiddenRoles]
+ * @returns {string[]}
+ */
+function findMassMentions(body, forbiddenRoles = new Set(), path = '') {
+  const out = [];
+  if (body == null || typeof body !== 'object') return out;
+  if (Array.isArray(body)) {
+    body.forEach((v, i) => out.push(...findMassMentions(v, forbiddenRoles, `${path}[${i}]`)));
+    return out;
+  }
+  if (typeof body.content === 'string' && body.content) {
+    const am = body.allowed_mentions;
+    const parse = am?.parse ?? [];
+    const at = path ? `${path}.content` : 'content';
+    const excerpt = body.content.slice(0, 80).replace(/\n/g, ' ');
+    if (/@(everyone|here)/.test(body.content) && (am == null || parse.includes('everyone'))) {
+      out.push(`${at} : @everyone/@here notifierait (allowed_mentions ${JSON.stringify(am ?? null)}) : ${excerpt}`);
+    }
+    for (const [, id] of body.content.matchAll(/<@&(\d{17,20})>/g)) {
+      const pinged = am == null || parse.includes('roles') || (am.roles ?? []).includes(id);
+      const deliberate = am != null && !parse.includes('roles') && (am.roles ?? []).includes(id) && !forbiddenRoles.has(id);
+      if (pinged && !deliberate) out.push(`${at} : le rôle ${id} serait notifié (allowed_mentions ${JSON.stringify(am ?? null)}) : ${excerpt}`);
+    }
+  }
+  for (const [k, v] of Object.entries(body)) {
+    if (k !== 'allowed_mentions' && v && typeof v === 'object') out.push(...findMassMentions(v, forbiddenRoles, path ? `${path}.${k}` : k));
+  }
+  return out;
+}
+
 module.exports = {
   MAX,
+  findMassMentions,
   findSuspiciousText,
   validateEmbeds,
   validateComponents,

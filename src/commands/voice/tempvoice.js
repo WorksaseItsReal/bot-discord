@@ -18,6 +18,9 @@ const { truncate } = require('../../utils/embeds');
 const tv = require('../../utils/tempVoice');
 const { UserError } = require('../../core/errors');
 
+/** Serveurs dont le salon créateur est en cours de création (double clic). */
+const creatingHub = new Set();
+
 /**
  * /tempvoice : configuration des vocaux temporaires (statut + tableau de bord éphémère)
  * ET panneau de contrôle posté dans le chat de chaque vocal temporaire.
@@ -487,15 +490,22 @@ module.exports = {
       const cfg = tvConfig(client, interaction.guildId);
       const guild = interaction.guild;
       const parent = cfg.categoryId && guild.channels.cache.get(cfg.categoryId)?.type === ChannelType.GuildCategory ? guild.channels.cache.get(cfg.categoryId) : null;
-      await interaction.deferUpdate();
-      const channel = await guild.channels.create({
-        name: '➕ Créer un vocal',
-        type: ChannelType.GuildVoice,
-        parent: parent?.id ?? null,
-        reason: `Salon créateur des vocaux temporaires (par ${interaction.user.tag ?? interaction.user.id})`,
-      });
-      client.services.config.update(interaction.guildId, { tempVoice: { hubChannelId: channel.id, enabled: true } });
-      await interaction.editReply(render(client, guild, 'home', `${ICONS.success} Salon créateur ${channel} créé : les vocaux temporaires sont **actifs**.`));
+      // Double clic : un seul salon créateur.
+      if (creatingHub.has(guild.id)) throw new UserError('Le salon créateur est déjà en cours de création.');
+      creatingHub.add(guild.id);
+      try {
+        await interaction.deferUpdate();
+        const channel = await guild.channels.create({
+          name: '➕ Créer un vocal',
+          type: ChannelType.GuildVoice,
+          parent: parent?.id ?? null,
+          reason: `Salon créateur des vocaux temporaires (par ${interaction.user.tag ?? interaction.user.id})`,
+        });
+        client.services.config.update(interaction.guildId, { tempVoice: { hubChannelId: channel.id, enabled: true } });
+        await interaction.editReply(render(client, guild, 'home', `${ICONS.success} Salon créateur ${channel} créé : les vocaux temporaires sont **actifs**.`));
+      } finally {
+        creatingHub.delete(guild.id);
+      }
     },
     /** cmd:tempvoice:name — formulaire du nom par défaut. */
     async name(interaction, client) {

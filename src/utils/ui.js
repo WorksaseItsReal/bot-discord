@@ -176,7 +176,7 @@ function card(opts = {}) {
   if (desc) embed.setDescription(truncate(desc, LIMITS.description));
   const clean = fields.filter(Boolean).map((f) => ({
     name: truncate(f.name || '​', LIMITS.fieldName) || '​',
-    value: truncate(f.value == null || f.value === '' ? EMPTY : String(f.value), LIMITS.fieldValue),
+    value: truncate(f.value == null || !String(f.value).trim() ? EMPTY : String(f.value), LIMITS.fieldValue),
     inline: Boolean(f.inline),
   }));
   if (clean.length) embed.addFields(align ? alignInline(clean) : clean.slice(0, LIMITS.fields));
@@ -202,7 +202,7 @@ function fitEmbeds(embeds) {
 
 /** Champ « icône + libellé ». Inline par défaut (grille de 3). */
 function field(icon, label, value, inline = true) {
-  return { name: icon ? `${icon} ${label}` : label, value: value == null || value === '' ? EMPTY : String(value), inline };
+  return { name: icon ? `${icon} ${label}` : label, value: value == null || !String(value).trim() ? EMPTY : String(value), inline };
 }
 
 /** Champ pleine largeur. */

@@ -84,6 +84,8 @@ function analyze(guild, cfg) {
   if (cfg.tempVoice?.enabled && cfg.tempVoice.hubChannelId) {
     modules.checks.push(channelCheck(guild, me, cfg.tempVoice.hubChannelId, 'Salon « Créer un vocal »', '/tempvoice', { perms: HUB_PERMS, need: 'voir, me connecter et déplacer des membres' }));
   }
+  // Catégorie supprimée : les vocaux se créent alors à côté du salon créateur, sans prévenir.
+  if (cfg.tempVoice?.enabled && cfg.tempVoice.categoryId) modules.checks.push(channelCheck(guild, me, cfg.tempVoice.categoryId, 'Catégorie des vocaux temporaires', '/tempvoice'));
   if (cfg.antiraid?.enabled && !cfg.antiraid.alertChannel) {
     modules.checks.push({ level: 'warn', text: 'AntiRaid actif sans salon d\'alerte', tip: 'Définissez un salon d\'alerte : `/antiraid` › **Alertes**.' });
   }
@@ -126,6 +128,7 @@ function roleRefs(cfg) {
   for (const id of support) out.push([id, 'Rôle staff des tickets', '/tickets', false]);
   if (cfg.logs?.staffRoleId) out.push([cfg.logs.staffRoleId, 'Rôle staff des logs', '/logs', false]);
   if (cfg.modmail?.staffRoleId) out.push([cfg.modmail.staffRoleId, 'Rôle staff du modmail', '/modmail', false]);
+  if (cfg.projects?.managerRoleId) out.push([cfg.projects.managerRoleId, 'Rôle gestionnaire des projets', '/projet config', false]);
   return out;
 }
 
