@@ -580,7 +580,8 @@ function assertFree(client, interaction, type, scope, ids, label = null) {
  */
 async function launch(interaction, client, { setup, ...opts }, extra = {}) {
   const service = games(client);
-  const game = service.create({ ...opts, guildId: interaction.guildId, channelId: interaction.channelId, ownerId: interaction.user.id, view: render });
+  const parentId = interaction.channel?.isThread?.() ? interaction.channel.parentId : null;
+  const game = service.create({ ...opts, guildId: interaction.guildId, channelId: interaction.channelId, parentId, ownerId: interaction.user.id, view: render });
   try {
     setup?.(game);
     service.touch(game, interaction);

@@ -7,6 +7,7 @@ const { discordTimestamp } = require('../../utils/time');
 const { logCard } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
+const { canRead, needsThreadCheck } = require('../../utils/channelAccess');
 
 /**
  * /snipe supprime [salon] · /snipe modifie [salon] (« Gérer les messages ») : dernier message
@@ -93,9 +94,15 @@ module.exports = {
     const picked = interaction.options.getChannel('salon');
     const channel = picked ? interaction.guild.channels.cache.get(picked.id) ?? null : interaction.channel;
     if (!channel?.guild || channel.guild.id !== interaction.guildId) throw new UserError('Choisissez un salon de ce serveur.');
-    // Seulement un salon que le modérateur peut lire et modérer lui-même.
-    const perms = channel.permissionsFor?.(interaction.member);
+    // Seulement un salon que le modérateur peut lire et modérer lui-même ; un fil privé exige en
+    // plus d'en être membre (vérifié auprès de Discord) ou « Gérer les fils ».
+    const member = interaction.member;
+    const perms = channel.permissionsFor?.(member);
     if (!perms?.has(NEEDED)) throw new UserError(`Il vous faut **Voir le salon**, **Voir les anciens messages** et **Gérer les messages** dans ${channel}.`);
+    if (needsThreadCheck(channel, member, [PermissionFlagsBits.ManageMessages])) await interaction.deferReply({ ephemeral: true });
+    if (!(await canRead(channel, member, [PermissionFlagsBits.ManageMessages]))) {
+      throw new UserError(`${channel} est un fil privé : il faut en être membre ou avoir **Gérer les fils** pour le consulter.`);
+    }
 
     const entry = snipe.get(channel.id, kind);
     if (!entry) {

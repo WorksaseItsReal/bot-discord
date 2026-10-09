@@ -58,4 +58,11 @@ module.exports = [
       client.services.snipe?.clearChannel(channel?.id);
     },
   },
+  {
+    // Fil supprimé : threadDelete (jamais channelDelete).
+    name: 'threadDelete',
+    execute(client, thread) {
+      client.services.snipe?.clearChannel(thread?.id);
+    },
+  },
 ];

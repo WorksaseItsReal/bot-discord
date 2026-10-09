@@ -1,10 +1,10 @@
 'use strict';
 
-const { PermissionFlagsBits, ChannelType } = require('discord.js');
 const { card, field, ICONS, userLine, subtext, linkButton, buttonRows, fitEmbeds } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { buildIndex, findMatches, keywordKey, quoteExcerpt, MIN_KEYWORD, MAX_KEYWORD, MAX_KEYWORDS } = require('../utils/highlights');
 const { isNsfwChannel } = require('../utils/community');
+const { canRead, canReadCached } = require('../utils/channelAccess');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
 
@@ -31,7 +31,6 @@ const PRUNE_AT = 5_000;
 /** paused : 0 actives · 1 en pause (membre) · 2 en pause automatique (MP fermés). */
 const PAUSE = Object.freeze({ active: 0, manual: 1, auto: 2 });
 const SECTION = { emoji: '🔔', label: 'Alertes' };
-const READ_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
 
 /**
  * Valide un mot-clé saisi : 3 à 40 caractères, au moins 3 lettres ou chiffres. Pur.
@@ -47,15 +46,8 @@ function parseKeyword(raw) {
   return { display, key };
 }
 
-/** Le membre peut-il lire ce salon (fils : salon parent ; fil privé : membre du fil) ? */
-function canSee(channel, member) {
-  const perms = channel?.permissionsFor?.(member);
-  if (!perms?.has(READ_PERMS)) return false;
-  if (channel.type === ChannelType.PrivateThread) {
-    return Boolean(channel.members?.cache?.has?.(member.id)) || perms.has(PermissionFlagsBits.ManageThreads);
-  }
-  return true;
-}
+/** Le membre peut-il lire ce salon d'après le cache (fils : salon parent ; fil privé : membre du fil) ? */
+const canSee = (channel, member) => canReadCached(channel, member);
 
 /** Salon (ou son parent / sa catégorie) dans un ensemble d'identifiants ? */
 const inChannelSet = (channel, set) => Boolean(set.size) && [channel?.id, channel?.parentId, channel?.parent?.parentId].some((id) => id && set.has(id));
@@ -290,7 +282,8 @@ class HighlightService {
         fetches += 1;
         member = await guild.members.fetch(userId).catch(() => null);
       }
-      if (!member || member.user?.bot || !canSee(channel, member)) continue;
+      // Fil privé : appartenance vérifiée auprès de Discord si le cache des membres du fil l'ignore.
+      if (!member || member.user?.bot || !(await canRead(channel, member))) continue;
       this.cooldowns.set(coolKey, now + this.cooldownMs);
       if (await this.notify(member, message, words)) sent += 1;
     }

@@ -63,7 +63,7 @@ class GameService {
    * @param {{ type: string, guildId: string, channelId: string, ownerId: string, players?: string[],
    *   locks?: string[], state?: object, status?: string, view?: (game: object) => object }} opts
    */
-  create({ type, guildId, channelId, ownerId, players = [ownerId], locks = [], state = {}, status = 'playing', view = null }) {
+  create({ type, guildId, channelId, parentId = null, ownerId, players = [ownerId], locks = [], state = {}, status = 'playing', view = null }) {
     if (this.stopping) throw new UserError('Le bot redémarre : réessayez dans un instant.');
     for (const key of locks) {
       if (this.holder(key)) throw new UserError('Une partie est déjà en cours : terminez-la d\'abord.');
@@ -76,6 +76,7 @@ class GameService {
       type,
       guildId,
       channelId,
+      parentId,
       ownerId,
       players,
       locks: [...locks],
@@ -237,10 +238,11 @@ class GameService {
     return game ? this.end(game) : false;
   }
 
-  /** Salon supprimé : ses parties s'arrêtent. @returns {number} */
+  /** Salon ou fil supprimé : ses parties (et celles de ses fils) s'arrêtent. @returns {number} */
   endByChannel(channelId) {
+    if (!channelId) return 0;
     let n = 0;
-    for (const game of [...this.games.values()]) if (game.channelId === channelId && this.end(game)) n += 1;
+    for (const game of [...this.games.values()]) if ((game.channelId === channelId || game.parentId === channelId) && this.end(game)) n += 1;
     return n;
   }
 

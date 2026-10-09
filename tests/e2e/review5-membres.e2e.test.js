@@ -76,3 +76,87 @@ test('/afk et filtre des pseudos : le préfixe [AFK] n\'est jamais pris pour un 
     await h.close();
   }
 });
+
+/** DM reçus par un membre (canal MP créé par le bot). */
+function dmsOf(h, userId) {
+  const dm = [...h.fake.dms.values()].find((d) => d.recipients[0].id === userId);
+  if (!dm) return [];
+  return [...h.fake.messages.values()].filter((m) => m.channel_id === dm.id && m.author.id === h.client.user.id);
+}
+
+test('Fil privé : /snipe exige d\'en être membre (ou « Gérer les fils ») ; les alertes vérifient l\'appartenance auprès de Discord', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  Object.assign(h.client.services.highlights, { delayMs: 5 });
+  try {
+    // « Nettoyeur » : Gérer les messages, SANS Gérer les fils.
+    const role = await h.guild.roles.create({ name: 'Nettoyeur', permissions: [P.ManageMessages] });
+    const cleaner = h.addUser('Nettoyeur');
+    await h.memberJoin(cleaner);
+    await h.guild.members.cache.get(cleaner.id).roles.add(role.id);
+    await h.settle();
+    const thread = await h.guild.channels.cache.get(IDS.channels.general).threads.create({ name: 'admins-prive', type: 12, invitable: false });
+    await h.settle();
+    const secret = await h.userMessage({ as: 'admin', channel: thread.id, content: 'Mot de passe du panneau : hunter2' });
+    await h.deleteUserMessage(secret.id);
+
+    const snipe = (as) => h.slash('snipe', sub('supprime', [opt('salon', 7, thread.id)]), { as });
+    const denied = await snipe(cleaner.id);
+    assert.ok(h.isError(denied), 'contenu d\'un fil privé montré à un non-membre');
+    assert.doesNotMatch(h.replyText(denied), /hunter2/);
+    assert.match(h.replyText(denied), /fil privé/);
+    // Membre du fil (inconnu du cache de discord.js) : vérifié auprès de Discord, accepté.
+    h.fake.threadMembers.get(thread.id).add(cleaner.id);
+    const allowed = await snipe(cleaner.id);
+    assert.ok(!h.isError(allowed), h.replyText(allowed));
+    assert.match(h.replyText(allowed), /hunter2/);
+    // « Gérer les fils » (modérateur) : accepté sans en être membre.
+    assert.match(h.replyText(await snipe('mod')), /hunter2/);
+
+    // Alertes : membre du fil absent du cache → alerté ; non-membre → jamais.
+    h.client.services.highlights.addWord(h.guild.id, IDS.users.target, 'gadget');
+    h.client.services.highlights.addWord(h.guild.id, IDS.users.member, 'gadget');
+    h.fake.threadMembers.get(thread.id).add(IDS.users.target);
+    assert.equal(thread.members.cache.has(IDS.users.target), false);
+    await h.userMessage({ as: 'admin', channel: thread.id, content: 'réunion gadget à 18 h' });
+    await sleep(30);
+    await h.settle();
+    assert.equal(dmsOf(h, IDS.users.target).length, 1, 'membre du fil privé non alerté (cache incomplet)');
+    assert.equal(dmsOf(h, IDS.users.member).length, 0, 'non-membre alerté du contenu d\'un fil privé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('Fil supprimé (THREAD_DELETE) : la partie s\'arrête, les verrous sont libérés, le snipe du fil est oublié', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const thread = h.client.channels.cache.get(IDS.channels.thread);
+    const rec = await h.slash('jeu', sub('devine'), { as: 'member', channel: thread.id });
+    assert.match(h.replyText(rec), /Devine/);
+    assert.equal(h.client.services.games.count(), 1);
+    const msg = await h.userMessage({ as: 'target', channel: thread.id, content: 'message à oublier' });
+    await h.deleteUserMessage(msg.id);
+    assert.ok(h.client.services.snipe.get(thread.id, 'deleted'));
+    h.fake.deleteChannel(thread.id);
+    await h.settle();
+    assert.equal(h.client.services.games.count(), 0, 'partie toujours en cours dans un fil supprimé');
+    assert.equal(h.client.services.snipe.get(thread.id, 'deleted'), null);
+    const again = await h.slash('jeu', sub('devine'), { as: 'member', channel: 'general' });
+    assert.ok(!h.isError(again), h.replyText(again));
+
+    // Salon parent supprimé : les parties de ses fils s'arrêtent aussi.
+    const t2 = await h.guild.channels.cache.get(IDS.channels.staff).threads.create({ name: 'fil-staff', type: 11 });
+    await h.settle();
+    await h.slash('jeu', sub('devine'), { as: 'mod', channel: t2.id });
+    assert.equal(h.client.services.games.count(), 2);
+    h.fake.deleteChannel(IDS.channels.staff);
+    await h.settle();
+    assert.equal(h.client.services.games.count(), 1);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

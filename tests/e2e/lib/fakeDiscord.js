@@ -29,6 +29,8 @@ const scenario = new AsyncLocalStorage();
 const EPHEMERAL = 1 << 6;
 const LOADING = 1 << 7;
 const MAX_TIMEOUT_MS = 28 * DAY;
+/** Types de fils (annonce, public, privé) : leur suppression produit THREAD_DELETE. */
+const THREAD_TYPES = [10, 11, 12];
 
 /** Copie JSON (applique les toJSON des builders, comme l'envoi réel). */
 function json(value) {
@@ -81,6 +83,8 @@ class FakeDiscord {
     this.guild = guildRest;
     this.users = new Map(Object.values(users).map((u) => [u.id, json(u)]));
     this.channels = new Map([...channels, ...(guild.threads ?? [])].map((c) => [c.id, { ...c, guild_id: guild.id }]));
+    /** Membres des fils : threadId → Set(userId) (le créateur en fait partie). */
+    this.threadMembers = new Map((guild.threads ?? []).map((t) => [t.id, new Set([t.owner_id].filter(Boolean))]));
     this.roles = new Map(roles.map((r) => [r.id, r]));
     this.members = new Map(members.map((m) => [m.user.id, m]));
     this.messages = new Map();
@@ -648,9 +652,21 @@ class FakeDiscord {
     r('POST', '/channels/:channel/invites', (p) => ({ code: `test${Date.now().toString(36)}`, type: 0, channel: this.channels.get(p.channel), guild: { id: this.guildId, name: this.guild.name }, inviter: this.botUser, max_age: 0, max_uses: 0, uses: 0, temporary: false, created_at: new Date().toISOString() }));
     r('POST', '/channels/:channel/threads', (p, call) => this.#createThread(p.channel, null, call));
     r('POST', '/channels/:channel/messages/:message/threads', (p, call) => this.#createThread(p.channel, p.message, call));
-    r('PUT', '/channels/:channel/thread-members/:user', () => undefined);
-    r('DELETE', '/channels/:channel/thread-members/:user', () => undefined);
-    r('GET', '/channels/:channel/thread-members', () => []);
+    // Membres des fils (un fil privé n'est lisible que par eux et par « Gérer les fils »).
+    const threadMember = (threadId, userId) => ({ id: threadId, user_id: userId, join_timestamp: new Date().toISOString(), flags: 0 });
+    const memberId = (user) => (user === '@me' ? this.botUser.id : user);
+    r('PUT', '/channels/:channel/thread-members/:user', (p) => {
+      this.#threadMembersOf(p.channel).add(memberId(p.user));
+    });
+    r('DELETE', '/channels/:channel/thread-members/:user', (p) => {
+      this.#threadMembersOf(p.channel).delete(memberId(p.user));
+    });
+    r('GET', '/channels/:channel/thread-members', (p) => [...this.#threadMembersOf(p.channel)].map((u) => threadMember(p.channel, u)));
+    r('GET', '/channels/:channel/thread-members/:user', (p, call) => {
+      const userId = memberId(p.user);
+      if (!this.#threadMembersOf(p.channel).has(userId)) throw this.#error(call, 404, 10007, 'Unknown Member');
+      return threadMember(p.channel, userId);
+    });
     r('GET', '/channels/:channel/threads/archived/public', () => ({ threads: [], members: [], has_more: false }));
     r('GET', '/channels/:channel/threads/archived/private', () => ({ threads: [], members: [], has_more: false }));
 
@@ -1114,6 +1130,13 @@ class FakeDiscord {
     if (!(msg.flags & EPHEMERAL)) this.dispatch('MESSAGE_DELETE', { id: msg.id, channel_id: msg.channel_id, ...(msg.guild_id ? { guild_id: msg.guild_id } : {}) });
   }
 
+  /** Membres d'un fil (créés à la demande). */
+  #threadMembersOf(threadId) {
+    let set = this.threadMembers.get(threadId);
+    if (!set) this.threadMembers.set(threadId, (set = new Set()));
+    return set;
+  }
+
   #createThread(channelId, messageId, call) {
     const parent = this.channel(channelId, call);
     const b = call.body ?? {};
@@ -1142,6 +1165,7 @@ class FakeDiscord {
       member: { id: messageId ?? undefined, user_id: this.botUser.id, join_timestamp: new Date().toISOString(), flags: 0 },
     };
     this.channels.set(thread.id, thread);
+    this.threadMembers.set(thread.id, new Set([this.botUser.id]));
     if (parent.type === 15 && b.message) {
       const first = this.buildMessage({ channelId: thread.id, body: b.message, files: call.files });
       first.id = thread.id;
@@ -1166,16 +1190,27 @@ class FakeDiscord {
 
   /**
    * Supprime un salon comme Discord : les salons d'une catégorie supprimée en sortent
-   * (parent_id null, CHANNEL_UPDATE), puis CHANNEL_DELETE. `now` : émission immédiate
-   * (suppression faite par un humain) ou différée (réponse à une requête du bot).
+   * (parent_id null, CHANNEL_UPDATE), puis CHANNEL_DELETE. Un fil produit THREAD_DELETE (jamais
+   * CHANNEL_DELETE) ; les fils d'un salon supprimé disparaissent avec lui, sans événement.
+   * `now` : émission immédiate (suppression faite par un humain) ou différée (réponse à une requête du bot).
    */
   deleteChannel(id, { now = true } = {}) {
     const ch = this.channels.get(id);
     if (!ch) return null;
     this.channels.delete(id);
     const emit = (t, d) => (now ? this.dispatchNow(t, d) : this.dispatch(t, d));
-    for (const child of this.channels.values()) {
+    if (THREAD_TYPES.includes(ch.type)) {
+      this.threadMembers.delete(id);
+      emit('THREAD_DELETE', { id: ch.id, guild_id: this.guildId, parent_id: ch.parent_id, type: ch.type });
+      return ch;
+    }
+    for (const child of [...this.channels.values()]) {
       if (child.parent_id !== id) continue;
+      if (THREAD_TYPES.includes(child.type)) {
+        this.channels.delete(child.id);
+        this.threadMembers.delete(child.id);
+        continue;
+      }
       child.parent_id = null;
       emit('CHANNEL_UPDATE', child);
     }
