@@ -405,6 +405,40 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_role_menus_message ON role_menus (message_id);
     `,
   },
+  {
+    id: 15,
+    name: 'community_starboard_sticky',
+    up: `
+      -- Starboard : un message source ↔ sa carte dans le salon starboard.
+      CREATE TABLE IF NOT EXISTS starboard (
+        guild_id        TEXT NOT NULL,
+        message_id      TEXT NOT NULL,              -- message d'origine
+        channel_id      TEXT NOT NULL,              -- salon du message d'origine
+        author_id       TEXT,
+        star_message_id TEXT,                       -- carte publiée dans le salon starboard
+        stars           INTEGER NOT NULL DEFAULT 0, -- dernier compte publié
+        updated_at      INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, message_id)
+      );
+      -- Suppression d'une carte du starboard : retrouver sa ligne.
+      CREATE INDEX IF NOT EXISTS idx_starboard_star_message ON starboard (star_message_id);
+
+      -- Messages épinglés automatiquement (sticky) : un par salon.
+      CREATE TABLE IF NOT EXISTS sticky_messages (
+        guild_id        TEXT NOT NULL,
+        channel_id      TEXT NOT NULL,
+        title           TEXT,
+        content         TEXT NOT NULL,
+        threshold       INTEGER NOT NULL DEFAULT 3, -- réaffiché après N messages (ou un délai)
+        last_message_id TEXT,                       -- dernier message sticky publié
+        author_id       TEXT,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL,
+        PRIMARY KEY (channel_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_sticky_messages_guild ON sticky_messages (guild_id);
+    `,
+  },
 ];
 
 module.exports = { migrations };

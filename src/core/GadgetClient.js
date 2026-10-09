@@ -30,6 +30,8 @@ const { AutomodEventRepository } = require('../database/repositories/AutomodEven
 const { AutomodQuarantineRepository } = require('../database/repositories/AutomodQuarantineRepository');
 const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { LevelRepository } = require('../database/repositories/LevelRepository');
+const { StarboardRepository } = require('../database/repositories/StarboardRepository');
+const { StickyRepository } = require('../database/repositories/StickyRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -48,6 +50,9 @@ const { ProjectService } = require('../services/ProjectService');
 const { LogSetupService } = require('../services/LogSetupService');
 const { WelcomeService } = require('../services/WelcomeService');
 const { LevelService } = require('../services/LevelService');
+const { StarboardService } = require('../services/StarboardService');
+const { StickyService } = require('../services/StickyService');
+const { AutoResponderService } = require('../services/AutoResponderService');
 
 const logger = createLogger('client');
 
@@ -103,6 +108,8 @@ class GadgetClient extends Client {
       automodQuarantines: new AutomodQuarantineRepository(db),
       modNotes: new ModNoteRepository(db),
       levels: new LevelRepository(db),
+      starboard: new StarboardRepository(db),
+      sticky: new StickyRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -131,6 +138,10 @@ class GadgetClient extends Client {
       logSetup: new LogSetupService({ config: configService }),
       welcome: new WelcomeService({ client: this, config: configService, logging }),
       levels: new LevelService({ client: this, levels: this.repositories.levels, config: configService }),
+      // Communauté : starboard, messages épinglés automatiquement, réponses automatiques.
+      starboard: new StarboardService({ client: this, starboard: this.repositories.starboard, config: configService }),
+      sticky: new StickyService({ client: this, sticky: this.repositories.sticky }),
+      autoResponses: new AutoResponderService({ client: this, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -220,6 +231,15 @@ class GadgetClient extends Client {
       await this.services?.levels?.stop();
     } catch (err) {
       logger.warn('Arrêt du suivi des niveaux :', err?.message);
+    }
+    // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
+    for (const name of ['autoResponses', 'sticky', 'starboard']) {
+      try {
+        const stop = this.services?.[name]?.stop?.();
+        if (stop) await Promise.race([stop, new Promise((r) => setTimeout(r, 3000).unref?.())]);
+      } catch (err) {
+        logger.warn(`Arrêt du service ${name} :`, err?.message);
+      }
     }
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
