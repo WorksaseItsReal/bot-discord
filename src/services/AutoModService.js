@@ -15,7 +15,6 @@ const { fingerprint } = require('../utils/automod/normalize');
 const shape = require('../utils/automod/detectors');
 const { nameViolation, nameSkeleton, replacementName, DEFAULT_NAME_TEMPLATE, NAME_CHECKS } = require('../utils/automod/names');
 const { fetchAuditEntry } = require('../utils/audit');
-const { AFK_PREFIX } = require('./AfkService');
 
 const logger = createLogger('automod');
 
@@ -226,9 +225,7 @@ class AutoModService {
    */
   #withoutAfkPrefix(member, name) {
     const afk = this.logging?.client?.services?.afk;
-    if (!member.nickname || !afk?.afkNickOf) return name;
-    const afkNick = afk.afkNickOf(member.guild.id, member.id);
-    return afkNick && afkNick === member.nickname && name.startsWith(AFK_PREFIX) ? name.slice(AFK_PREFIX.length) : name;
+    return member.nickname && afk?.nameWithoutPrefix ? afk.nameWithoutPrefix(member, name) : name;
   }
 
   /** Squelettes des noms du staff (hors `exceptId`), mis en cache 5 minutes. */

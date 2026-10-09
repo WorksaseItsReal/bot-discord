@@ -5,6 +5,7 @@ const { card, subtext, fitEmbeds } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
 const { findBadWord } = require('../utils/automod/words');
+const { extractLinks, extractInvites } = require('../utils/automod/links');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
 
@@ -46,19 +47,37 @@ function afkNickname(base, max = NICK_MAX) {
 
 /**
  * Raison d'absence : une ligne, 150 caractères au plus, sans @everyone/@here ni mention
- * de rôle, et sans mot interdit de l'AutoMod (si l'AutoMod et ce filtre sont actifs). Pur.
+ * de rôle, et — si l'AutoMod et le filtre correspondant sont actifs — sans mot interdit, lien
+ * non autorisé ni invitation vers un autre serveur (le bot l'affiche : elle ne doit pas
+ * contourner les filtres qu'un message ordinaire subit). Pur.
  * @param {string|null} raw
  * @param {object} [automod] configuration `automod` du serveur
+ * @param {import('discord.js').Guild|null} [guild] serveur (invitation personnalisée tolérée)
  * @returns {string|null}
  */
-function parseReason(raw, automod = {}) {
+function parseReason(raw, automod = {}, guild = null) {
   const text = String(raw ?? '').replace(/\s+/g, ' ').trim();
   if (!text) return null;
   if ([...text].length > MAX_REASON) throw new UserError(`Raison : ${MAX_REASON} caractères au plus.`);
   if (/@(everyone|here)\b/i.test(text) || /<@&\d{17,20}>/.test(text)) throw new UserError('Raison : les mentions @everyone, @here et de rôle ne sont pas autorisées.');
-  const bad = automod?.enabled && automod.filters?.badWords?.enabled ? findBadWord(text, automod.filters.badWords.words) : null;
-  if (bad) throw new UserError('Raison : elle contient un mot interdit sur ce serveur.');
+  if (!automod?.enabled) return text;
+  const filters = automod.filters ?? {};
+  if (filters.badWords?.enabled && findBadWord(text, filters.badWords.words)) throw new UserError('Raison : elle contient un mot interdit sur ce serveur.');
+  // Chargé à la demande : AutoModService dépend lui-même des services de logs et de modération.
+  const { blockedLinks, blockedInvites } = require('./AutoModService');
+  if (filters.antiLink?.enabled && blockedLinks(extractLinks(text), filters.antiLink).length) throw new UserError('Raison : les liens ne sont pas autorisés sur ce serveur.');
+  if (filters.antiInvite?.enabled && blockedInvites(extractInvites(text), filters.antiInvite, guild).length) {
+    throw new UserError('Raison : les invitations vers d\'autres serveurs ne sont pas autorisées sur ce serveur.');
+  }
   return text;
+}
+
+/**
+ * Raison affichée par le bot : tronquée, liens masqués « [texte](url) » neutralisés (crochets
+ * échappés : le texte et l'adresse s'affichent tels quels, jamais un lien déguisé). Pur.
+ */
+function displayReason(reason, max = MAX_REASON) {
+  return truncate(String(reason ?? ''), max).replace(/[[\]]/g, '\\$&');
 }
 
 /**
@@ -77,7 +96,7 @@ function nickBlocker(member) {
 
 /** Ligne d'un membre absent dans une réponse. */
 function absenceLine(row) {
-  return [`<@${row.user_id}> est **AFK** depuis ${discordTimestamp(row.since, 'R')}.`, row.reason ? `> ${truncate(row.reason, MAX_REASON)}` : subtext('Aucune raison donnée.')].join('\n');
+  return [`<@${row.user_id}> est **AFK** depuis ${discordTimestamp(row.since, 'R')}.`, row.reason ? `> ${displayReason(row.reason)}` : subtext('Aucune raison donnée.')].join('\n');
 }
 
 /**
@@ -130,7 +149,7 @@ class AfkService {
 
   /** Raison validée selon l'AutoMod du serveur. */
   parseReason(guildId, raw) {
-    return parseReason(raw, this.config.get(guildId).automod);
+    return parseReason(raw, this.config.get(guildId).automod, this.client?.guilds?.cache?.get?.(guildId) ?? null);
   }
 
   /**
@@ -184,6 +203,15 @@ class AfkService {
     return this.repo.get(guildId, userId)?.afk_nick ?? null;
   }
 
+  /**
+   * Nom à vérifier par le filtre des pseudos de l'AutoMod : sans le préfixe « [AFK] » tant que
+   * le pseudo est exactement celui posé par /afk (le préfixe n'est pas un « dehoist »).
+   */
+  nameWithoutPrefix(member, name) {
+    const afkNick = member?.nickname ? this.afkNickOf(member.guild.id, member.id) : null;
+    return afkNick && afkNick === member.nickname && name.startsWith(AFK_PREFIX) ? name.slice(AFK_PREFIX.length) : name;
+  }
+
   /** Fin d'absence (synchrone : un second message du membre ne la termine pas deux fois). @returns {object|null} la ligne supprimée */
   #take(guildId, userId) {
     this.#absent(guildId).delete(userId);
@@ -224,23 +252,32 @@ class AfkService {
     const absent = this.#absent(guildId);
     if (absent.has(message.author.id)) {
       const row = this.#take(guildId, message.author.id);
-      if (row) this.#welcomeBack(message, row).catch((err) => logger.debug(`Retour d'absence (${guildId}) :`, err?.message));
+      if (row) {
+        const member = message.member ?? message.guild.members.cache.get(message.author.id);
+        this.#restoreNick(member, row).catch((err) => logger.debug(`Pseudo au retour (${guildId}) :`, err?.message));
+        // « De retour » : même délai que les réponses aux mentions (message filtré par l'AutoMod : rien).
+        this.#later(() => this.#welcomeBack(message, row).catch((err) => logger.debug(`Retour d'absence (${guildId}) :`, err?.message)));
+      }
     }
-    if (!absent.size || !this.enabled(guildId) || this.pending.size >= PENDING_MAX) return;
+    if (!absent.size || !this.enabled(guildId)) return;
     const targets = [...(message.mentions?.users?.values?.() ?? [])].filter((u) => !u.bot && u.id !== message.author.id && absent.has(u.id)).map((u) => u.id);
     if (!targets.length) return;
+    this.#later(() => this.notice(message, targets).catch((err) => logger.debug(`Réponse d'absence (${guildId}) :`, err?.message)));
+  }
+
+  /** Exécute `fn` après le délai post-AutoMod (minuteur unref, annulé à l'arrêt ; borné). */
+  #later(fn) {
+    if (this.pending.size >= PENDING_MAX) return;
     const timer = setTimeout(() => {
       this.pending.delete(timer);
-      this.notice(message, targets).catch((err) => logger.debug(`Réponse d'absence (${guildId}) :`, err?.message));
+      fn();
     }, this.delayMs);
     timer.unref?.();
     this.pending.add(timer);
   }
 
   async #welcomeBack(message, row) {
-    const member = message.member ?? message.guild.members.cache.get(message.author.id);
-    await this.#restoreNick(member, row);
-    if (!this.enabled(message.guild.id)) return;
+    if (this.stopped || this.wasDeleted(message.id) || !this.enabled(message.guild.id)) return;
     const embed = card({
       tone: 'success',
       section: SECTION,
@@ -330,4 +367,4 @@ class AfkService {
   }
 }
 
-module.exports = { AfkService, afkNickname, parseReason, nickBlocker, AFK_PREFIX, MAX_REASON, NOTICE_TTL_MS, NOTICE_COOLDOWN_MS };
+module.exports = { AfkService, afkNickname, parseReason, displayReason, nickBlocker, AFK_PREFIX, MAX_REASON, NOTICE_TTL_MS, NOTICE_COOLDOWN_MS };

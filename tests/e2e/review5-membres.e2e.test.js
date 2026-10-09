@@ -255,3 +255,54 @@ test('Classement des jeux : abandon avant 2 coups non compté, nul contre le bot
     await h.close();
   }
 });
+
+test('/afk : raison soumise aux filtres liens et invitations, liens masqués neutralisés ; pas de « De retour » pour un message filtré', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  onlyFilters(h, ['badWords', 'antiLink', 'antiInvite']);
+  h.configure({ automod: { filters: { badWords: { words: ['interdit'] } } } });
+  Object.assign(h.client.services.afk, { delayMs: 20, ttlMs: 5_000 });
+  const afk = (as, reason) => h.slash('afk', [opt('raison', 3, reason)], { as });
+  try {
+    // Filtres actifs : lien et invitation refusés dans la raison, comme dans un message.
+    for (const reason of ['Voir https://arnaque.example/cadeau', '[Nitro gratuit](https://discord-nitro.example/claim)', 'Rejoignez discord.gg/autreserveur']) {
+      const rec = await afk('member', reason);
+      assert.ok(h.isError(rec), `raison acceptée : ${reason}`);
+    }
+    assert.equal(h.client.services.afk.isAfk(h.guild.id, IDS.users.member), false);
+
+    // Filtres coupés : la raison passe, mais un lien masqué n'est jamais rendu comme tel.
+    h.configure({ automod: { filters: { antiLink: { enabled: false }, antiInvite: { enabled: false } } } });
+    const ok = await afk('member', '[Nitro gratuit](https://discord-nitro.example/claim)');
+    assert.ok(!h.isError(ok), h.replyText(ok));
+    const mark = h.fake.messageLog.length;
+    await h.userMessage({ as: 'target', content: `<@${IDS.users.member}> tu es là ?` });
+    await sleep(60);
+    await h.settle();
+    const notice = botMessagesIn(h, IDS.channels.general, mark).find((m) => /absent/i.test(m.embeds?.[0]?.title ?? ''));
+    assert.ok(notice, 'aucune réponse d\'absence');
+    assert.match(notice.embeds[0].description, /\\\[Nitro gratuit\\\]\(https:/);
+    for (const m of h.messagesOf(ok)) for (const f of m.embeds?.[0]?.fields ?? []) if (/Raison/.test(f.name)) assert.match(f.value, /^\\\[Nitro/);
+
+    // Retour par un message que l'AutoMod supprime : l'absence prend fin, sans « De retour » publié.
+    const mark2 = h.fake.messageLog.length;
+    const bad = await h.userMessage({ as: 'member', content: 'c\'est interdit' });
+    await sleep(60);
+    await h.settle();
+    assert.equal(h.fake.messages.has(bad.id), false, 'message non filtré');
+    assert.equal(h.client.services.afk.isAfk(h.guild.id, IDS.users.member), false);
+    const titles = botMessagesIn(h, IDS.channels.general, mark2).map((m) => m.embeds?.[0]?.title ?? '');
+    assert.ok(!titles.some((t) => /De retour/.test(t)), `« De retour » publié pour un message filtré : ${titles.join(', ')}`);
+
+    // Retour ordinaire : « De retour » publié après le délai.
+    await afk('member', 'Pause');
+    const mark3 = h.fake.messageLog.length;
+    await h.userMessage({ as: 'member', content: 'me revoilà' });
+    await sleep(60);
+    await h.settle();
+    assert.ok(botMessagesIn(h, IDS.channels.general, mark3).some((m) => /De retour/.test(m.embeds?.[0]?.title ?? '')));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

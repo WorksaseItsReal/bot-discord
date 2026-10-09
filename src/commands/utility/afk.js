@@ -2,7 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { card, wide, subtext } = require('../../utils/ui');
-const { MAX_REASON } = require('../../services/AfkService');
+const { MAX_REASON, displayReason } = require('../../services/AfkService');
 const { UserError } = require('../../core/errors');
 
 /**
@@ -51,7 +51,7 @@ module.exports = {
             subtext('Votre prochain message mettra fin à l\'absence.'),
             note ? subtext(note) : null,
           ],
-          fields: [wide('📝', 'Raison', reason ?? '*Aucune raison donnée*')],
+          fields: [wide('📝', 'Raison', reason ? displayReason(reason) : '*Aucune raison donnée*')],
           timestamp: false,
         }),
       ],
