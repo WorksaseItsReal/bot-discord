@@ -5,10 +5,14 @@ const { truncate, listOrMore } = require('../../utils/embeds');
 const { parseDuration, discordTimestamp, formatDuration } = require('../../utils/time');
 const { card, field, wide, ICONS, status, subtext, linkButton, buttonRows } = require('../../utils/ui');
 const { paginate } = require('../../utils/pagination');
-const { giveawayUrl, conditions, MAX_REROLL_WINNERS } = require('../../services/GiveawayService');
+const { giveawayUrl, conditions, hasConditions, MAX_REROLL_WINNERS } = require('../../services/GiveawayService');
 const { UserError } = require('../../core/errors');
 
 const PER_PAGE = 6;
+/** Bornes des conditions de participation (niveau, invitations, ancienneté en jours). */
+const MAX_LEVEL_CONDITION = 500;
+const MAX_INVITES_CONDITION = 1000;
+const MAX_DAYS_CONDITION = 3650;
 
 function assertCanManage(interaction) {
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageEvents)) {
@@ -26,6 +30,18 @@ function assertRoleConditions(guildId, requiredRole, forbiddenRole) {
   }
 }
 
+/**
+ * Avertissements de création : condition de niveau alors que les niveaux sont désactivés
+ * (l'XP n'augmente plus), d'invitations sans suivi possible. Pur.
+ * @param {object} cfg configuration du serveur
+ */
+function conditionWarnings(cfg, { minLevel, minInvites, inviteTracking = true }) {
+  const out = [];
+  if (minLevel && !cfg?.levels?.enabled) out.push('Le système de niveaux est désactivé (/niveaux) : seuls les membres ayant déjà ce niveau pourront participer.');
+  if (minInvites && !inviteTracking) out.push('Le suivi des invitations n\'est pas actif (/invitations ; permission **Gérer le serveur** requise) : seules les invitations déjà comptées valent.');
+  return out;
+}
+
 function winnersReply(winners, id) {
   const list = winners.map((w) => `<@${w}>`);
   return status.ok(
@@ -37,6 +53,7 @@ function winnersReply(winners, id) {
 module.exports = {
   category: 'giveaways',
   assertRoleConditions,
+  conditionWarnings,
   data: new SlashCommandBuilder()
     .setName('giveaway')
     .setDescription('Système de giveaways.')
@@ -47,7 +64,10 @@ module.exports = {
         .addStringOption((o) => o.setName('duree').setDescription('Durée (ex: 1h, 2d)').setRequired(true))
         .addIntegerOption((o) => o.setName('gagnants').setDescription('Nombre de gagnants').setMinValue(1).setMaxValue(20))
         .addRoleOption((o) => o.setName('role_requis').setDescription('Rôle requis pour participer'))
-        .addRoleOption((o) => o.setName('role_interdit').setDescription('Rôle interdit')))
+        .addRoleOption((o) => o.setName('role_interdit').setDescription('Rôle interdit'))
+        .addIntegerOption((o) => o.setName('niveau_min').setDescription('Niveau minimum (système de niveaux) pour participer').setMinValue(1).setMaxValue(MAX_LEVEL_CONDITION))
+        .addIntegerOption((o) => o.setName('invitations_min').setDescription('Invitations valides minimum (membres invités encore présents)').setMinValue(1).setMaxValue(MAX_INVITES_CONDITION))
+        .addIntegerOption((o) => o.setName('anciennete_min').setDescription('Jours minimum passés sur le serveur pour participer').setMinValue(1).setMaxValue(MAX_DAYS_CONDITION)))
     .addSubcommand((s) => s.setName('end').setDescription('Termine un giveaway immédiatement (ou retente une annonce échouée).').addIntegerOption((o) => o.setName('id').setDescription('ID du giveaway').setRequired(true)))
     .addSubcommand((s) =>
       s.setName('reroll').setDescription('Retire de nouveaux gagnants.')
@@ -69,7 +89,13 @@ module.exports = {
       const requiredRole = interaction.options.getRole('role_requis')?.id ?? null;
       const forbiddenRole = interaction.options.getRole('role_interdit')?.id ?? null;
       assertRoleConditions(interaction.guild.id, requiredRole, forbiddenRole);
-      const { id, message } = await giveaways.create(interaction.channel, interaction.user, { prize, winners, durationMs, requiredRole, forbiddenRole });
+      const minLevel = interaction.options.getInteger('niveau_min') ?? null;
+      const minInvites = interaction.options.getInteger('invitations_min') ?? null;
+      const minDays = interaction.options.getInteger('anciennete_min') ?? null;
+      const inviteTracking = client.services.invites?.hasSnapshot?.(interaction.guild.id) ?? true;
+      const warnings = conditionWarnings(client.services.config.get(interaction.guild.id), { minLevel, minInvites, inviteTracking });
+      const { id, message } = await giveaways.create(interaction.channel, interaction.user, { prize, winners, durationMs, requiredRole, forbiddenRole, minLevel, minInvites, minDays });
+      const created = giveaways.get(id);
       return interaction.reply({
         embeds: [
           card({
@@ -77,11 +103,16 @@ module.exports = {
             section: 'giveaways',
             icon: ICONS.success,
             title: `Giveaway #${id} lancé`,
-            description: [`**${truncate(prize, 200)}** est en jeu dans ${interaction.channel}.`, subtext(`Terminez-le plus tôt avec /giveaway end id:${id}.`)],
+            description: [
+              `**${truncate(prize, 200)}** est en jeu dans ${interaction.channel}.`,
+              subtext(`Terminez-le plus tôt avec /giveaway end id:${id}.`),
+              ...warnings.map((w) => `${ICONS.warning} ${w}`),
+            ],
             fields: [
               field('🏆', 'Gagnants', `**${winners}**`),
               field(ICONS.duration, 'Durée', formatDuration(durationMs)),
               field(ICONS.expires, 'Fin', discordTimestamp(Date.now() + durationMs, 'R')),
+              created && hasConditions(created) ? wide(ICONS.list, 'Conditions', conditions(created)) : null,
             ],
           }),
         ],
@@ -134,7 +165,7 @@ module.exports = {
                 [
                   `${ICONS.expires} Fin ${discordTimestamp(g.ends_at, 'R')} · 🏆 ${g.winners} gagnant(s) · ${ICONS.members} ${g.entry_count ?? 0} participant(s)`,
                   `${ICONS.owner} <@${g.host_id}> · <#${g.channel_id}>${url ? ` · [Voir](${url})` : ''}`,
-                  g.required_role || g.forbidden_role ? conditions(g) : null,
+                  hasConditions(g) ? conditions(g) : null,
                 ].filter(Boolean).join('\n'),
               );
             }),

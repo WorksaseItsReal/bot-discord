@@ -163,10 +163,12 @@ class TicketService {
    * @param {import('./ConfigService').ConfigService} deps.config
    * @param {import('./LoggingService').LoggingService} deps.logging
    */
-  constructor({ tickets, config, logging }) {
+  constructor({ tickets, config, logging, ratings = null }) {
     this.tickets = tickets;
     this.config = config;
     this.logging = logging;
+    /** Notation des tickets (TicketRatingService, facultatif) : prévenu à chaque fermeture. */
+    this.ratings = ratings;
     /** Créations en cours (`guildId:userId`) : évite les doublons sur double-clic. */
     this.creating = new Set();
     /** Salons de ticket en cours de fermeture. */
@@ -424,7 +426,7 @@ class TicketService {
     if (ticket.status === 'claimed') {
       throw new UserError(ticket.claimed_by ? `Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.` : 'Ce ticket est déjà pris en charge.');
     }
-    this.tickets.setStatus(channel.id, 'claimed', { claimedBy: staff.id });
+    this.tickets.setStatus(channel.id, 'claimed', { claimedBy: staff.id, claimedAt: Date.now() });
     const updated = this.tickets.getByChannel(channel.id) ?? { ...ticket, status: 'claimed', claimed_by: staff.id };
 
     // Met à jour la carte d'accueil (statut + bouton désactivé).
@@ -595,6 +597,8 @@ class TicketService {
     const closedAt = Date.now();
     this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
     this.bumpStat(channel.guild.id, 'closed');
+    // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
+    this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
 
     if (cfg.logChannel) {
       const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);

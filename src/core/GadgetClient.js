@@ -37,6 +37,8 @@ const { StickyRepository } = require('../database/repositories/StickyRepository'
 const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
 const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
+const { ApplicationRepository } = require('../database/repositories/ApplicationRepository');
+const { TicketRatingRepository } = require('../database/repositories/TicketRatingRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -64,6 +66,8 @@ const { AutoResponderService } = require('../services/AutoResponderService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
+const { ApplicationService } = require('../services/ApplicationService');
+const { TicketRatingService } = require('../services/TicketRatingService');
 
 const logger = createLogger('client');
 
@@ -126,6 +130,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleRepository(db),
       announcements: new ScheduledAnnouncementRepository(db),
       birthdays: new BirthdayRepository(db),
+      applications: new ApplicationRepository(db),
+      ticketRatings: new TicketRatingRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -135,6 +141,9 @@ class GadgetClient extends Client {
     const antiraid = new AntiRaidService({ client: this, config: configService, logging });
     const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging, antiraid });
     const strikes = new StrikeService(this.repositories.strikes, configService);
+    // Notation des tickets : prévenue par TicketService à chaque fermeture.
+    const ticketRatings = new TicketRatingService({ client: this, ratings: this.repositories.ticketRatings, config: configService, logging });
+    const tickets = new TicketService({ tickets: this.repositories.tickets, config: configService, logging, ratings: ticketRatings });
     this.services = {
       config: configService,
       logging,
@@ -144,7 +153,8 @@ class GadgetClient extends Client {
       automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents, quarantines: this.repositories.automodQuarantines }),
       antiraid,
       lockdown: new LockdownService({ locks: this.repositories.locks, logging }),
-      tickets: new TicketService({ tickets: this.repositories.tickets, config: configService, logging }),
+      tickets,
+      ticketRatings,
       giveaways: new GiveawayService({ client: this, giveaways: this.repositories.giveaways }),
       suggestions: new SuggestionService({ client: this, suggestions: this.repositories.suggestions, config: configService }),
       backup: new BackupService({ backups: this.repositories.backups }),
@@ -165,6 +175,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
       birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
+      // Candidatures (/candidatures, /candidature) : formulaires, cartes du staff, entretiens.
+      applications: new ApplicationService({ client: this, applications: this.repositories.applications, config: configService, logging, tickets }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -279,7 +291,8 @@ class GadgetClient extends Client {
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
     // pour rester sous le garde-fou d'arrêt.
-    await this.#settleAll(['tickets', 'giveaways', 'projects'], 'flush', 'Vidage du service');
+    // Notation des tickets : plus de nouveaux MP, envois en cours attendus (même lot, en parallèle).
+    await this.#settleAll(['tickets', 'giveaways', 'projects', 'ticketRatings'], 'flush', 'Vidage du service');
     try {
       await this.destroy();
     } catch (err) {

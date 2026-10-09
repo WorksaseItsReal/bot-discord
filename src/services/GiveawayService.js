@@ -20,13 +20,52 @@ function giveawayUrl(g) {
   return g?.message_id ? `https://discord.com/channels/${g.guild_id}/${g.channel_id}/${g.message_id}` : null;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /** Conditions de participation lisibles. */
 function conditions(g) {
   const parts = [
     g.required_role ? `${ICONS.check} Rôle requis : <@&${g.required_role}>` : null,
     g.forbidden_role ? `${ICONS.ban} Rôle exclu : <@&${g.forbidden_role}>` : null,
+    g.min_level ? `📈 Niveau minimum : **${g.min_level}**` : null,
+    g.min_invites ? `${ICONS.mail} Invitations minimum : **${g.min_invites}**` : null,
+    g.min_days ? `${ICONS.date} Sur le serveur depuis au moins **${plural(g.min_days, 'jour')}**` : null,
   ].filter(Boolean);
   return parts.length ? parts.join('\n') : 'Aucune : ouvert à tous les membres.';
+}
+
+/** Le giveaway a-t-il au moins une condition de participation ? Pur. */
+function hasConditions(g) {
+  return Boolean(g?.required_role || g?.forbidden_role || g?.min_level || g?.min_invites || g?.min_days);
+}
+
+/**
+ * Conditions non remplies par un membre (rôles, niveau, invitations, ancienneté). Pur.
+ * `level` et `invites` : valeurs du membre (0 si inconnues) ; `joinedAt` : arrivée sur le serveur.
+ * @returns {Array<{ key: 'required_role'|'forbidden_role'|'min_level'|'min_invites'|'min_days', message: string }>}
+ */
+function unmetConditions(g, { member, level = 0, invites = 0, joinedAt = null, now = Date.now() } = {}) {
+  const out = [];
+  const has = (roleId) => Boolean(member?.roles?.cache?.has?.(roleId));
+  if (g.required_role && !has(g.required_role)) out.push({ key: 'required_role', message: `Il faut le rôle <@&${g.required_role}> pour participer à ce giveaway.` });
+  if (g.forbidden_role && has(g.forbidden_role)) out.push({ key: 'forbidden_role', message: `Les membres ayant le rôle <@&${g.forbidden_role}> ne peuvent pas participer à ce giveaway.` });
+  if (g.min_level && (Number(level) || 0) < g.min_level) {
+    out.push({ key: 'min_level', message: `Il faut être au moins **niveau ${g.min_level}** pour participer (vous êtes niveau **${Number(level) || 0}**). Discutez sur le serveur pour gagner de l'XP !` });
+  }
+  if (g.min_invites && (Number(invites) || 0) < g.min_invites) {
+    out.push({ key: 'min_invites', message: `Il faut au moins **${plural(g.min_invites, 'invitation')}** valide${g.min_invites > 1 ? 's' : ''} pour participer (vous en avez **${Number(invites) || 0}**). Les membres invités qui sont repartis ne comptent pas.` });
+  }
+  if (g.min_days) {
+    const since = Number(joinedAt);
+    const readyAt = Number.isFinite(since) && since > 0 ? since + g.min_days * DAY_MS : null;
+    if (!readyAt || readyAt > now) {
+      out.push({
+        key: 'min_days',
+        message: `Il faut être sur le serveur depuis au moins **${plural(g.min_days, 'jour')}** pour participer${readyAt ? ` (vous pourrez participer ${discordTimestamp(readyAt, 'R')})` : ''}.`,
+      });
+    }
+  }
+  return out;
 }
 
 const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
@@ -156,7 +195,7 @@ class GiveawayService {
     };
   }
 
-  async create(channel, host, { prize, winners, durationMs, requiredRole, forbiddenRole }) {
+  async create(channel, host, { prize, winners, durationMs, requiredRole, forbiddenRole, minLevel = null, minInvites = null, minDays = null }) {
     prize = String(prize ?? '').trim();
     if (!prize) throw new UserError('La récompense ne peut pas être vide.');
     if (prize.length > 200) throw new UserError('La récompense est trop longue (200 caractères max).');
@@ -171,6 +210,9 @@ class GiveawayService {
       hostId: host.id,
       requiredRole: requiredRole ?? null,
       forbiddenRole: forbiddenRole ?? null,
+      minLevel: minLevel || null,
+      minInvites: minInvites || null,
+      minDays: minDays || null,
       endsAt,
     });
     const g = this.giveaways.get(id);
@@ -196,7 +238,7 @@ class GiveawayService {
   /**
    * Tire les gagnants en excluant les bots, les comptes introuvables et, au
    * moment du tirage, les membres partis du serveur ou qui ne remplissent plus
-   * les conditions de rôles (requis / interdit).
+   * les conditions (rôles requis / interdit, niveau, invitations, ancienneté).
    */
   async #drawWinners(g, entries, count) {
     const shuffled = pickWinners(entries, entries.length);
@@ -212,11 +254,26 @@ class GiveawayService {
     return winners;
   }
 
-  /** Le participant est-il encore membre et conforme aux rôles requis / interdits ? */
+  /** Le participant est-il encore membre et conforme aux conditions (rôles, niveau, invitations, ancienneté) ? */
   async #isEligibleMember(guild, g, userId) {
     const member = guild.members?.cache?.get(userId) ?? (await guild.members?.fetch?.(userId).catch(() => null));
     if (!member) return false; // parti du serveur
-    return isEligible(g, member);
+    return isEligible(g, member, this.memberStats(g, member));
+  }
+
+  /**
+   * Niveau (LevelRepository), invitations nettes (InviteJoinRepository) et arrivée d'un membre,
+   * lus seulement si le giveaway a la condition correspondante.
+   */
+  memberStats(g, member) {
+    const repos = this.client?.repositories ?? {};
+    const guildId = g.guild_id;
+    const userId = member?.id ?? member?.user?.id;
+    return {
+      level: g.min_level ? repos.levels?.get?.(guildId, userId)?.level ?? 0 : 0,
+      invites: g.min_invites ? repos.inviteJoins?.stats?.(guildId, userId)?.net ?? 0 : 0,
+      joinedAt: member?.joinedTimestamp ?? (member?.joined_at ? Date.parse(member.joined_at) : null),
+    };
   }
 
   /** Giveaway en cours du serveur de l'interaction, conditions de participation remplies. */
@@ -225,12 +282,8 @@ class GiveawayService {
     if (!g || g.guild_id !== interaction.guildId || g.ended) throw new UserError('Ce giveaway est terminé.');
     if (interaction.user.bot) throw new UserError('Les bots ne peuvent pas participer.');
     const member = interaction.member;
-    if (g.required_role && !member.roles.cache.has(g.required_role)) {
-      throw new UserError(`Il faut le rôle <@&${g.required_role}> pour participer à ce giveaway.`);
-    }
-    if (g.forbidden_role && member.roles.cache.has(g.forbidden_role)) {
-      throw new UserError(`Les membres ayant le rôle <@&${g.forbidden_role}> ne peuvent pas participer à ce giveaway.`);
-    }
+    const unmet = unmetConditions(g, { member, ...this.memberStats(g, member) });
+    if (unmet.length) throw new UserError(unmet.map((u) => u.message).join('\n'));
     return g;
   }
 
@@ -425,12 +478,13 @@ function wasAnnounced(g, repo, entries) {
   return !entries.length || (repo.winners?.(g.id) ?? []).length > 0;
 }
 
-/** Le membre remplit-il les conditions de rôles du giveaway ? Pur. */
-function isEligible(g, member) {
-  const has = (roleId) => Boolean(member?.roles?.cache?.has?.(roleId));
-  if (g.required_role && !has(g.required_role)) return false;
-  if (g.forbidden_role && has(g.forbidden_role)) return false;
-  return true;
+/**
+ * Le membre remplit-il les conditions du giveaway ? Pur.
+ * @param {{ level?: number, invites?: number, joinedAt?: number|null, now?: number }} [stats]
+ *   valeurs du membre pour les conditions de niveau, d'invitations et d'ancienneté
+ */
+function isEligible(g, member, stats = {}) {
+  return unmetConditions(g, { member, joinedAt: member?.joinedTimestamp ?? null, ...stats }).length === 0;
 }
 
 /**
@@ -443,4 +497,4 @@ function previousWinners(message) {
   return [...fieldValue.matchAll(/<@!?(\d{17,20})>/g)].map((m) => m[1]);
 }
 
-module.exports = { GiveawayService, giveawayUrl, conditions, previousWinners, isEligible, EDIT_DEBOUNCE_MS, MAX_REROLL_WINNERS };
+module.exports = { GiveawayService, giveawayUrl, conditions, hasConditions, unmetConditions, previousWinners, isEligible, EDIT_DEBOUNCE_MS, MAX_REROLL_WINNERS };

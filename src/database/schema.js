@@ -567,6 +567,81 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_levels_left ON levels (guild_id, left_at);
     `,
   },
+  {
+    id: 23,
+    name: 'applications_ticket_ratings_giveaway_conditions',
+    up: `
+      -- Candidatures (/candidatures) : formulaires d'un serveur (5 au plus, vérifié par le service).
+      CREATE TABLE IF NOT EXISTS application_forms (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id          TEXT NOT NULL,
+        name              TEXT NOT NULL,
+        description       TEXT,
+        questions         TEXT NOT NULL DEFAULT '[]', -- JSON [{ label (≤ 45), long }]
+        role_ids          TEXT NOT NULL DEFAULT '[]', -- JSON : rôles donnés si la candidature est acceptée
+        review_channel_id TEXT,                       -- salon de réception (staff)
+        ping_role_id      TEXT,                       -- rôle pingué à chaque candidature
+        open              INTEGER NOT NULL DEFAULT 0,
+        cooldown_ms       INTEGER NOT NULL DEFAULT 0, -- délai entre deux candidatures d'un même membre
+        panel_channel_id  TEXT,
+        panel_message_id  TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_application_forms_guild ON application_forms (guild_id);
+
+      -- Candidatures envoyées. Questions recopiées avec les réponses (le formulaire peut changer).
+      CREATE TABLE IF NOT EXISTS applications (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id             TEXT NOT NULL,
+        form_id              INTEGER NOT NULL,
+        form_name            TEXT NOT NULL,
+        user_id              TEXT NOT NULL,
+        answers              TEXT NOT NULL,           -- JSON [{ q, a }]
+        status               TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | rejected | withdrawn
+        reviewer_id          TEXT,
+        reason               TEXT,                    -- motif du refus
+        note                 TEXT,                    -- remarques (rôles non donnés, MP impossible…)
+        card_channel_id      TEXT,
+        card_message_id      TEXT,
+        interview_channel_id TEXT,                    -- ticket ou fil privé d'entretien
+        created_at           INTEGER NOT NULL,
+        decided_at           INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_applications_member ON applications (guild_id, user_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_applications_status ON applications (guild_id, status);
+      CREATE INDEX IF NOT EXISTS idx_applications_form ON applications (form_id, user_id, created_at);
+      -- Une seule candidature en attente par membre et par formulaire (garde atomique).
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_applications_pending ON applications (form_id, user_id) WHERE status = 'pending';
+
+      -- Tickets : date de prise en charge (statistiques du temps de prise en charge).
+      ALTER TABLE tickets ADD COLUMN claimed_at INTEGER;
+
+      -- Notation des tickets : une ligne par ticket fermé (la ligne « tickets » est supprimée à
+      -- la fermeture), conservée pour les statistiques. Note NULL tant que l'auteur n'a pas noté ;
+      -- une seule note par ticket, réservée à son auteur.
+      CREATE TABLE IF NOT EXISTS ticket_ratings (
+        ticket_id  INTEGER PRIMARY KEY,
+        guild_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        claimed_by TEXT,
+        closed_by  TEXT,
+        opened_at  INTEGER,
+        claimed_at INTEGER,
+        closed_at  INTEGER NOT NULL,
+        rating     INTEGER,                           -- 1 à 5
+        comment    TEXT,
+        rated_at   INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_ticket_ratings_guild ON ticket_ratings (guild_id, closed_at);
+      CREATE INDEX IF NOT EXISTS idx_ticket_ratings_staff ON ticket_ratings (guild_id, claimed_by);
+
+      -- Giveaways : conditions de participation (vérifiées à l'inscription et au tirage).
+      ALTER TABLE giveaways ADD COLUMN min_level INTEGER;
+      ALTER TABLE giveaways ADD COLUMN min_invites INTEGER;
+      ALTER TABLE giveaways ADD COLUMN min_days INTEGER;
+    `,
+  },
 ];
 
 module.exports = { migrations };
