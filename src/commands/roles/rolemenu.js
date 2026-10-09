@@ -32,9 +32,25 @@ const FORBIDDEN_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.ManageEvents,
 ]);
 
-/** Le rôle confère-t-il une permission de modération / d'administration ? */
+/**
+ * Salon dont une surcharge de permissions donne à ce rôle une permission sensible (Gérer les
+ * messages, les permissions du salon, les webhooks, les fils, @everyone…), ou null. Une
+ * surcharge ne peut porter que des bits de salon : la même liste s'applique telle quelle.
+ */
+function forbiddenOverwriteChannel(role) {
+  for (const channel of role?.guild?.channels?.cache?.values?.() ?? []) {
+    const overwrite = channel.permissionOverwrites?.cache?.get?.(role.id);
+    if (overwrite?.allow?.any?.(FORBIDDEN_PERMISSIONS)) return channel;
+  }
+  return null;
+}
+
+/**
+ * Le rôle confère-t-il une permission de modération / d'administration, sur le serveur OU dans
+ * un salon (surcharge) ? Point de contrôle unique de tout rôle attribué automatiquement.
+ */
 function hasForbiddenPermissions(role) {
-  return role.permissions.any(FORBIDDEN_PERMISSIONS);
+  return Boolean(role.permissions.any(FORBIDDEN_PERMISSIONS) || forbiddenOverwriteChannel(role));
 }
 
 /**
@@ -71,6 +87,7 @@ module.exports = {
   panelCard,
   FORBIDDEN_PERMISSIONS,
   hasForbiddenPermissions,
+  forbiddenOverwriteChannel,
   data: new SlashCommandBuilder()
     .setName('rolemenu')
     .setDescription('Crée un menu de rôles auto-attribuables.')

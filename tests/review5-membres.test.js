@@ -135,3 +135,27 @@ test('alertes : les abonnés d\'un mot-clé sont développés une seule fois par
   assert.deepEqual([...hits.values()][0], new Set(['inspecteur gadget', 'gadget']));
   assert.equal(walks, 2, `abonnés parcourus ${walks} fois (une fois par occurrence au lieu d'une fois par clé)`);
 });
+
+// ---------------------------------------------------------------- rôles attribués automatiquement
+
+test('hasForbiddenPermissions : une permission sensible accordée dans une surcharge de salon suffit à refuser le rôle', () => {
+  const { PermissionsBitField, PermissionFlagsBits: P } = require('discord.js');
+  const { hasForbiddenPermissions, forbiddenOverwriteChannel, FORBIDDEN_PERMISSIONS } = require('../src/commands/roles/rolemenu');
+  const ROLE = '500000000000000001';
+  const roleWith = (allow, { guildPerms = 0n, target = ROLE } = {}) => {
+    const channel = { id: '600000000000000001', permissionOverwrites: { cache: new Map([[target, { allow: new PermissionsBitField(allow) }]]) } };
+    const thread = { id: '600000000000000002' }; // un fil n'a pas de surcharges
+    return { id: ROLE, permissions: new PermissionsBitField(guildPerms), guild: { channels: { cache: new Map([[channel.id, channel], [thread.id, thread]]) } } };
+  };
+  for (const flag of [P.ManageMessages, P.ManageRoles, P.ManageChannels, P.ManageWebhooks, P.MentionEveryone, P.ManageThreads, P.MuteMembers, P.MoveMembers, P.ManageEvents]) {
+    assert.ok(FORBIDDEN_PERMISSIONS.includes(flag));
+    const role = roleWith(flag);
+    assert.equal(hasForbiddenPermissions(role), true, `surcharge ${new PermissionsBitField(flag).toArray()} acceptée`);
+    assert.equal(forbiddenOverwriteChannel(role).id, '600000000000000001');
+  }
+  // Surcharges inoffensives, ou visant un autre rôle : acceptées. Rôle sans serveur connu : permissions seules.
+  assert.equal(hasForbiddenPermissions(roleWith(P.ViewChannel | P.SendMessages | P.ReadMessageHistory)), false);
+  assert.equal(hasForbiddenPermissions(roleWith(P.ManageMessages, { target: '500000000000000099' })), false);
+  assert.equal(hasForbiddenPermissions({ permissions: new PermissionsBitField(P.SendMessages) }), false);
+  assert.equal(hasForbiddenPermissions(roleWith(P.SendMessages, { guildPerms: P.BanMembers })), true);
+});

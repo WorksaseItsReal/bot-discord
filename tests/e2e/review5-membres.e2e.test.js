@@ -306,3 +306,40 @@ test('/afk : raison soumise aux filtres liens et invitations, liens masqués neu
     await h.close();
   }
 });
+
+test('Rôle vendu : une permission sensible accordée par une surcharge de salon le rend invendable (création et achat)', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ economy: { enabled: true } });
+  const svc = h.client.services.economy;
+  const G = h.guild.id;
+  try {
+    svc.adminAdjust(G, IDS.users.member, 'set', 1000, IDS.users.admin);
+    svc.addItem(G, { name: 'Notifs', price: 10, kind: 'role', roleId: IDS.roles.notif });
+    // « Notifications » reçoit « Gérer les messages » dans #annonces (surcharge de salon).
+    const ann = h.fake.channels.get(IDS.channels.announcements);
+    ann.permission_overwrites.push({ id: IDS.roles.notif, type: 0, allow: String(P.ManageMessages), deny: '0' });
+    h.fake.dispatchNow('CHANNEL_UPDATE', ann);
+    await h.settle();
+
+    const shop = h.messagesOf(await h.slash('eco', sub('boutique'), { as: 'member' }))[0];
+    const buy = shop.components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith('cmd:eco:buy:'));
+    assert.equal(buy.disabled, true, 'rôle sensible (surcharge) achetable');
+    assert.match(JSON.stringify(shop.embeds), /indisponible/);
+    const forced = await h.click(shop, buy.custom_id, { as: 'member' });
+    assert.ok(h.isError(forced), 'achat d\'un rôle sensible accepté');
+    assert.equal(h.fake.members.get(IDS.users.member).roles.includes(IDS.roles.notif), false);
+    assert.equal(svc.account(G, IDS.users.member).balance, 1000);
+
+    // Création refusée depuis le tableau de bord.
+    svc.deleteItem(G, svc.listItems(G)[0].id);
+    const dash = await h.slash('economie');
+    const shopView = await h.click(h.messagesOf(dash)[0], 'cmd:economie:nav', { values: ['shop'] });
+    const pick = await h.click(h.messagesOf(shopView)[0], 'cmd:economie:itemrole', { values: [IDS.roles.notif] });
+    assert.ok(h.isError(pick), 'rôle sensible (surcharge) mis en vente');
+    assert.match(h.replyText(pick), /modération ou d'administration/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
