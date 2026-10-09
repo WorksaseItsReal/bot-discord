@@ -39,6 +39,14 @@ class InviteJoinRepository {
     );
     this.boardCountStmt = db.prepare('SELECT COUNT(DISTINCT inviter_id) AS n FROM invite_joins WHERE guild_id = ? AND inviter_id IS NOT NULL');
     this.lastJoinStmt = db.prepare('SELECT * FROM invite_joins WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1');
+    this.openStmt = db.prepare('SELECT id, user_id FROM invite_joins WHERE guild_id = ? AND left_at IS NULL');
+    this.hasOpenStmt = db.prepare('SELECT 1 FROM invite_joins WHERE guild_id = ? AND left_at IS NULL LIMIT 1');
+    this.closeStmt = db.prepare('UPDATE invite_joins SET left_at = ? WHERE id = ? AND left_at IS NULL');
+    this.reconcileTx = db.transaction((guildId, isPresent, at) => {
+      let left = 0;
+      for (const row of this.openStmt.all(guildId)) if (!isPresent(row.user_id)) left += this.closeStmt.run(at, row.id).changes;
+      return left;
+    });
     this.resetGuildStmt = db.prepare('DELETE FROM invite_joins WHERE guild_id = ?');
     this.resetInviterStmt = db.prepare('DELETE FROM invite_joins WHERE guild_id = ? AND inviter_id = ?');
   }
@@ -55,6 +63,21 @@ class InviteJoinRepository {
   /** Marque le départ du membre (sa dernière arrivée encore ouverte). @returns {boolean} */
   markLeft(guildId, userId, at = Date.now()) {
     return this.markLeftStmt.run(at, guildId, userId).changes > 0;
+  }
+
+  /** Le serveur a-t-il des arrivées encore ouvertes ? */
+  hasOpen(guildId) {
+    return Boolean(this.hasOpenStmt.get(guildId));
+  }
+
+  /**
+   * Départs manqués (bot hors ligne) : arrivées encore ouvertes de membres absents de la
+   * liste COMPLÈTE des membres présents. Une transaction.
+   * @param {(userId: string) => boolean} isPresent
+   * @returns {number} arrivées marquées « reparties »
+   */
+  reconcileDepartures(guildId, isPresent, at = Date.now()) {
+    return this.reconcileTx(guildId, isPresent, at);
   }
 
   /** Dernière arrivée enregistrée d'un membre, ou null. */

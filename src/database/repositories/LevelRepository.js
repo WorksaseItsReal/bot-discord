@@ -36,6 +36,18 @@ class LevelRepository {
     this.markReturnedStmt = db.prepare('UPDATE levels SET left_at = NULL WHERE guild_id = ? AND user_id = ? AND left_at IS NOT NULL');
     this.countLeftStmt = db.prepare('SELECT COUNT(*) AS n FROM levels WHERE guild_id = ? AND left_at IS NOT NULL AND left_at <= ?');
     this.purgeLeftStmt = db.prepare('DELETE FROM levels WHERE guild_id = ? AND left_at IS NOT NULL AND left_at <= ?');
+    this.membersStmt = db.prepare('SELECT user_id, left_at FROM levels WHERE guild_id = ?');
+    this.hasGuildStmt = db.prepare('SELECT 1 FROM levels WHERE guild_id = ? LIMIT 1');
+    this.reconcileTx = db.transaction((guildId, isPresent, at) => {
+      let left = 0;
+      let returned = 0;
+      for (const row of this.membersStmt.all(guildId)) {
+        const present = isPresent(row.user_id);
+        if (!present && row.left_at == null) left += this.markLeftStmt.run(at, guildId, row.user_id).changes;
+        else if (present && row.left_at != null) returned += this.markReturnedStmt.run(guildId, row.user_id).changes;
+      }
+      return { left, returned };
+    });
     this.resetMemberStmt = db.prepare('DELETE FROM levels WHERE guild_id = ? AND user_id = ?');
     this.resetGuildStmt = db.prepare('DELETE FROM levels WHERE guild_id = ?');
 
@@ -133,6 +145,21 @@ class LevelRepository {
   /** Efface la marque de départ (retour du membre). @returns {boolean} */
   markReturned(guildId, userId) {
     return this.markReturnedStmt.run(guildId, userId).changes > 0;
+  }
+
+  /** Le serveur a-t-il au moins une ligne ? */
+  hasGuild(guildId) {
+    return Boolean(this.hasGuildStmt.get(guildId));
+  }
+
+  /**
+   * Rattrapage des départs et retours manqués (bot hors ligne, membres partis avant la
+   * migration 17), d'après la liste COMPLÈTE des membres présents. Une transaction.
+   * @param {(userId: string) => boolean} isPresent
+   * @returns {{ left: number, returned: number }}
+   */
+  reconcileDepartures(guildId, isPresent, at = Date.now()) {
+    return this.reconcileTx(guildId, isPresent, Math.floor(at));
   }
 
   /** Membres partis au plus tard à `before` (tous par défaut). */

@@ -299,3 +299,66 @@ test('compteurs : un renommage bloqué par la limite de Discord ne bloque pas la
   assert.equal(calls, 1);
   await svc.stop();
 });
+
+// ------------------------------------------------------------ départs manqués (bot hors ligne)
+
+const departures = require('../src/events/departuresReconcile');
+const { levelFromXp } = require('../src/services/LevelService');
+
+function reconcileWorld({ withMembersIntent = true, complete = true } = {}) {
+  const { db } = memoryDb();
+  const levels = new LevelRepository(db);
+  const inviteJoins = new InviteJoinRepository(db);
+  const present = new Collection([['A', {}], ['B', {}], ['C', {}]]);
+  let fetches = 0;
+  const guild = {
+    id: GUILD,
+    available: true,
+    memberCount: 3,
+    members: {
+      cache: complete ? present : new Collection([['A', {}]]),
+      fetch: async () => {
+        fetches += 1;
+        if (complete) return;
+        throw new Error('GuildMembersTimeout');
+      },
+    },
+  };
+  const intentsList = withMembersIntent ? intents : intents.filter((i) => i !== require('discord.js').GatewayIntentBits.GuildMembers);
+  const client = { options: { intents: new IntentsBitField(intentsList) }, guilds: { cache: new Collection([[GUILD, guild]]) }, repositories: { levels, inviteJoins } };
+  // A présent, D parti pendant que le bot était hors ligne, C revenu hors ligne (marqué parti avant).
+  levels.add(GUILD, 'A', { xp: 50 }, levelFromXp);
+  levels.add(GUILD, 'D', { xp: 900 }, levelFromXp);
+  levels.add(GUILD, 'C', { xp: 10 }, levelFromXp);
+  levels.markLeft(GUILD, 'C', 1);
+  inviteJoins.recordJoin({ guildId: GUILD, userId: 'A', inviterId: INVITER, code: 'x' });
+  inviteJoins.recordJoin({ guildId: GUILD, userId: 'D', inviterId: INVITER, code: 'x' });
+  return { client, guild, levels, inviteJoins, fetches: () => fetches };
+}
+
+test('départs manqués : rattrapés au démarrage (niveaux et invitations) d\'après la liste complète', async () => {
+  const w = reconcileWorld();
+  assert.equal(w.levels.rank(GUILD, 'D'), 1, 'membre parti hors ligne encore premier du classement');
+  const res = await departures.reconcileGuild(w.client, w.guild);
+  assert.deepEqual(res, { levels: { left: 1, returned: 1 }, invites: 1 });
+  assert.equal(w.levels.rank(GUILD, 'D'), null);
+  assert.equal(w.levels.rank(GUILD, 'A'), 1);
+  assert.notEqual(w.levels.rank(GUILD, 'C'), null, 'membre revenu hors ligne absent du classement');
+  assert.deepEqual(w.inviteJoins.stats(GUILD, INVITER), { regular: 2, left: 1, fake: 0, net: 1 });
+  assert.equal(w.fetches(), 0, 'liste déjà complète : aucune lecture');
+});
+
+test('départs manqués : liste des membres incomplète ou intent absent → personne n\'est marqué parti', async () => {
+  const partial = reconcileWorld({ complete: false });
+  assert.equal(await departures.reconcileGuild(partial.client, partial.guild), null);
+  assert.equal(partial.fetches(), 1, 'une seule lecture des membres par serveur');
+  assert.equal(partial.levels.rank(GUILD, 'D'), 1);
+  const noIntent = reconcileWorld({ withMembersIntent: false });
+  assert.equal(await departures.reconcileGuild(noIntent.client, noIntent.guild), null);
+  assert.equal(noIntent.fetches(), 0);
+  // Arrêt du bot : rien n'est fait.
+  const stopping = reconcileWorld();
+  stopping.client.shutdownPromise = Promise.resolve();
+  assert.equal(await departures.reconcileGuild(stopping.client, stopping.guild), null);
+  assert.equal(stopping.levels.rank(GUILD, 'D'), 1);
+});
