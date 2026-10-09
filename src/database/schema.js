@@ -567,6 +567,39 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_levels_left ON levels (guild_id, left_at);
     `,
   },
+  {
+    id: 20,
+    name: 'member_tools',
+    up: `
+      -- Absences (/afk) : une ligne par membre absent. old_nick : pseudo de serveur avant le
+      -- préfixe « [AFK] » (NULL : aucun) ; afk_nick : pseudo posé par le bot (NULL : pseudo
+      -- inchangé). Au retour, old_nick n'est rétabli que si le pseudo est toujours afk_nick.
+      CREATE TABLE IF NOT EXISTS afk (
+        guild_id TEXT NOT NULL,
+        user_id  TEXT NOT NULL,
+        reason   TEXT,
+        since    INTEGER NOT NULL,
+        old_nick TEXT,
+        afk_nick TEXT,
+        PRIMARY KEY (guild_id, user_id)
+      );
+
+      -- Alertes de mots-clés (/alertes) : une ligne par membre et par serveur. Listes en JSON
+      -- (10 mots-clés, 25 salons et 25 membres bloqués au plus). paused : 0 actives,
+      -- 1 en pause (membre), 2 en pause automatique (MP fermés : dm_failures échecs d'affilée).
+      CREATE TABLE IF NOT EXISTS highlights (
+        guild_id         TEXT NOT NULL,
+        user_id          TEXT NOT NULL,
+        words            TEXT NOT NULL DEFAULT '[]',
+        blocked_channels TEXT NOT NULL DEFAULT '[]',
+        blocked_users    TEXT NOT NULL DEFAULT '[]',
+        paused           INTEGER NOT NULL DEFAULT 0,
+        dm_failures      INTEGER NOT NULL DEFAULT 0,
+        updated_at       INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
+    `,
+  },
 ];
 
 module.exports = { migrations };

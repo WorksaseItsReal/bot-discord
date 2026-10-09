@@ -269,6 +269,16 @@ const defaultGuildConfig = Object.freeze({
     timeZone: 'Europe/Paris', // fuseau IANA du serveur (date du jour)
     hour: 9,                  // heure locale d'envoi (0-23)
   },
+  // Outils des membres, activables par serveur (/alertes config) : absences (/afk),
+  // alertes de mots-clés en MP (/alertes) et derniers messages supprimés / modifiés (/snipe).
+  memberTools: {
+    afk: {
+      enabled: true,
+      nickname: true,         // préfixe « [AFK] » sur le pseudo (si la hiérarchie le permet)
+    },
+    highlights: { enabled: true },
+    snipe: { enabled: true }, // « Gérer les messages » ; salons ignorés des logs respectés
+  },
 });
 
 module.exports = { defaultGuildConfig };

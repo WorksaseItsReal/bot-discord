@@ -37,6 +37,8 @@ const { StickyRepository } = require('../database/repositories/StickyRepository'
 const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
 const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
+const { AfkRepository } = require('../database/repositories/AfkRepository');
+const { HighlightRepository } = require('../database/repositories/HighlightRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -64,6 +66,9 @@ const { AutoResponderService } = require('../services/AutoResponderService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
+const { AfkService } = require('../services/AfkService');
+const { HighlightService } = require('../services/HighlightService');
+const { SnipeService } = require('../services/SnipeService');
 
 const logger = createLogger('client');
 
@@ -126,6 +131,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleRepository(db),
       announcements: new ScheduledAnnouncementRepository(db),
       birthdays: new BirthdayRepository(db),
+      afk: new AfkRepository(db),
+      highlights: new HighlightRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -165,6 +172,10 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
       birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
+      // Outils des membres : absences (/afk), alertes de mots-clés (/alertes), snipe (/snipe).
+      afk: new AfkService({ client: this, afk: this.repositories.afk, config: configService }),
+      highlights: new HighlightService({ client: this, highlights: this.repositories.highlights, config: configService }),
+      snipe: new SnipeService({ client: this, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -274,8 +285,9 @@ class GadgetClient extends Client {
       logger.warn('Arrêt des compteurs de statistiques :', err?.message);
     }
     // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
-    // En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
-    await this.#settleAll(['autoResponses', 'sticky', 'starboard'], 'stop', 'Arrêt du service');
+    // Outils des membres (afk, highlights, snipe) : envois en attente annulés, réponses d'absence
+    // affichées supprimées. En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
+    await this.#settleAll(['autoResponses', 'sticky', 'starboard', 'afk', 'highlights', 'snipe'], 'stop', 'Arrêt du service');
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
     // pour rester sous le garde-fou d'arrêt.
