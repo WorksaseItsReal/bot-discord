@@ -86,6 +86,13 @@ function analyze(guild, cfg) {
   }
   // Catégorie supprimée : les vocaux se créent alors à côté du salon créateur, sans prévenir.
   if (cfg.tempVoice?.enabled && cfg.tempVoice.categoryId) modules.checks.push(channelCheck(guild, me, cfg.tempVoice.categoryId, 'Catégorie des vocaux temporaires', '/tempvoice'));
+  // Signalements (menu « Signaler le message ») : salon dédié, sinon salon de logs Modération.
+  if (cfg.reports?.enabled !== false) {
+    if (cfg.reports?.channelId) modules.checks.push(channelCheck(guild, me, cfg.reports.channelId, 'Salon des signalements', '/signalements'));
+    else if (!cfg.logChannels?.moderation) {
+      modules.checks.push({ level: 'warn', text: 'Signalements actifs sans salon : ils sont refusés aux membres', tip: 'Choisissez un salon avec `/signalements` (ou configurez les logs Modération : `/logs`).' });
+    }
+  }
   if (cfg.antiraid?.enabled && !cfg.antiraid.alertChannel) {
     modules.checks.push({ level: 'warn', text: 'AntiRaid actif sans salon d\'alerte', tip: 'Définissez un salon d\'alerte : `/antiraid` › **Alertes**.' });
   }
@@ -129,6 +136,7 @@ function roleRefs(cfg) {
   if (cfg.logs?.staffRoleId) out.push([cfg.logs.staffRoleId, 'Rôle staff des logs', '/logs', false]);
   if (cfg.modmail?.staffRoleId) out.push([cfg.modmail.staffRoleId, 'Rôle staff du modmail', '/modmail', false]);
   if (cfg.projects?.managerRoleId) out.push([cfg.projects.managerRoleId, 'Rôle gestionnaire des projets', '/projet config', false]);
+  if (cfg.reports?.pingRoleId) out.push([cfg.reports.pingRoleId, 'Rôle mentionné aux signalements', '/signalements', false]);
   return out;
 }
 

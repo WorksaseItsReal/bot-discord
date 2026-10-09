@@ -114,8 +114,13 @@ test('destination : salon dédié, repli sur les logs Modération, désactivatio
   assert.deepEqual([service.destination(guild).channelId, service.destination(guild).fallback], [LOGS, true]);
   config.update(GID, { reports: { channelId: STAFF } });
   assert.deepEqual([service.destination(guild).channelId, service.destination(guild).fallback], [STAFF, false]);
+  // Salon des signalements disparu : repli sur le salon de logs Modération (signalé).
   config.update(GID, { reports: { channelId: '200000000000000099' } });
+  const lost = service.destination(guild);
+  assert.deepEqual([lost.status, lost.channelId, lost.fallback, lost.lost], ['ok', LOGS, true, '200000000000000099']);
+  config.update(GID, { logChannels: { moderation: null } });
   assert.equal(service.destination(guild).status, 'missing');
+  config.update(GID, { logChannels: { moderation: LOGS } });
   config.update(GID, { reports: { channelId: STAFF, enabled: false } });
   assert.throws(() => service.assertAvailable(guild), /désactivés/);
 });

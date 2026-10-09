@@ -60,7 +60,7 @@ function assertNoCooldown(client, userId) {
 
 function destinationText(dest) {
   if (dest.status === 'unset') return `${ICONS.warning} *Aucun* : choisissez un salon (ou configurez le salon de logs Modération).`;
-  const where = `<#${dest.channelId}>${dest.fallback ? ' *(salon de logs Modération)*' : ''}`;
+  const where = `<#${dest.channelId}>${dest.fallback ? ' *(salon de logs Modération)*' : ''}${dest.lost ? `\n${ICONS.warning} Salon des signalements introuvable : repli` : ''}`;
   if (dest.status === 'missing') return `${ICONS.error} ${where} · *salon introuvable*`;
   if (dest.status === 'noperm') return `🔒 ${where} · *je ne peux pas y écrire*`;
   return where;

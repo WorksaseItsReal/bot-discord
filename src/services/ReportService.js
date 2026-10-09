@@ -92,19 +92,32 @@ class ReportService {
 
   /**
    * Salon qui reçoit les cartes : salon des signalements, sinon salon de logs Modération.
-   * @returns {{ channel: object|null, channelId: string|null, fallback: boolean, status: 'ok'|'unset'|'missing'|'noperm' }}
+   * Salon des signalements introuvable (supprimé) : repli sur le salon de logs Modération
+   * (`lost` = identifiant du salon disparu, signalé au tableau de bord).
+   * @returns {{ channel: object|null, channelId: string|null, fallback: boolean, lost: string|null, status: 'ok'|'unset'|'missing'|'noperm' }}
    */
   destination(guild) {
     const cfg = this.config.get(guild.id);
-    const fallback = !cfg.reports?.channelId;
-    const channelId = cfg.reports?.channelId ?? cfg.logChannels?.moderation ?? null;
-    if (!channelId) return { channel: null, channelId: null, fallback, status: 'unset' };
-    const channel = guild.channels?.cache?.get(channelId);
-    if (!channel || !TEXT_TYPES.includes(channel.type)) return { channel: null, channelId, fallback, status: 'missing' };
+    const configured = cfg.reports?.channelId ?? null;
+    const usable = (id) => {
+      const ch = id ? guild.channels?.cache?.get(id) : null;
+      return ch && TEXT_TYPES.includes(ch.type) ? ch : null;
+    };
+    let lost = null;
+    let fallback = !configured;
+    let channelId = configured ?? cfg.logChannels?.moderation ?? null;
+    if (configured && !usable(configured) && usable(cfg.logChannels?.moderation)) {
+      lost = configured;
+      fallback = true;
+      channelId = cfg.logChannels.moderation;
+    }
+    if (!channelId) return { channel: null, channelId: null, fallback, lost, status: 'unset' };
+    const channel = usable(channelId);
+    if (!channel) return { channel: null, channelId, fallback, lost, status: 'missing' };
     const me = guild.members?.me;
     const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
-    if (perms && !perms.has(REQUIRED_PERMISSIONS)) return { channel: null, channelId, fallback, status: 'noperm' };
-    return { channel, channelId, fallback, status: 'ok' };
+    if (perms && !perms.has(REQUIRED_PERMISSIONS)) return { channel: null, channelId, fallback, lost, status: 'noperm' };
+    return { channel, channelId, fallback, lost, status: 'ok' };
   }
 
   /** Lève une UserError si les signalements ne peuvent pas être reçus sur ce serveur. */

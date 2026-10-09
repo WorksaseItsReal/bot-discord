@@ -13,6 +13,7 @@ const { nextId } = require('./lib/ids');
 
 const REPORT = 'Signaler le message';
 const botMessages = (h, mark, pred = () => true) => h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m && m.author.id === h.client.user.id && pred(m));
+const allText = (h, rec) => h.messagesOf(rec).flatMap((m) => m.embeds ?? []).flatMap((e) => [e.title, e.description, ...(e.fields ?? []).flatMap((f) => [f.name, f.value])]).filter(Boolean).join('\n');
 const authoredBy = (h, as, content, channelId = IDS.channels.general) => h.fake.buildMessage({ channelId, body: { content }, author: h.fake.users.get(IDS.users[as] ?? as) });
 
 /** Signale `message` (menu + formulaire) et renvoie la carte publiée dans #staff. */
@@ -126,6 +127,38 @@ test('arrêt du bot pendant la fermeture d\'un ticket : archive sans télécharg
     assert.ok(archive, 'transcript non archivé');
     assert.deepEqual(archive.files.map((f) => f.name).filter((n) => !n.endsWith('.txt')), []);
     assert.ok(!h.fake.channels.has(channel.id), 'salon du ticket non supprimé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('salon des signalements supprimé : débranché, repli sur les logs Modération, signalé par /diagnostics', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ reports: { channelId: IDS.channels.staff } });
+  try {
+    // Salon disparu pendant que le bot était hors ligne : repli immédiat (pas de refus).
+    h.configure({ reports: { channelId: '123456789012345678' } });
+    const diag = await h.slash('diagnostics');
+    assert.match(allText(h, diag), /Salon des signalements : salon introuvable/);
+    const mark = h.fake.messageLog.length;
+    const menu = await h.contextMenu(REPORT, authoredBy(h, 'target', 'Premier'), { as: 'member' });
+    assert.ok(menu.modals.length, `signalement refusé : ${h.replyText(menu)}`);
+    await h.submitModal(menu, { raison: 'x' });
+    assert.ok(botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && /Signalement #1/.test(m.embeds?.[0]?.title ?? '')).length, 'carte non repliée sur les logs Modération');
+    const dash = await h.slash('signalements');
+    assert.match(allText(h, dash), /introuvable : repli/);
+
+    // Salon supprimé en direct : la configuration est remise à zéro.
+    h.configure({ reports: { channelId: IDS.channels.staff } });
+    h.fake.deleteChannel(IDS.channels.staff);
+    await h.settle();
+    assert.equal(h.client.services.config.get(h.guild.id).reports.channelId, null, 'reports.channelId non remis à zéro');
+    const mark2 = h.fake.messageLog.length;
+    const menu2 = await h.contextMenu(REPORT, authoredBy(h, 'target', 'Second'), { as: 'admin' });
+    await h.submitModal(menu2, { raison: 'y' });
+    assert.ok(botMessages(h, mark2, (m) => m.channel_id === IDS.channels.logs && /Signalement #2/.test(m.embeds?.[0]?.title ?? '')).length);
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
