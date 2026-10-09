@@ -37,6 +37,7 @@ const { StickyRepository } = require('../database/repositories/StickyRepository'
 const { TempRoleRepository } = require('../database/repositories/TempRoleRepository');
 const { ScheduledAnnouncementRepository } = require('../database/repositories/ScheduledAnnouncementRepository');
 const { BirthdayRepository } = require('../database/repositories/BirthdayRepository');
+const { GameScoreRepository } = require('../database/repositories/GameScoreRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -64,6 +65,7 @@ const { AutoResponderService } = require('../services/AutoResponderService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
+const { GameService } = require('../services/GameService');
 
 const logger = createLogger('client');
 
@@ -126,6 +128,7 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleRepository(db),
       announcements: new ScheduledAnnouncementRepository(db),
       birthdays: new BirthdayRepository(db),
+      gameScores: new GameScoreRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -165,6 +168,8 @@ class GadgetClient extends Client {
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
       birthdays: new BirthdayService({ client: this, birthdays: this.repositories.birthdays, config: configService }),
+      // Mini-jeux (/jeu) : parties en mémoire (minuteurs unref, arrêtés dans shutdown), scores en base.
+      games: new GameService({ client: this, scores: this.repositories.gameScores }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -272,6 +277,12 @@ class GadgetClient extends Client {
       await this.services?.counters?.stop();
     } catch (err) {
       logger.warn('Arrêt des compteurs de statistiques :', err?.message);
+    }
+    try {
+      // Mini-jeux : nettoyage périodique et minuteurs (défis, questions) annulés avant la base.
+      this.services?.games?.stop();
+    } catch (err) {
+      logger.warn('Arrêt des mini-jeux :', err?.message);
     }
     // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
     // En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
