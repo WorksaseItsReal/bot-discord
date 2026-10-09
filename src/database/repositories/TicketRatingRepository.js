@@ -40,6 +40,13 @@ class TicketRatingRepository {
         LIMIT ?`,
     );
     this.distributionStmt = db.prepare('SELECT rating, COUNT(*) AS n FROM ticket_ratings WHERE guild_id = ? AND closed_at >= ? AND rating IS NOT NULL GROUP BY rating');
+    // /modstats : tickets FERMÉS pris en charge (la ligne « tickets » est supprimée à la fermeture).
+    this.claimedStatsStmt = db.prepare(
+      `SELECT claimed_by, COUNT(*) AS n FROM ticket_ratings
+       WHERE guild_id = @guildId AND claimed_by IS NOT NULL AND COALESCE(claimed_at, opened_at, closed_at) >= @since
+         AND (@mod IS NULL OR claimed_by = @mod)
+       GROUP BY claimed_by`,
+    );
     this.commentsStmt = db.prepare(
       'SELECT * FROM ticket_ratings WHERE guild_id = ? AND comment IS NOT NULL ORDER BY rated_at DESC, ticket_id DESC LIMIT ?',
     );
@@ -95,6 +102,14 @@ class TicketRatingRepository {
     const out = [0, 0, 0, 0, 0];
     for (const r of this.distributionStmt.all(guildId, since)) if (r.rating >= 1 && r.rating <= 5) out[r.rating - 1] = r.n;
     return out;
+  }
+
+  /**
+   * Tickets fermés pris en charge depuis `since`, par membre du staff (/modstats).
+   * @returns {Array<{ claimed_by: string, n: number }>}
+   */
+  claimedStats(guildId, { since = 0, moderatorId = null } = {}) {
+    return this.claimedStatsStmt.all({ guildId, since, mod: moderatorId ?? null });
   }
 
   /** Derniers commentaires laissés. */

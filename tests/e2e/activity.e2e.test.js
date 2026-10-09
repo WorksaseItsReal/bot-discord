@@ -129,8 +129,10 @@ test('/statistiques : chaque vue et période, réglages ; lecture réservée pui
     for (const view of ['serveur', 'salons', 'membres', 'heures', 'croissance', 'reglages']) assert.ok(stats.navChosen.has(`cmd:statistiques:nav=${view}`), `vue ${view} jamais ouverte`);
     for (const key of ['go', 'retention', 'collect', 'access', 'wipe']) assert.ok(stats.keys.has(`cmd:statistiques:${key}`), `${key} jamais utilisé`);
 
-    // Période conservée en changeant de vue (l'exploration a pu tout effacer : données remises).
+    // Période conservée en changeant de vue (l'exploration a pu tout effacer : données remises,
+    // vues en cache oubliées puisqu'elles sont écrites directement en base).
     repo.applyBatch({ messages, hours, flows });
+    h.client.services.activity.forgetViews(G);
     const fresh = await h.slash('statistiques', sub('serveur', [{ name: 'vue', type: 3, value: 'heures' }, { name: 'periode', type: 4, value: 7 }]));
     const hoursMsg = h.messagesOf(fresh)[0];
     assert.match(hoursMsg.embeds[0].description, /```\n00 h │/);
@@ -269,11 +271,14 @@ test('/activite : collecte trop récente refusée ; liste, exclusions, rôle, MP
     const kickView = await h.click(h.messagesOf(last)[0], 'cmd:activite:page:30:0:b');
     const ask = await h.click(h.messagesOf(kickView)[0], 'cmd:activite:act:30:kick');
     assert.match(h.replyText(ask), /Expulser 50 membre\(s\) \?/);
-    const form = await h.click(h.messagesOf(ask)[0], 'cmd:activite:kickform:30');
+    // Le bouton porte le jeton de la liste affichée (l'expulsion porte exactement sur elle).
+    const kickformId = (h.messagesOf(ask)[0].components ?? []).flatMap((r) => r.components ?? []).map((c) => c.custom_id).find((id) => id?.startsWith('cmd:activite:kickform:30:'));
+    assert.ok(kickformId, 'bouton « Expulser… » absent');
+    const form = await h.click(h.messagesOf(ask)[0], kickformId);
     const wrong = await h.submitModal(form, { confirmation: 'oui', raison: '' });
     assert.ok(h.isError(wrong));
     assert.equal(sleepers.filter((id) => h.fake.members.has(id)).length, 55, 'expulsion sans confirmation');
-    const form2 = await h.click(h.messagesOf(ask)[0], 'cmd:activite:kickform:30');
+    const form2 = await h.click(h.messagesOf(ask)[0], kickformId);
     const logMark = h.fake.messageLog.length;
     const kicked = await h.submitModal(form2, { confirmation: 'expulser', raison: 'Ménage de rentrée' });
     assert.match(h.replyText(kicked), /\*\*50\*\* membre\(s\) traité\(s\)/);

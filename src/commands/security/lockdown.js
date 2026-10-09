@@ -7,6 +7,7 @@ const { parseDuration, discordTimestamp, formatDuration } = require('../../utils
 const { serverLockCard } = require('../../services/LockdownService');
 const { timedDuration } = require('../../services/TimedLockService');
 const { assertAdmin } = require('../../services/ModerationService');
+const { UserError } = require('../../core/errors');
 
 function enableButton() {
   return actionButton({ command: 'lockdown', action: 'enable', label: 'Activer le lockdown', emoji: '🚨', style: ButtonStyle.Danger });
@@ -42,16 +43,30 @@ function renderStatus(client, guild) {
 }
 
 /**
+ * Lockdown avec durée refusé si un lockdown SANS échéance est déjà en cours (AntiRaid ou
+ * manuel) : sa levée automatique rouvrirait aussi les salons verrouillés par ce lockdown.
+ * Un lockdown déjà temporaire peut être reprogrammé.
+ */
+function assertNoPermanentLockdown(client, guild) {
+  if (!client.services.lockdown.status(guild)) return;
+  if (client.services.timedLocks?.activeFor(guild.id, 'lockdown', guild.id)) return;
+  throw new UserError('Un lockdown **sans échéance** est déjà en cours (AntiRaid ou manuel) : `/lockdown disable` d\'abord, ou relancez sans durée.');
+}
+
+/**
  * Demande confirmation puis verrouille tout ; la carte remplace la confirmation.
  * `durationMs` : levée automatique programmée (étape du scheduler) ; sans durée, le
  * lockdown est permanent (une levée déjà programmée est annulée par enable()).
  */
 async function runEnable(interaction, client, durationMs = null) {
+  if (durationMs) assertNoPermanentLockdown(client, interaction.guild);
   const ok = await confirm(interaction, {
     description: `Verrouiller **tous** les salons écrits du serveur${durationMs ? ` pendant **${formatDuration(durationMs)}**` : ''} ?`,
     confirmLabel: 'Lockdown',
   });
   if (!ok) return;
+  // Relu après la confirmation : l'AntiRaid a pu verrouiller le serveur entre-temps.
+  if (durationMs) assertNoPermanentLockdown(client, interaction.guild);
   const n = await client.services.lockdown.enable(interaction.guild, interaction.member, `Lockdown par ${interaction.user.tag}`);
   const until = durationMs && n
     ? client.services.timedLocks.schedule({ guildId: interaction.guild.id, channelId: interaction.guild.id, kind: 'lockdown', durationMs, moderatorId: interaction.user.id })

@@ -100,6 +100,21 @@ function assertManageable(interaction, channel) {
   if (channel.manageable === false) throw new UserError(`Je ne peux pas gérer ${channel} : il me faut la permission **Gérer les salons** sur ce salon.`);
 }
 
+/**
+ * Création d'un salon (creer, cloner) : « Gérer les salons » dans la catégorie d'arrivée
+ * (permissions propres) ; à la racine, au niveau du serveur. Une surcharge sur un seul
+ * salon ne permet pas d'en créer d'autres (comme dans Discord).
+ */
+function assertCanCreateIn(interaction, parent) {
+  if (parent) {
+    assertCanManageChannel(interaction.member, parent);
+    return;
+  }
+  if (interaction.member?.permissions?.has && !interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+    throw new UserError('Il vous faut la permission **Gérer les salons** sur le serveur pour créer un salon hors catégorie.');
+  }
+}
+
 /** Carte de résultat d'une action de gestion. */
 function actionCard({ tone = 'success', icon, title, description, channel, moderator, fields = [] }) {
   return card({
@@ -165,12 +180,7 @@ async function create(interaction) {
   if (parent && parent.type !== ChannelType.GuildCategory) throw new UserError('La catégorie choisie n\'en est pas une.');
   if (parent && type === ChannelType.GuildCategory) throw new UserError('Une catégorie ne peut pas être rangée dans une autre catégorie.');
   if (topic && !TOPIC_TYPES.includes(type)) throw new UserError('Seuls les salons textuels, d\'annonces et les forums ont un sujet.');
-  // Création dans une catégorie : « Gérer les salons » vérifiée dans cette catégorie (permissions propres) ;
-  // à la racine : au niveau du serveur (une surcharge sur le salon courant ne suffit pas).
-  if (parent) assertCanManageChannel(interaction.member, parent);
-  else if (interaction.member?.permissions?.has && !interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-    throw new UserError('Il vous faut la permission **Gérer les salons** sur le serveur pour créer un salon hors catégorie.');
-  }
+  assertCanCreateIn(interaction, parent);
   const me = guild.members.me;
   const botPerms = parent ? parent.permissionsFor?.(me) : me?.permissions;
   if (botPerms && !botPerms.has(PermissionFlagsBits.ManageChannels)) throw new UserError('Il me manque la permission **Gérer les salons** pour créer ce salon.');
@@ -224,6 +234,9 @@ async function remove(interaction) {
     })],
     components: [],
   });
+  // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
+  // (suppressions de salons en masse), après la réponse.
+  await interaction.client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
 }
 
 async function clone(interaction) {
@@ -232,6 +245,8 @@ async function clone(interaction) {
   assertManageable(interaction, source);
   const name = interaction.options.getString('nom') ? cleanChannelName(interaction.options.getString('nom')) : undefined;
   const parent = source.parent;
+  // La copie est un NOUVEAU salon : même contrôle que /channel creer (catégorie ou serveur).
+  assertCanCreateIn(interaction, parent);
   const me = guild.members.me;
   const botPerms = parent ? parent.permissionsFor?.(me) : me?.permissions;
   if (botPerms && !botPerms.has(PermissionFlagsBits.ManageChannels)) throw new UserError('Il me manque la permission **Gérer les salons** pour créer la copie.');
@@ -279,8 +294,10 @@ async function topic(interaction) {
   const text = interaction.options.getString('texte')?.trim() || null;
   if (text && [...text].length > MAX_TOPIC) throw new UserError(`Sujet trop long (${MAX_TOPIC} caractères au maximum).`);
   if ((channel.topic ?? null) === text) throw new UserError(text ? 'Ce salon a déjà ce sujet.' : 'Ce salon n\'a déjà pas de sujet.');
+  // Discord limite les changements de nom et de sujet (2 toutes les 10 minutes) : la requête peut attendre.
+  await interaction.deferReply({ ephemeral: true });
   await channel.setTopic(text, reasonOf(interaction, 'Sujet modifié'));
-  await interaction.reply({
+  await interaction.editReply({
     embeds: [actionCard({
       icon: ICONS.reason,
       title: text ? 'Sujet modifié' : 'Sujet retiré',
@@ -289,7 +306,6 @@ async function topic(interaction) {
       moderator: interaction.user,
       fields: [text ? wide(ICONS.reason, 'Sujet', truncate(text, 1024)) : null],
     })],
-    ephemeral: true,
   });
 }
 
@@ -299,8 +315,10 @@ async function nsfw(interaction) {
   if (!NSFW_TYPES.includes(channel.type) || typeof channel.setNSFW !== 'function') throw new UserError('Ce type de salon ne peut pas être marqué NSFW.');
   const on = interaction.options.getBoolean('actif', true);
   if (Boolean(channel.nsfw) === on) throw new UserError(`${channel} est déjà ${on ? 'réservé aux adultes (NSFW)' : 'tout public'}.`);
+  // Modification du salon : la requête peut attendre une limite de Discord (délai de 3 s).
+  await interaction.deferReply({ ephemeral: true });
   await channel.setNSFW(on, reasonOf(interaction, on ? 'NSFW activé' : 'NSFW désactivé'));
-  await interaction.reply({
+  await interaction.editReply({
     embeds: [actionCard({
       tone: on ? 'caution' : 'success',
       icon: '🔞',
@@ -309,7 +327,6 @@ async function nsfw(interaction) {
       channel,
       moderator: interaction.user,
     })],
-    ephemeral: true,
   });
 }
 

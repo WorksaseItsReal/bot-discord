@@ -917,6 +917,19 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 27,
+    name: 'stats_collection_heartbeat',
+    up: `
+      -- Statistiques : battement de la collecte par serveur (dernier vidage, au plus toutes les
+      -- 5 minutes) et dernier trou de collecte (bot hors ligne plus de 6 h). Tant qu'un trou
+      -- tombe dans la fenêtre de N jours, les actions groupées de /activite sont refusées :
+      -- pendant le trou, personne n'a été compté actif.
+      ALTER TABLE stats_guilds ADD COLUMN last_seen INTEGER;
+      ALTER TABLE stats_guilds ADD COLUMN gap_start INTEGER;
+      ALTER TABLE stats_guilds ADD COLUMN gap_end INTEGER;
+    `,
+  },
 ];
 
 module.exports = { migrations };

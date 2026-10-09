@@ -127,21 +127,28 @@ async function downloadEmojiImage(href, { fetchImpl = globalThis.fetch, timeoutM
   const chunks = [];
   let size = 0;
   const reader = res.body?.getReader?.();
-  if (reader) {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > maxBytes) {
-        await reader.cancel().catch(() => {});
-        throw new UserError('Image trop lourde (256 Ko au maximum).');
+  try {
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new UserError('Image trop lourde (256 Ko au maximum).');
+        }
+        chunks.push(Buffer.from(value));
       }
-      chunks.push(Buffer.from(value));
+    } else {
+      const all = Buffer.from(await res.arrayBuffer());
+      if (all.length > maxBytes) throw new UserError('Image trop lourde (256 Ko au maximum).');
+      chunks.push(all);
     }
-  } else {
-    const all = Buffer.from(await res.arrayBuffer());
-    if (all.length > maxBytes) throw new UserError('Image trop lourde (256 Ko au maximum).');
-    chunks.push(all);
+  } catch (err) {
+    if (err instanceof UserError) throw err;
+    // Délai écoulé ou connexion coupée PENDANT la lecture du corps : erreur explicite, pas une erreur interne.
+    const timeout = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    throw new UserError(timeout ? 'Téléchargement de l\'image trop long (10 s) : réessayez.' : 'Impossible de télécharger l\'image.');
   }
   const buffer = Buffer.concat(chunks);
   const type = imageType(buffer);

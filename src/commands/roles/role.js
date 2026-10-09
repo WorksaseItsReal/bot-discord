@@ -38,7 +38,7 @@ function assertManageableRole(interaction, role) {
 /** Vérifie la permission « Gérer les rôles » de la personne qui clique. */
 function assertManageRoles(interaction) {
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
-    throw new UserError('Il faut la permission **Gérer les rôles** pour utiliser ce bouton.');
+    throw new UserError('Il faut la permission **Gérer les rôles** pour cette action.');
   }
 }
 
@@ -412,7 +412,11 @@ module.exports = {
     const role = interaction.options.getRole('role');
     assertManageableRole(interaction, role);
 
-    if (sub === 'modifier') return editRole(interaction, guild.roles.cache.get(role.id) ?? role);
+    if (sub === 'modifier') {
+      // Revérifiée : la commande peut avoir été ouverte à tous (pour /role list) dans les intégrations.
+      assertManageRoles(interaction);
+      return editRole(interaction, guild.roles.cache.get(role.id) ?? role);
+    }
 
     if (sub === 'delete') {
       const members = role.members?.size ?? 0;
@@ -428,7 +432,7 @@ module.exports = {
       await role.delete(`Supprimé par ${interaction.user.tag}`);
       // Après confirmation, la carte remplace la demande (éphémère).
       const respond = (payload) => (interaction.replied || interaction.deferred ? interaction.editReply(payload) : interaction.reply(payload));
-      return respond({
+      await respond({
         embeds: [
           card({
             tone: 'danger',
@@ -445,6 +449,10 @@ module.exports = {
           }),
         ],
       });
+      // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
+      // (suppressions de rôles en masse), après la réponse.
+      await client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'roleDelete');
+      return undefined;
     }
 
     if (sub === 'temporaire') {

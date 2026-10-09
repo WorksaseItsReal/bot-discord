@@ -18,13 +18,14 @@ class TicketRepository {
     // /modstats : tickets pris en charge (encore enregistrés : un ticket fermé est supprimé de la table).
     this.claimedStatsStmt = db.prepare(
       `SELECT claimed_by, COUNT(*) AS n FROM tickets
-       WHERE guild_id = @guildId AND claimed_by IS NOT NULL AND created_at >= @since AND (@mod IS NULL OR claimed_by = @mod)
+       WHERE guild_id = @guildId AND claimed_by IS NOT NULL AND COALESCE(claimed_at, created_at) >= @since AND (@mod IS NULL OR claimed_by = @mod)
        GROUP BY claimed_by`,
     );
   }
 
   /**
-   * Tickets pris en charge, ouverts depuis `since`, par membre du staff (/modstats).
+   * Tickets OUVERTS pris en charge depuis `since`, par membre du staff (/modstats ; les tickets
+   * fermés sont dans ticket_ratings).
    * @returns {Array<{ claimed_by: string, n: number }>}
    */
   claimedStats(guildId, { since, moderatorId = null } = {}) {
