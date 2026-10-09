@@ -250,3 +250,52 @@ test('alerte de vague : lockdown non appliqué signalé, avec bouton de nouvelle
   const ids = alerts[0].buttons.map((b) => (typeof b.toJSON === 'function' ? b.toJSON() : b).custom_id);
   assert.deepEqual(ids, ['cmd:lockdown:enable']);
 });
+
+// ------------------------------------------------------------ compteurs : limite de renommage
+
+const { IntentsBitField } = require('discord.js');
+const { intents } = require('../src/config/intents');
+const { StatsCounterService } = require('../src/services/StatsCounterService');
+
+test('compteurs : un renommage bloqué par la limite de Discord ne bloque pas la mise à jour', { timeout: 5_000 }, async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000); // minuteurs du service « unref »
+  t.after(() => clearInterval(keepAlive));
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  let calls = 0;
+  const channel = {
+    id: '500000000000000001',
+    name: '👥 Membres : 3',
+    type: 2,
+    permissionsFor: () => ({ has: () => true }),
+    setName: () => {
+      calls += 1;
+      return new Promise(() => {}); // discord.js attend la fin de la fenêtre (jusqu'à 10 min)
+    },
+  };
+  const guild = {
+    id: GUILD,
+    available: true,
+    memberCount: 4,
+    members: { cache: new Collection(), me: { id: '999' } },
+    roles: { cache: new Collection([[GUILD, {}]]) },
+    channels: { cache: new Collection([[channel.id, channel]]) },
+  };
+  channel.guild = guild;
+  const client = { guilds: { cache: new Collection([[GUILD, guild]]) }, options: { intents: new IntentsBitField(intents) } };
+  const svc = new StatsCounterService({ client, config });
+  svc.renameTimeoutMs = 30;
+  config.update(GUILD, { statsCounters: { counters: { members: { enabled: true, channelId: channel.id } } } });
+
+  const started = Date.now();
+  const first = await svc.update(guild);
+  assert.ok(Date.now() - started < 1_000, 'mise à jour bloquée par le renommage');
+  assert.deepEqual(first.waiting, ['members']);
+  assert.equal(svc.running.size, 0, 'mise à jour encore marquée en cours');
+  // Fenêtre écoulée, renommage précédent toujours bloqué : pas de second appel empilé.
+  config.update(GUILD, { statsCounters: { counters: { members: { renamedAt: 0 } } } });
+  const second = await svc.update(guild);
+  assert.deepEqual(second.waiting, ['members']);
+  assert.equal(calls, 1);
+  await svc.stop();
+});

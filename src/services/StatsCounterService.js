@@ -12,6 +12,12 @@ const RENAME_WINDOW_MS = 10 * 60_000;
 const SWEEP_INTERVAL_MS = 10 * 60_000;
 /** Anti-rebond des déclenchements par événement (arrivée, départ, boost). */
 const DEBOUNCE_MS = 30_000;
+/**
+ * Attente maximale d'un renommage. Au-delà (limite de Discord atteinte, par exemple après un
+ * renommage à la main : discord.js attend jusqu'à 10 min), la mise à jour n'attend plus :
+ * le renommage aboutit seul, le passage suivant corrige la valeur.
+ */
+const RENAME_TIMEOUT_MS = 15_000;
 /** Liste complète des membres relue au plus toutes les 10 minutes (comptes humains / bots). */
 const MEMBER_FETCH_INTERVAL_MS = 10 * 60_000;
 const MAX_TEMPLATE = 100;
@@ -32,6 +38,19 @@ const COUNTER_TYPES = Object.freeze({
   roles: { label: 'Rôles', emoji: '🎭', template: '🎭 Rôles : {n}', description: 'Rôles (hors @everyone)' },
 });
 const COUNTER_KEYS = Object.keys(COUNTER_TYPES);
+
+/**
+ * Attend `promise` au plus `ms` (minuteur unref). Ne rejette jamais.
+ * @returns {Promise<{ value?: unknown, error?: unknown, timedOut?: boolean }>}
+ */
+function settleWithin(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
+    timer.unref?.();
+  });
+  return Promise.race([promise.then((value) => ({ value }), (error) => ({ error: error ?? new Error('échec') })), timeout]).finally(() => clearTimeout(timer));
+}
 
 /** L'intent GuildPresences est-il activé (src/config/intents.js) ? */
 function hasPresenceIntent(client) {
@@ -116,6 +135,9 @@ class StatsCounterService {
     this.memberFetchAt = new Map();
     /** @type {Map<string, string>} salon → problème détecté (« noperm ») */
     this.problems = new Map();
+    /** @type {Map<string, Promise<unknown>>} renommages bloqués par la limite de Discord, par salon */
+    this.stalled = new Map();
+    this.renameTimeoutMs = RENAME_TIMEOUT_MS;
     this.stopping = false;
   }
 
@@ -252,26 +274,35 @@ class StatsCounterService {
         continue;
       }
       const nextAt = (c.renamedAt || 0) + RENAME_WINDOW_MS;
-      if (nextAt > now) {
-        retryAt = Math.min(retryAt, nextAt);
+      // Renommage précédent encore bloqué par la limite de Discord : jamais empilé.
+      if (nextAt > now || this.stalled.has(channel.id)) {
+        retryAt = Math.min(retryAt, Math.max(nextAt, now + RENAME_WINDOW_MS / 10));
         summary.waiting.push(type);
         continue;
       }
       // Enregistré AVANT l'appel : un échec ou un redémarrage ne permet pas de dépasser la limite.
       this.config.update(guild.id, { statsCounters: { counters: { [type]: { renamedAt: now } } } });
-      try {
-        await channel.setName(name, 'Compteur de statistiques');
+      const rename = Promise.resolve().then(() => channel.setName(name, 'Compteur de statistiques'));
+      const outcome = await settleWithin(rename, this.renameTimeoutMs);
+      if (outcome.timedOut) {
+        // Limite atteinte (discord.js attend la fin de la fenêtre) : on n'attend pas avec lui.
+        this.stalled.set(channel.id, rename);
+        rename.catch(() => {}).finally(() => this.stalled.delete(channel.id));
+        retryAt = Math.min(retryAt, now + RENAME_WINDOW_MS);
+        summary.waiting.push(type);
+        continue;
+      }
+      const err = outcome.error;
+      if (!err) {
         this.problems.delete(channel.id);
         summary.renamed.push(type);
-      } catch (err) {
-        if (err?.code === 10003) {
-          this.forgetChannel(guild.id, channel.id);
-          summary.removed.push(type);
-        } else if (err?.code === 50013 || err?.code === 50001) {
-          this.problems.set(channel.id, 'noperm');
-          summary.noperm.push(type);
-        } else logger.debug(`Renommage du compteur ${type} (${guild.id}) :`, err?.message);
-      }
+      } else if (err?.code === 10003) {
+        this.forgetChannel(guild.id, channel.id);
+        summary.removed.push(type);
+      } else if (err?.code === 50013 || err?.code === 50001) {
+        this.problems.set(channel.id, 'noperm');
+        summary.noperm.push(type);
+      } else logger.debug(`Renommage du compteur ${type} (${guild.id}) :`, err?.message);
     }
     // Valeur changée mais fenêtre de renommage non écoulée : nouvel essai à son ouverture.
     if (Number.isFinite(retryAt)) this.schedule(guild.id, retryAt - now + 1_000);
@@ -446,6 +477,7 @@ module.exports = {
   COUNTER_TYPES,
   COUNTER_KEYS,
   RENAME_WINDOW_MS,
+  RENAME_TIMEOUT_MS,
   CATEGORY_NAME,
   availableTypes,
   hasPresenceIntent,
