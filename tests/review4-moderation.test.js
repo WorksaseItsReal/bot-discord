@@ -362,3 +362,44 @@ test('départs manqués : liste des membres incomplète ou intent absent → per
   assert.equal(await departures.reconcileGuild(stopping.client, stopping.guild), null);
   assert.equal(stopping.levels.rank(GUILD, 'D'), 1);
 });
+
+// ------------------------------------------------------------ signalements : actions concurrentes
+
+const { ReportRepository } = require('../src/database/repositories/ReportRepository');
+const { ReportService } = require('../src/services/ReportService');
+
+test('signalements : la ligne est relue après la prise du verrou (deux modérateurs, rejet concurrent)', async () => {
+  const { db } = memoryDb();
+  const reports = new ReportRepository(db);
+  const config = new ConfigService(new GuildConfigRepository(db));
+  const service = new ReportService({ reports, config, logging: { send: async () => true } });
+  const guild = { id: GUILD };
+  const id = reports.create({ guildId: GUILD, reporterId: 'R', targetId: 'T', channelId: 'C', messageId: 'M' });
+  // Les deux modérateurs ont lu le signalement AVANT la première action.
+  const staleA = reports.get(GUILD, id);
+  const staleB = reports.get(GUILD, id);
+  let warns = 0;
+  const warn = async () => {
+    warns += 1;
+    return null;
+  };
+  await service.act(guild, staleA, { type: 'warn', moderator: { id: 'MODA' }, run: warn });
+  await assert.rejects(service.act(guild, staleB, { type: 'warn', moderator: { id: 'MODB' }, run: warn }), /Déjà fait/);
+  assert.equal(warns, 1, 'membre averti deux fois');
+
+  // Clôture pendant une action en cours : refusée (verrou par signalement).
+  const id2 = reports.create({ guildId: GUILD, reporterId: 'R', targetId: 'T', channelId: 'C', messageId: 'M2' });
+  const stale2 = reports.get(GUILD, id2);
+  let release;
+  const acting = service.act(guild, stale2, { type: 'timeout', moderator: { id: 'MODA' }, run: () => new Promise((r) => (release = r)) });
+  await assert.rejects(service.resolve(guild, stale2, 'dismissed', { id: 'MODB' }), /déjà en cours/);
+  release(null);
+  await acting;
+  // Rejeté entre la lecture et le clic : aucune action exécutée.
+  const id3 = reports.create({ guildId: GUILD, reporterId: 'R', targetId: 'T', channelId: 'C', messageId: 'M3' });
+  const stale3 = reports.get(GUILD, id3);
+  await service.resolve(guild, stale3, 'dismissed', { id: 'MODB' });
+  let deleted = 0;
+  await assert.rejects(service.act(guild, stale3, { type: 'delete', moderator: { id: 'MODA' }, run: async () => (deleted += 1, null) }), /rejeté/);
+  assert.equal(deleted, 0);
+});

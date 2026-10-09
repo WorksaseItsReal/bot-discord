@@ -82,7 +82,7 @@ class ReportService {
     this.reports = reports;
     this.config = config;
     this.logging = logging;
-    /** Actions en cours (anti double clic) : `<guildId>:<id>:<action>`. */
+    /** Signalements dont une action ou une clôture est en cours : `<guildId>:<id>`. */
     this.pending = new Set();
   }
 
@@ -240,38 +240,53 @@ class ReportService {
   }
 
   /**
-   * Exécute une action du staff une seule fois à la fois (double clic) et l'enregistre :
-   * le signalement encore ouvert passe « traité » par son auteur.
-   * @param {{ type: 'delete'|'warn'|'timeout', moderator: { id: string }, run: () => Promise<string|void> }} opts
-   *   run renvoie une précision facultative (ex. escalade appliquée)
-   * @returns {Promise<object>} signalement mis à jour
+   * Exécute `fn` seul pour ce signalement (double clic, deux modérateurs, action + clôture).
+   * Le verrou est posé de façon SYNCHRONE, avant toute attente.
    */
-  async act(guild, report, { type, moderator, run }) {
-    if (report.status === 'dismissed') throw new UserError('Ce signalement a été rejeté : rouvrez-en un nouveau si nécessaire.');
-    if (report.actions.some((a) => a.type === type)) throw new UserError(`Déjà fait : ${ACTIONS[type].label.toLowerCase()}.`);
-    const key = `${guild.id}:${report.id}:${type}`;
-    if (this.pending.has(key)) throw new UserError('Cette action est déjà en cours.');
+  async #exclusive(guildId, id, fn) {
+    const key = `${guildId}:${id}`;
+    if (this.pending.has(key)) throw new UserError('Une action est déjà en cours sur ce signalement. Réessayez dans quelques secondes.');
     this.pending.add(key);
     try {
-      const note = await run();
-      this.reports.close(guild.id, report.id, 'handled', moderator.id);
-      const updated = this.reports.recordAction(guild.id, report.id, { type, by: moderator.id, ...(note ? { note: truncate(String(note), 300) } : {}) });
-      await this.log(guild, updated, { title: ACTIONS[type].label, description: `${ACTIONS[type].emoji} Action sur le signalement \`#${report.id}\` par <@${moderator.id}>.` });
-      return updated;
+      return await fn();
     } finally {
       this.pending.delete(key);
     }
   }
 
   /**
-   * Classe (traité) ou rejette un signalement ouvert.
+   * Exécute une action du staff une seule fois à la fois (double clic) et l'enregistre :
+   * le signalement encore ouvert passe « traité » par son auteur. La ligne est RELUE après la
+   * prise du verrou : le `report` reçu a pu être lu avant une action ou un rejet concurrent.
+   * @param {{ type: 'delete'|'warn'|'timeout', moderator: { id: string }, run: () => Promise<string|void> }} opts
+   *   run renvoie une précision facultative (ex. escalade appliquée)
+   * @returns {Promise<object>} signalement mis à jour
+   */
+  async act(guild, report, { type, moderator, run }) {
+    return this.#exclusive(guild.id, report.id, async () => {
+      const current = this.reports.get(guild.id, report.id);
+      if (!current) throw new UserError(`Le signalement ${code(`#${report.id}`)} est introuvable.`);
+      if (current.status === 'dismissed') throw new UserError('Ce signalement a été rejeté : rouvrez-en un nouveau si nécessaire.');
+      if (current.actions.some((a) => a.type === type)) throw new UserError(`Déjà fait : ${ACTIONS[type].label.toLowerCase()}.`);
+      const note = await run();
+      this.reports.close(guild.id, report.id, 'handled', moderator.id);
+      const updated = this.reports.recordAction(guild.id, report.id, { type, by: moderator.id, ...(note ? { note: truncate(String(note), 300) } : {}) });
+      await this.log(guild, updated, { title: ACTIONS[type].label, description: `${ACTIONS[type].emoji} Action sur le signalement \`#${report.id}\` par <@${moderator.id}>.` });
+      return updated;
+    });
+  }
+
+  /**
+   * Classe (traité) ou rejette un signalement ouvert (jamais pendant une action en cours).
    * @param {'handled'|'dismissed'} status
    */
   async resolve(guild, report, status, moderator) {
-    if (!this.reports.close(guild.id, report.id, status, moderator.id)) throw new UserError('Ce signalement a déjà été traité.');
-    const updated = this.reports.get(guild.id, report.id);
-    await this.log(guild, updated, { title: status === 'handled' ? 'Signalement classé' : 'Signalement rejeté', description: `${STATUS[status].emoji} Signalement \`#${report.id}\` ${status === 'handled' ? 'classé' : 'rejeté'} par <@${moderator.id}>.` });
-    return updated;
+    return this.#exclusive(guild.id, report.id, async () => {
+      if (!this.reports.close(guild.id, report.id, status, moderator.id)) throw new UserError('Ce signalement a déjà été traité.');
+      const updated = this.reports.get(guild.id, report.id);
+      await this.log(guild, updated, { title: status === 'handled' ? 'Signalement classé' : 'Signalement rejeté', description: `${STATUS[status].emoji} Signalement \`#${report.id}\` ${status === 'handled' ? 'classé' : 'rejeté'} par <@${moderator.id}>.` });
+      return updated;
+    });
   }
 
   /**
