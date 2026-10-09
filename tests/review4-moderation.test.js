@@ -110,3 +110,43 @@ test('rafale d\'arrivées : une lecture des invitations par lot, accueil immédi
   // Chaque arrivée reste enregistrée (attribuée quand une seule invitation a servi).
   assert.equal(joins.stats(GUILD, INVITER).regular + db.prepare('SELECT COUNT(*) AS n FROM invite_joins WHERE inviter_id IS NULL').get().n, 20);
 });
+
+// ------------------------------------------------------------ niveaux : membres partis
+
+const { LevelRepository } = require('../src/database/repositories/LevelRepository');
+const { LevelService } = require('../src/services/LevelService');
+
+function levelWorld() {
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  config.update(GUILD, { levels: { enabled: true } });
+  const repo = new LevelRepository(db);
+  const svc = new LevelService({ client: { services: {} }, levels: repo, config, grantDelayMs: 20 });
+  const cache = new Map();
+  const guild = { id: GUILD, members: { me: null, cache }, roles: { cache: new Map() } };
+  return { repo, svc, guild, cache };
+}
+
+test('niveaux : un message suivi d\'un départ ne remet pas le membre parti au classement', async () => {
+  const { repo, svc, guild, cache } = levelWorld();
+  const USER = '300000000000000099';
+  const member = { id: USER, guild, roles: { cache: new Map() } };
+  cache.set(USER, member);
+  repo.add(GUILD, USER, { xp: 100 }, () => 1);
+  const message = { id: '1', guild, author: { id: USER, bot: false }, member, channel: { id: '2' }, content: 'Bye tout le monde, je m\'en vais !', webhookId: null, system: false };
+  assert.equal(svc.handleMessage(message), true);
+  // Départ juste après le message (guildMemberRemove) : sorti du cache, marque posée.
+  cache.delete(USER);
+  svc.markLeft(GUILD, USER);
+  await sleep(80);
+  assert.notEqual(repo.get(GUILD, USER).left_at, null, 'marque de départ effacée par le gain différé');
+  assert.equal(repo.rank(GUILD, USER), null);
+
+  // Membre toujours présent mais marqué parti (marque ancienne) : un gain la retire.
+  cache.set(USER, member);
+  svc.cooldowns.clear();
+  assert.equal(svc.handleMessage({ ...message, id: '3' }), true);
+  await sleep(80);
+  assert.equal(repo.get(GUILD, USER).left_at, null);
+  assert.equal(repo.rank(GUILD, USER), 1);
+});

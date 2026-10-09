@@ -28,6 +28,11 @@ const DAY_MS = 86_400_000;
 /** Purge des membres partis : ancienneté maximale du départ (jours). */
 const MAX_LEFT_DAYS = 3650;
 
+/** Le membre est-il (encore) sur le serveur ? Les membres présents sont en cache (intent GuildMembers). */
+function isPresent(guild, userId) {
+  return guild?.members?.cache?.has?.(userId) === true;
+}
+
 /** Message d'annonce par défaut. */
 const DEFAULT_ANNOUNCE = 'Bravo {membre}, vous passez au **niveau {niveau}** ! 🎉';
 const ANNOUNCE_MODES = Object.freeze({
@@ -268,7 +273,10 @@ class LevelService {
     if (!cfg.enabled) return null;
     const base = randomXp(cfg.xpMin ?? 15, cfg.xpMax ?? 25, this.rng);
     const xp = Math.round(base * multiplierFor(roleIdsOf(message.member), cfg.multipliers));
-    return this.award(message.guild, message.author.id, { xp, messages: 1, at: Date.now(), present: true }, { member: message.member, channel: message.channel });
+    // Gain différé : le membre a pu partir entre-temps (« bye » puis départ). Il n'est
+    // « présent » (marque de départ effacée) que s'il est toujours sur le serveur.
+    const present = isPresent(message.guild, message.author.id);
+    return this.award(message.guild, message.author.id, { xp, messages: 1, at: Date.now(), present }, { member: message.member, channel: message.channel });
   }
 
   /**
@@ -428,7 +436,7 @@ class LevelService {
       if (minutes <= 0) continue;
       entry.credited += minutes * 60_000;
       const xp = Math.round(Math.max(0, cfg.voice.xpPerMinute ?? 10) * minutes * multiplierFor(roleIdsOf(state.member), cfg.multipliers));
-      await this.award(guild, entry.userId, { xp, voiceMinutes: minutes, present: true }, { member: state.member, channel: state.channel }).catch((err) => logger.debug('XP vocale :', err?.message));
+      await this.award(guild, entry.userId, { xp, voiceMinutes: minutes, present: isPresent(guild, entry.userId) }, { member: state.member, channel: state.channel }).catch((err) => logger.debug('XP vocale :', err?.message));
       credited += 1;
     }
     return credited;
