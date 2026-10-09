@@ -197,21 +197,20 @@ test('rôles d\'arrivée et de vérification ; refus de vérification clairs', (
 
 test('défi anti-robot : tiré côté serveur, usage unique, expiration, blocage après 5 erreurs', () => {
   let t = 1_000_000;
-  const seq = [0, 7, 5, 0]; // calcul, 7, 5, addition
+  const seq = [0, 7, 5]; // addition, 7, 5
   const { config } = world();
   const svc = new W.WelcomeService({ config, now: () => t, randomInt: (min) => (seq.length ? seq.shift() : min) });
   const { label } = svc.createChallenge(GUILD, UID);
-  assert.equal(label, 'Combien font 7 + 5 ?');
+  assert.equal(label, 'Combien font sept plus cinq ?');
   assert.ok(label.length <= 45);
   assert.equal(svc.checkChallenge(GUILD, UID, ' 12 '), 'ok');
   assert.equal(svc.checkChallenge(GUILD, UID, '12'), 'expired', 'usage unique');
   assert.equal(svc.checkChallenge(GUILD, '500000000000000009', '12'), 'expired', 'défi propre à chaque membre');
 
-  // Mot à recopier (insensible à la casse).
-  const word = new W.WelcomeService({ config, now: () => t, randomInt: (min) => (min === 0 ? 1 : min) });
-  const w = word.createChallenge(GUILD, UID).label;
-  assert.match(w, /^Recopiez ce mot : [A-Z]{6}$/);
-  assert.equal(word.checkChallenge(GUILD, UID, w.split(': ')[1].toLowerCase()), 'ok');
+  // Réponse en lettres acceptée (accents, casse, traits d'union indifférents).
+  seq.push(0, 7, 5);
+  svc.createChallenge(GUILD, UID);
+  assert.equal(svc.checkChallenge(GUILD, UID, 'Douze'), 'ok');
 
   // Expiration (5 min).
   svc.createChallenge(GUILD, UID);
@@ -498,7 +497,7 @@ test('panneau : publication avec bouton persistant, ancien panneau supprimé', a
 });
 
 test('bouton public « Me vérifier » : sans question, avec question (réponse jamais côté client), âge minimal', async () => {
-  // randomInt : calcul (0), 3, 4, addition (0).
+  // randomInt : addition (0), 3, 4.
   const seq = [];
   const { client, guild, config, logs } = world({ randomInt: (min) => (seq.length ? seq.shift() : min) });
   config.update(guild.id, { welcome: { autoRoles: { humans: [ROLE.member] }, verification: { enabled: true, roleId: ROLE.verified, minAccountAgeDays: 7 } } });
@@ -535,17 +534,17 @@ test('bouton public « Me vérifier » : sans question, avec question (réponse 
   // Avec question : le formulaire ne contient pas la réponse.
   config.update(guild.id, { welcome: { verification: { captcha: true } } });
   const m2 = fakeMember(guild, { id: '500000000000000007' });
-  seq.push(0, 3, 4, 0);
+  seq.push(0, 3, 4);
   const b = make(m2);
   await bienvenue.buttons.verify(b.i, client);
   assert.equal(b.out.modal.custom_id, 'cmd:bienvenue:verifysubmit');
-  assert.equal(b.out.modal.components[0].components[0].label, 'Combien font 3 + 4 ?');
+  assert.equal(b.out.modal.components[0].components[0].label, 'Combien font trois plus quatre ?');
   assert.ok(!JSON.stringify(b.out.modal).includes('"7"'), 'réponse absente du formulaire');
   // Mauvaise réponse : refus, défi consommé.
   await assert.rejects(bienvenue.buttons.verifysubmit(make(m2, { fields: { getTextInputValue: () => '8' } }).i, client), /incorrecte/);
   await assert.rejects(bienvenue.buttons.verifysubmit(make(m2, { fields: { getTextInputValue: () => '7' } }).i, client), /expiré/);
   // Nouvelle question, bonne réponse.
-  seq.push(0, 3, 4, 0);
+  seq.push(0, 3, 4);
   await bienvenue.buttons.verify(make(m2).i, client);
   const c = make(m2, { fields: { getTextInputValue: () => '7' } });
   await bienvenue.buttons.verifysubmit(c.i, client);

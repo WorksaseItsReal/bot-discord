@@ -6,7 +6,8 @@ const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton,
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 // transcriptLine : partagée avec les tickets (les messages ModMail sont surtout des cartes).
-const { fetchChannelHistory, channelGone, createInCategory, transcriptLine, TRANSCRIPT_MAX } = require('./TicketService');
+const { fetchChannelHistory, channelGone, createInCategory, transcriptLine, TRANSCRIPT_MAX, attachmentFields, archiveContinuationCard } = require('./TicketService');
+const { sendTranscriptArchive } = require('../utils/transcriptArchive');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('modmail');
@@ -55,6 +56,8 @@ class ModmailService {
     this.client = client;
     this.modmail = modmail;
     this.config = config;
+    /** Téléchargement des pièces jointes archivées (fetch natif ; injectable pour les tests). */
+    this.fetch = (...args) => globalThis.fetch(...args);
   }
 
   /** Le membre fait-il partie du staff ModMail (rôle staff ou Gérer les messages) ? */
@@ -362,15 +365,22 @@ class ModmailService {
     if (!logCh?.isTextBased?.()) return false;
     const history = await fetchChannelHistory(channel, TRANSCRIPT_MAX);
     const transcript = buildTranscript(thread, channel, history);
-    await logCh.send({
-      embeds: [this.archiveCard(thread, { user, closedBy, count: history?.messages.length ?? 0, channel })],
-      files: [{ attachment: Buffer.from(transcript, 'utf8'), name: `modmail-${thread.id}.txt` }],
+    const count = history?.messages.length ?? 0;
+    // Même option que les tickets : pièces jointes (fichiers et liens relayés des MP) re-téléversées.
+    await sendTranscriptArchive(logCh, {
+      transcript: { name: `modmail-${thread.id}.txt`, content: transcript },
+      messages: history?.messages ?? [],
+      archiveAttachments: this.config.get(guild.id).tickets?.archiveAttachments === true,
+      guild,
+      fetchImpl: this.fetch,
+      card: (attachments) => this.archiveCard(thread, { user, closedBy, count, channel, attachments }),
+      continuation: (part, total) => archiveContinuationCard(`ModMail #${thread.id}`, part, total),
     });
     return true;
   }
 
   /** Carte d'archive d'une conversation fermée (salon de logs ModMail). Pure. */
-  archiveCard(thread, { user, closedBy, count = 0, channel, closedAt = Date.now() } = {}) {
+  archiveCard(thread, { user, closedBy, count = 0, channel, closedAt = Date.now(), attachments = null } = {}) {
     return card({
       tone: 'neutral',
       section: 'tickets',
@@ -387,6 +397,7 @@ class ModmailService {
         field(ICONS.date, 'Ouverte', thread.created_at ? discordTimestamp(thread.created_at, 'f') : '—'),
         field(ICONS.duration, 'Durée', thread.created_at ? formatDuration(closedAt - thread.created_at) : '—'),
         field(ICONS.id, 'Identifiant', code(`#${thread.id}`)),
+        ...attachmentFields(attachments),
       ],
       footer: `Utilisateur ${thread.user_id}`,
     });

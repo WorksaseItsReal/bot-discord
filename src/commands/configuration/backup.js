@@ -16,10 +16,20 @@ const QUOTA_TEXT = `${MAX_MANUAL_BACKUPS} manuelles + ${MAX_AUTO_BACKUPS} automa
 const PER_PAGE = 5;
 
 const RESTORE_WARNING = [
-  'Recrée uniquement les rôles et salons **manquants** (comparaison par nom).',
-  'Ne supprime ni ne modifie rien d\'existant.',
+  'Recrée uniquement les rôles et salons **manquants** (comparaison par nom), puis remet les rôles dans l\'ordre de la sauvegarde (sous mon rôle le plus haut).',
+  'Ne supprime rien ; les salons existants gardent leurs permissions.',
   'Messages, membres, emojis et attribution des rôles ne sont **pas** restaurés (limite Discord).',
 ];
+
+/** Avertissements selon l'option « permissions des salons existants ». Pur. */
+function restoreWarning(syncPermissions = false) {
+  if (!syncPermissions) return RESTORE_WARNING;
+  return [
+    RESTORE_WARNING[0],
+    'Ne supprime rien, mais les permissions des salons **existants** seront **remplacées** par celles de la sauvegarde (celles des intégrations et du bot sont conservées).',
+    RESTORE_WARNING[2],
+  ];
+}
 
 const TEXT_TYPES = new Set([ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia]);
 const VOICE_TYPES = new Set([ChannelType.GuildVoice, ChannelType.GuildStageVoice]);
@@ -74,58 +84,75 @@ function infoView(b) {
     ],
     components: buttonRows(
       actionButton({ command: 'backup', action: 'restore', args: [b.id], label: 'Restaurer', emoji: '♻️', style: ButtonStyle.Primary }),
+      actionButton({ command: 'backup', action: 'restore', args: [b.id, 'perms'], label: 'Restaurer + permissions', emoji: ICONS.lock }),
       actionButton({ command: 'backup', action: 'remove', args: [b.id], label: 'Supprimer', emoji: ICONS.delete, style: ButtonStyle.Danger }),
     ),
     ephemeral: true,
   };
 }
 
-/** Restauration (après confirmation) puis carte de résultat en suivi. */
-async function runRestore(interaction, backup, id) {
+/**
+ * Restauration (après confirmation) puis carte de résultat en suivi.
+ * @param {{ syncPermissions?: boolean }} [opts] rétablir aussi les permissions des salons existants
+ */
+async function runRestore(interaction, backup, id, { syncPermissions = false } = {}) {
   const b = backup.get(interaction.guild.id, id);
   if (backup.isRestoring?.(interaction.guild.id)) throw new UserError('Une restauration est déjà en cours sur ce serveur : attendez qu\'elle se termine.');
   const ok = await confirm(interaction, {
-    description: [`Restaurer **${truncate(b.name, 100)}** (${code(b.id)}) ?`, '', bullets(RESTORE_WARNING)].join('\n'),
-    confirmLabel: 'Restaurer',
+    description: [
+      `Restaurer **${truncate(b.name, 100)}** (${code(b.id)})${syncPermissions ? ' **avec les permissions des salons existants**' : ''} ?`,
+      '',
+      bullets(restoreWarning(syncPermissions)),
+    ].join('\n'),
+    confirmLabel: syncPermissions ? 'Restaurer + permissions' : 'Restaurer',
     timeout: 45_000,
   });
   if (!ok) return;
-  const res = await backup.restore(interaction.guild, id);
+  const res = await backup.restore(interaction.guild, id, { syncPermissions });
   await interaction.followUp({ embeds: [restoreResultCard(b, res)], ephemeral: true });
 }
 
-/** Libellé court d'un échec de création (« nom (code) »). Pur. */
-const failureLine = (f) => `${f.kind === 'role' ? ICONS.role : ICONS.channel} ${code(truncate(f.name, 40))} · ${code(f.code)}`;
+const FAILURE_ICONS = { role: ICONS.role, channel: ICONS.channel, order: '↕️', permissions: ICONS.lock };
+
+/** Libellé court d'un échec (« nom (code) »). Pur. */
+const failureLine = (f) => `${FAILURE_ICONS[f.kind] ?? ICONS.channel} ${code(truncate(f.name, 40))}${f.kind === 'permissions' ? ' (permissions)' : ''} · ${code(f.code)}`;
 
 /** Carte de résultat d'une restauration (créations, échecs, permissions ignorées). Pur. */
 function restoreResultCard(b, res) {
   const created = res.roles + res.channels;
+  const synced = res.permissionsSynced ?? 0;
+  const reordered = res.reordered ?? 0;
   const failed = res.failed ?? [];
   const skipped = res.skippedOverwrites ?? [];
-  const tone = failed.length ? (created ? 'warning' : 'danger') : created ? 'success' : 'info';
+  const changed = created + synced;
+  const tone = failed.length ? (changed ? 'warning' : 'danger') : changed ? 'success' : 'info';
+  const failedText = failed.length ? ` **${failed.length}** opération${failed.length > 1 ? 's ont' : ' a'} échoué.` : '';
   let description;
-  if (failed.length && !created) description = `Aucun élément n'a pu être recréé : Discord a refusé **${failed.length}** création${failed.length > 1 ? 's' : ''}.`;
-  else if (created) description = `**${created}** élément${created > 1 ? 's' : ''} recréé${created > 1 ? 's' : ''} depuis **${truncate(b.name, 100)}**.${failed.length ? ` **${failed.length}** création${failed.length > 1 ? 's ont' : ' a'} échoué.` : ''}`;
-  else description = 'Rien à recréer : tous les rôles et salons de la sauvegarde existent déjà.';
+  if (failed.length && !changed) description = `Rien n'a pu être restauré : Discord a refusé **${failed.length}** opération${failed.length > 1 ? 's' : ''}.`;
+  else if (created) description = `**${created}** élément${created > 1 ? 's' : ''} recréé${created > 1 ? 's' : ''} depuis **${truncate(b.name, 100)}**.${synced ? ` Permissions rétablies dans **${synced}** salon${synced > 1 ? 's' : ''}.` : ''}${failedText}`;
+  else if (synced) description = `Permissions rétablies dans **${synced}** salon${synced > 1 ? 's' : ''} depuis **${truncate(b.name, 100)}**.${failedText}`;
+  else description = `Rien à recréer : tous les rôles et salons de la sauvegarde existent déjà${res.syncPermissions ? ', avec les mêmes permissions' : ''}.`;
   return card({
     tone,
     section: 'configuration',
     icon: tone === 'success' ? ICONS.success : tone === 'info' ? ICONS.info : tone === 'danger' ? ICONS.error : ICONS.warning,
-    title: failed.length && !created ? 'Restauration échouée' : 'Restauration terminée',
+    title: failed.length && !changed ? 'Restauration échouée' : 'Restauration terminée',
     description,
     fields: [
       field(ICONS.role, 'Rôles recréés', `**${res.roles}**`),
       field(ICONS.channel, 'Salons recréés', `**${res.channels}**`),
       field(ICONS.id, 'Sauvegarde', code(b.id)),
+      res.roles ? field('↕️', 'Rôles replacés', `**${reordered}**`) : null,
+      res.syncPermissions ? field(ICONS.lock, 'Permissions rétablies', `**${synced}** salon${synced > 1 ? 's' : ''}`) : null,
       failed.length
-        ? wide(ICONS.error, `Échecs (${failed.length})`, `${failed.slice(0, 10).map(failureLine).join('\n')}${failed.length > 10 ? `\n${subtext(`+${failed.length - 10} autre(s)`)}` : ''}\n${subtext('50013 : permission ou hiérarchie insuffisante · 30005/30013 : limite de rôles/salons atteinte.')}`)
+        ? wide(ICONS.error, `Échecs (${failed.length})`, `${failed.slice(0, 10).map(failureLine).join('\n')}${failed.length > 10 ? `\n${subtext(`+${failed.length - 10} autre(s)`)}` : ''}\n${subtext('50013 : permission ou hiérarchie insuffisante (je ne peux accorder que les permissions que j\'ai) · 30005/30013 : limite de rôles/salons atteinte.')}`)
         : null,
       skipped.length
         ? wide(ICONS.lock, 'Permissions ignorées', `${truncate(skipped.slice(0, 10).map((s) => code(truncate(s, 40))).join(' '), 900)}${skipped.length > 10 ? ` ${subtext(`+${skipped.length - 10}`)}` : ''}\n${subtext('Rôles ou membres introuvables : ces surcharges de salon n\'ont pas été recréées.')}`)
         : null,
       created
         ? wide(ICONS.warning, 'À vérifier', bullets([
-          'L\'ordre des rôles recréés : replacez-les si besoin.',
+          'Les rôles placés au-dessus de mon rôle le plus haut ne peuvent pas être replacés.',
           'Réattribuez les rôles aux membres (non restaurés).',
           'Les permissions des salons privés recréés.',
         ]))
@@ -161,6 +188,7 @@ module.exports = {
   category: 'configuration',
   composition,
   restoreResultCard,
+  restoreWarning,
   data: new SlashCommandBuilder()
     .setName('backup')
     .setDescription('Sauvegarde/restauration de la structure du serveur.')
@@ -169,7 +197,10 @@ module.exports = {
     .addSubcommand((s) => s.setName('list').setDescription('Liste les sauvegardes.'))
     .addSubcommand((s) => s.setName('info').setDescription('Détails d\'une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
     .addSubcommand((s) => s.setName('delete').setDescription('Supprime une sauvegarde.').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
-    .addSubcommand((s) => s.setName('restore').setDescription('Restaure (recrée rôles/salons manquants).').addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true)))
+    .addSubcommand((s) =>
+      s.setName('restore').setDescription('Restaure (recrée rôles/salons manquants).')
+        .addStringOption((o) => o.setName('id').setDescription('ID').setRequired(true))
+        .addBooleanOption((o) => o.setName('permissions').setDescription('Rétablir aussi les permissions des salons existants (non par défaut)')))
     .addSubcommand((s) =>
       s.setName('auto').setDescription('Active/désactive les sauvegardes automatiques.')
         .addBooleanOption((o) => o.setName('actif').setDescription('Activer ?').setRequired(true))
@@ -254,7 +285,7 @@ module.exports = {
 
     if (sub === 'delete') return runDelete(interaction, backup, interaction.options.getString('id'));
 
-    if (sub === 'restore') return runRestore(interaction, backup, interaction.options.getString('id'));
+    if (sub === 'restore') return runRestore(interaction, backup, interaction.options.getString('id'), { syncPermissions: interaction.options.getBoolean('permissions') === true });
 
     if (sub === 'auto') {
       const enabled = interaction.options.getBoolean('actif');
@@ -294,10 +325,10 @@ module.exports = {
       assertAdmin(interaction);
       await interaction.reply(infoView(client.services.backup.get(interaction.guildId, id)));
     },
-    /** cmd:backup:restore:<id> — restauration après confirmation. */
-    async restore(interaction, client, [id]) {
+    /** cmd:backup:restore:<id>[:perms] — restauration après confirmation (« perms » : permissions des salons existants). */
+    async restore(interaction, client, [id, mode]) {
       assertAdmin(interaction);
-      await runRestore(interaction, client.services.backup, id);
+      await runRestore(interaction, client.services.backup, id, { syncPermissions: mode === 'perms' });
     },
     /** cmd:backup:remove:<id> — suppression après confirmation. */
     async remove(interaction, client, [id]) {

@@ -393,7 +393,7 @@ function captchaModal(label) {
   return new ModalBuilder()
     .setCustomId('cmd:bienvenue:verifysubmit')
     .setTitle('Vérification anti-robot')
-    .addComponents(input('answer', label, { max: 20, required: true, placeholder: 'Votre réponse' }));
+    .addComponents(input('answer', label, { max: 20, required: true, placeholder: 'Votre réponse, en chiffres (ex : 12) ou en lettres' }));
 }
 
 // ---------------------------------------------------------------- aides

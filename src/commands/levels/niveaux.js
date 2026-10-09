@@ -15,9 +15,10 @@ const {
 } = require('discord.js');
 const { card, field, wide, ICONS, code, subtext, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { truncate, progressBar } = require('../../utils/embeds');
+const { discordTimestamp } = require('../../utils/time');
 const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
-const { LevelService, progressOf, levelFromXp, totalXpForLevel, DEFAULT_ANNOUNCE, ANNOUNCE_MODES } = require('../../services/LevelService');
+const { LevelService, progressOf, levelFromXp, totalXpForLevel, DEFAULT_ANNOUNCE, ANNOUNCE_MODES, MAX_LEFT_DAYS } = require('../../services/LevelService');
 const { MAX_XP } = require('../../database/repositories/LevelRepository');
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { UserError } = require('../../core/errors');
@@ -25,7 +26,7 @@ const { UserError } = require('../../core/errors');
 /**
  * /niveaux : tableau de bord unique des niveaux (éphémère, « Gérer le serveur »).
  * Vues : home · announce · rewards · exclusions · multipliers · xp · member:<id> ·
- *        confirmReset · confirmMember:<id>
+ *        confirmReset · confirmMember:<id> · confirmPurge:<jours>
  */
 
 const MAX_LIST = 25;
@@ -372,6 +373,7 @@ function userMenu(selected) {
 
 function xpView(client, guild, notice) {
   const total = client.repositories.levels.count(guild.id);
+  const left = client.repositories.levels.countLeft(guild.id);
   return {
     embeds: [
       card({
@@ -383,8 +385,9 @@ function xpView(client, guild, notice) {
           notice ? `${notice}\n` : null,
           'Choisissez un membre pour lui **donner**, **retirer** ou **définir** de l\'XP, ou importez une liste « ID XP » (par exemple depuis un autre bot).',
           subtext('Les changements faits ici ne déclenchent pas d\'annonce ; les rôles de récompense sont mis à jour.'),
+          subtext('Les membres partis quittent le classement mais gardent leur XP (rendue s\'ils reviennent) ; « Membres partis » supprime celle des départs anciens.'),
         ],
-        fields: [field(ICONS.members, 'Membres classés', fmt(total))],
+        fields: [field(ICONS.members, 'Membres classés', fmt(total)), field('📤', 'Membres partis', fmt(left))],
       }),
     ],
     components: [
@@ -392,7 +395,8 @@ function xpView(client, guild, notice) {
       userMenu(null),
       ...buttonRows(
         actionButton({ command: 'niveaux', action: 'import', label: 'Importer', emoji: '📥', style: ButtonStyle.Primary }),
-        actionButton({ command: 'niveaux', action: 'go', args: ['confirmReset'], label: 'Tout réinitialiser', emoji: ICONS.delete, style: ButtonStyle.Danger, disabled: !total }),
+        actionButton({ command: 'niveaux', action: 'purgeleft', label: 'Membres partis', emoji: '📤', disabled: !left }),
+        actionButton({ command: 'niveaux', action: 'go', args: ['confirmReset'], label: 'Tout réinitialiser', emoji: ICONS.delete, style: ButtonStyle.Danger, disabled: !total && !left }),
         homeButton(),
       ),
     ],
@@ -414,7 +418,8 @@ function memberView(client, guild, userId, notice) {
         title: 'Gérer l\'XP d\'un membre',
         description: [
           notice ? `${notice}\n` : null,
-          `<@${userId}> · **Niveau ${p.level}** · ${rank ? `#${rank}` : 'non classé'}`,
+          `<@${userId}> · **Niveau ${p.level}** · ${rank ? `#${rank}` : data?.left_at != null ? 'parti du serveur' : 'non classé'}`,
+          data?.left_at != null ? subtext(`📤 A quitté le serveur ${discordTimestamp(data.left_at, 'R')} : absent du classement, XP conservée.`) : null,
           `\`${progressBar(p.ratio, 16)}\` ${fmt(p.current)} / ${fmt(p.needed)} XP`,
         ],
         fields: [
@@ -440,7 +445,7 @@ function memberView(client, guild, userId, notice) {
 }
 
 function confirmResetView(client, guild) {
-  const total = client.repositories.levels.count(guild.id);
+  const total = client.repositories.levels.countAll(guild.id);
   return {
     embeds: [
       card({
@@ -449,7 +454,7 @@ function confirmResetView(client, guild) {
         icon: ICONS.warning,
         title: 'Tout réinitialiser ?',
         description: [
-          `L'XP, les niveaux et les compteurs des **${fmt(total)}** membre(s) classé(s) seront **définitivement effacés**.`,
+          `L'XP, les niveaux et les compteurs des **${fmt(total)}** membre(s) (partis compris) seront **définitivement effacés**.`,
           '',
           subtext('Les rôles de récompense déjà attribués sont conservés. La configuration n\'est pas touchée.'),
         ],
@@ -485,6 +490,40 @@ function confirmMemberView(client, guild, userId) {
   };
 }
 
+/** Nombre de jours d'une purge (bouton ou formulaire). Pur. */
+function parseDays(raw) {
+  const n = Number(String(raw ?? '').trim());
+  if (!Number.isInteger(n) || n < 0 || n > MAX_LEFT_DAYS) throw new UserError(`Durée : entrez un nombre entier de jours entre 0 et ${fmt(MAX_LEFT_DAYS)}.`);
+  return n;
+}
+
+function confirmPurgeView(client, guild, rawDays) {
+  const days = parseDays(rawDays);
+  const n = client.services.levels.countLeft(guild.id, days);
+  const since = days ? `depuis plus de **${days}** jour(s)` : 'quelle que soit la date de leur départ';
+  return {
+    embeds: [
+      card({
+        tone: n ? 'danger' : 'info',
+        section: SECTION,
+        icon: n ? ICONS.warning : ICONS.info,
+        title: 'Supprimer l\'XP des membres partis ?',
+        description: n
+          ? [
+            `L'XP, le niveau et les compteurs de **${fmt(n)}** membre(s) parti(s) ${since} seront **définitivement effacés**.`,
+            '',
+            subtext('S\'ils reviennent, ils repartiront de zéro. Les membres présents ne sont pas concernés.'),
+          ]
+          : [`Aucun membre parti ${since} n'a d'XP enregistrée.`],
+      }),
+    ],
+    components: buttonRows(
+      n ? actionButton({ command: 'niveaux', action: 'purge', args: [days], label: 'Oui, supprimer', emoji: ICONS.delete, style: ButtonStyle.Danger }) : null,
+      actionButton({ command: 'niveaux', action: 'go', args: ['xp'], label: n ? 'Annuler' : 'Retour', emoji: ICONS.back }),
+    ),
+  };
+}
+
 /** Rend une vue (« member:<id> » depuis un menu, « member.<id> » depuis un bouton). */
 function render(client, guild, view = 'home', notice) {
   const [name, arg] = String(view).split(/[:.]/);
@@ -505,6 +544,8 @@ function render(client, guild, view = 'home', notice) {
       return confirmResetView(client, guild);
     case 'confirmMember':
       return confirmMemberView(client, guild, arg);
+    case 'confirmPurge':
+      return confirmPurgeView(client, guild, arg);
     default:
       return homeView(client, guild, notice);
   }
@@ -560,6 +601,13 @@ function xpModal(op, userId) {
     .addComponents(input('amount', op === 'set' ? 'Nouvelle XP totale' : 'Quantité d\'XP', { max: 10, required: true, placeholder: '500' }));
 }
 
+function purgeModal() {
+  return new ModalBuilder()
+    .setCustomId('cmd:niveaux:purgeleftsubmit')
+    .setTitle('XP des membres partis')
+    .addComponents(input('days', 'Partis depuis plus de (jours, 0 = tous)', { value: 30, max: 4, required: true, placeholder: '30' }));
+}
+
 function importModal() {
   return new ModalBuilder()
     .setCustomId('cmd:niveaux:importsubmit')
@@ -588,6 +636,7 @@ module.exports = {
   render,
   parseImport,
   parseMultiplier,
+  parseDays,
   data: new SlashCommandBuilder()
     .setName('niveaux')
     .setDescription('Ouvre le tableau de bord des niveaux : XP, annonces, récompenses, exclusions.')
@@ -821,6 +870,23 @@ module.exports = {
         subtext('Les rôles de récompense seront attribués au prochain passage de niveau.'),
       ].filter(Boolean).join('\n');
       await interaction.update(xpView(client, interaction.guild, notice));
+    },
+    /** Formulaire « Supprimer l'XP des membres partis depuis plus de N jours ». */
+    async purgeleft(interaction) {
+      guard(interaction);
+      await interaction.showModal(purgeModal());
+    },
+    async purgeleftsubmit(interaction, client) {
+      guard(interaction);
+      const days = parseDays(textField(interaction, 'days') ?? '');
+      await interaction.update(confirmPurgeView(client, interaction.guild, days));
+    },
+    /** cmd:niveaux:purge:<jours> — après confirmation. */
+    async purge(interaction, client, [rawDays]) {
+      guard(interaction);
+      const days = parseDays(rawDays);
+      const n = client.services.levels.purgeLeft(interaction.guildId, days);
+      await interaction.update(xpView(client, interaction.guild, `${ICONS.success} XP de **${fmt(n)}** membre(s) parti(s) supprimée.`));
     },
     /** cmd:niveaux:reset:guild · cmd:niveaux:reset:member:<id> — après confirmation. */
     async reset(interaction, client, [scope, userId]) {

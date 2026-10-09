@@ -453,6 +453,18 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_invite_joins_user ON invite_joins (guild_id, user_id);
     `,
   },
+  {
+    id: 17,
+    name: 'levels_left_at',
+    up: `
+      -- Niveaux : date de départ du serveur (NULL = membre présent). Les membres partis
+      -- sont exclus du classement, du rang et du total ; leur XP est conservée et
+      -- compte de nouveau à leur retour (left_at remis à NULL).
+      ALTER TABLE levels ADD COLUMN left_at INTEGER;
+      -- Purge « membres partis depuis plus de N jours » sans parcours complet.
+      CREATE INDEX IF NOT EXISTS idx_levels_left ON levels (guild_id, left_at);
+    `,
+  },
 ];
 
 module.exports = { migrations };

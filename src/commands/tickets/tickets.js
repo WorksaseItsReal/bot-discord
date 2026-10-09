@@ -186,6 +186,7 @@ function homeView(client, guild, notice) {
           field(ICONS.stats, 'Ouverts au total', `**${cfg.stats?.opened ?? 0}**`),
           field(ICONS.count, 'Limite par membre', `**${cfg.maxPerUser || 1}**`),
           field(ICONS.tag, 'Motifs', cfg.reasons?.length ? `**${cfg.reasons.length}**` : '*Aucun*'),
+          field('📎', 'Pièces jointes', cfg.archiveAttachments ? '🟢 Archivées\n(8 Mo max. chacune, 24 Mo au total)' : '🔴 Liens seulement'),
         ],
         footer: 'Actions dans un ticket : /ticket (fermer, ajouter, renommer…)',
       }),
@@ -195,6 +196,9 @@ function homeView(client, guild, notice) {
       ...buttonRows(
         actionButton({ command: 'tickets', action: 'publish', label: link ? 'Republier le panneau' : 'Publier le panneau', emoji: '📣', style: ButtonStyle.Primary }),
         actionButton({ command: 'tickets', action: 'go', args: ['open'], label: 'Tickets ouverts', emoji: '📂' }),
+        cfg.archiveAttachments
+          ? actionButton({ command: 'tickets', action: 'attachments', args: ['off'], label: 'Pièces jointes ✅', emoji: '📎' })
+          : actionButton({ command: 'tickets', action: 'attachments', args: ['on'], label: 'Pièces jointes ❌', emoji: '📎' }),
         link ? linkButton('Voir le panneau', link, ICONS.link) : null,
         actionButton({ command: 'tickets', action: 'go', args: ['home'], label: 'Actualiser', emoji: ICONS.refresh }),
       ),
@@ -483,6 +487,17 @@ module.exports = {
       }
       client.services.config.update(interaction.guildId, { tickets: { supportRoleIds: ids, supportRoleId: ids[0] ?? null } });
       await interaction.update(setupView(client, interaction.guild, `${ICONS.success} ${ids.length} rôle(s) staff.`));
+    },
+    /** cmd:tickets:attachments:<on|off> — pièces jointes jointes aux archives (tickets et ModMail). */
+    async attachments(interaction, client, [state]) {
+      guard(interaction);
+      if (state !== 'on' && state !== 'off') throw new UserError('Ce bouton est invalide.');
+      const archiveAttachments = state === 'on';
+      client.services.config.update(interaction.guildId, { tickets: { archiveAttachments } });
+      const notice = archiveAttachments
+        ? `${ICONS.success} Les pièces jointes (8 Mo max. chacune, 24 Mo au total) seront jointes aux archives des tickets et du ModMail.`
+        : `${ICONS.success} Archives sans pièces jointes : seuls leurs liens figurent dans le transcript.`;
+      await interaction.update(render(client, interaction.guild, 'home', notice));
     },
     /** Salon des transcripts (vide : désactivés). */
     async transcripts(interaction, client) {

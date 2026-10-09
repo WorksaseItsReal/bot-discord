@@ -388,9 +388,9 @@ test('arrêt propre : gains en attente annulés, plus aucune écriture', async (
   assert.equal(w.levels.handleMessage(fakeMessage(w)), false);
 });
 
-test('fichier d\'événements : messageCreate, suppressions et vocal', () => {
+test('fichier d\'événements : messageCreate, suppressions, vocal, départs et retours', () => {
   assert.ok(Array.isArray(levelEvents));
-  assert.deepEqual(levelEvents.map((e) => e.name).sort(), ['messageCreate', 'messageDelete', 'messageDeleteBulk', 'voiceStateUpdate']);
+  assert.deepEqual(levelEvents.map((e) => e.name).sort(), ['guildMemberAdd', 'guildMemberRemove', 'messageCreate', 'messageDelete', 'messageDeleteBulk', 'voiceStateUpdate']);
   for (const e of levelEvents) assert.equal(typeof e.execute, 'function');
   const w = world();
   levelEvents.find((e) => e.name === 'messageDeleteBulk').execute(w.client, new Collection([['1', {}], ['2', {}]]));

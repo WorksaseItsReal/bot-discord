@@ -150,7 +150,7 @@ test('ModMail : le transcript est publié dans modmail.logChannel à la fermetur
   assert.equal(logged[0].files[0].name.endsWith('.txt'), true);
   const text = logged[0].files[0].attachment.toString('utf8');
   assert.ok(text.indexOf('Aide svp') < text.indexOf('Bonjour'), 'ordre chronologique');
-  assert.match(JSON.stringify(logged[0].embeds[0].toJSON()), /<@staff>/);
+  assert.match(JSON.stringify(logged[0].embeds[0].toJSON?.() ?? logged[0].embeds[0]), /<@staff>/);
   assert.equal(buildTranscript({ id: 1, user_id: 'u' }, null, null), 'Transcript indisponible.');
 });
 

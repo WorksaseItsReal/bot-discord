@@ -31,10 +31,9 @@ function setup() {
 
 // ------------------------------------------------------------ migration, intents
 
-test('migration 14 : invite_joins et index (guild_id, inviter_id), en fin de tableau', () => {
+test('migration 14 : invite_joins et index (guild_id, inviter_id)', () => {
   const m = migrations.find((x) => x.id === 14);
   assert.ok(m, 'migration 14 absente');
-  assert.equal(migrations.indexOf(m), migrations.length - 1);
   const { db } = setup();
   const cols = db.prepare('PRAGMA table_info(invite_joins)').all().map((c) => c.name);
   assert.deepEqual(cols, ['id', 'guild_id', 'user_id', 'inviter_id', 'code', 'joined_at', 'left_at', 'fake']);

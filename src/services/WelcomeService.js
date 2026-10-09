@@ -37,6 +37,72 @@ const RAID_RECENT_JOIN_MS = 5 * 60_000;
 /** Purge des entrées expirées (défis, échecs, silences) au plus une fois par minute. */
 const PRUNE_INTERVAL_MS = 60_000;
 
+// ---------------------------------------------------------------- défi anti-robot (pur)
+
+const UNITS_FR = ['zéro', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize'];
+const TENS_FR = { 20: 'vingt', 30: 'trente', 40: 'quarante', 50: 'cinquante', 60: 'soixante' };
+
+/** Nombre de 0 à 69 en toutes lettres (orthographe traditionnelle : « vingt et un », « dix-sept »). Pur. */
+function numberToFrench(n) {
+  const v = Math.floor(Number(n));
+  if (!Number.isInteger(v) || v < 0 || v > 69) throw new RangeError(`Nombre hors bornes : ${n}`);
+  if (v <= 16) return UNITS_FR[v];
+  if (v < 20) return `dix-${UNITS_FR[v - 10]}`;
+  const tens = Math.floor(v / 10) * 10;
+  const unit = v % 10;
+  if (!unit) return TENS_FR[tens];
+  return unit === 1 ? `${TENS_FR[tens]} et un` : `${TENS_FR[tens]}-${UNITS_FR[unit]}`;
+}
+
+/** Réponse normalisée : minuscules, sans accents, espaces ni traits d'union. Pur. */
+function normalizeAnswer(text) {
+  return String(text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[\s\-\u2010-\u2015.]+/g, '');
+}
+
+/** La réponse saisie correspond-elle (chiffres ou lettres) ? Pur. */
+function answerMatches(input, answer) {
+  const given = normalizeAnswer(input);
+  if (!given) return false;
+  if (given === String(answer)) return true;
+  const n = Number(answer);
+  return Number.isInteger(n) && n >= 0 && n <= 69 && given === normalizeAnswer(numberToFrench(n));
+}
+
+/**
+ * Tire un défi : libellé (nombres en lettres, ≤ 45 caractères) et réponse (chiffres). Pur si `randomInt` l'est.
+ * @param {(min: number, max: number) => number} randomInt entier dans [min, max] inclus
+ * @returns {{ label: string, answer: string }}
+ */
+function challengeFor(randomInt) {
+  const w = numberToFrench;
+  switch (randomInt(0, 4)) {
+    case 0: {
+      const a = randomInt(2, 15);
+      const b = randomInt(2, 15);
+      return { label: `Combien font ${w(a)} plus ${w(b)} ?`, answer: String(a + b) };
+    }
+    case 1: {
+      const a = randomInt(2, 15);
+      const b = randomInt(2, 15);
+      const [hi, lo] = a >= b ? [a + 5, b] : [b + 5, a];
+      return { label: `Combien font ${w(hi)} moins ${w(lo)} ?`, answer: String(hi - lo) };
+    }
+    case 2: {
+      const a = randomInt(2, 15);
+      return { label: `Quel est le double de ${w(a)} ?`, answer: String(a * 2) };
+    }
+    case 3: {
+      const a = randomInt(2, 5);
+      const b = randomInt(2, 5);
+      return { label: `Combien font ${w(a)} fois ${w(b)} ?`, answer: String(a * b) };
+    }
+    default: {
+      const a = randomInt(2, 29);
+      return { label: `Quel nombre vient après ${w(a)} ?`, answer: String(a + 1) };
+    }
+  }
+}
+
 /** Permissions nécessaires dans un salon d'accueil ou de vérification. */
 const CHANNEL_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
 
@@ -325,43 +391,23 @@ class WelcomeService {
   }
 
   /**
-   * Nouveau défi (remplace le précédent). Petit calcul ou mot à recopier, tiré
-   * au hasard côté serveur ; la réponse reste en mémoire 5 minutes.
+   * Nouveau défi (remplace le précédent), tiré au hasard côté serveur ; la réponse reste
+   * en mémoire 5 minutes. Les nombres sont écrits EN TOUTES LETTRES (« Combien font sept
+   * plus trois ? ») : un selfbot naïf ne peut pas recopier la réponse depuis le libellé.
+   * Variantes : addition, soustraction, double, multiplication, nombre suivant.
    * @returns {{ label: string }} libellé du champ de formulaire (≤ 45 caractères)
    */
   createChallenge(guildId, userId) {
     const now = this.now();
-    let label;
-    let answer;
-    if (this.randomInt(0, 1) === 0) {
-      const a = this.randomInt(2, 15);
-      const b = this.randomInt(2, 15);
-      if (this.randomInt(0, 1) === 0) {
-        label = `Combien font ${a} + ${b} ?`;
-        answer = String(a + b);
-      } else {
-        const [hi, lo] = a >= b ? [a + 5, b] : [b + 5, a];
-        label = `Combien font ${hi} − ${lo} ?`;
-        answer = String(hi - lo);
-      }
-    } else {
-      const consonants = 'BCDFGHJKLMNPRSTVZ';
-      const vowels = 'AEIOU';
-      let word = '';
-      for (let i = 0; i < 6; i++) {
-        const set = i % 2 ? vowels : consonants;
-        word += set[this.randomInt(0, set.length - 1)];
-      }
-      label = `Recopiez ce mot : ${word}`;
-      answer = word;
-    }
+    const { label, answer } = challengeFor(this.randomInt);
     this.#prune(this.challenges, (c) => c.expires > now);
     this.challenges.set(`${guildId}:${userId}`, { answer, expires: now + CHALLENGE_TTL_MS });
     return { label };
   }
 
   /**
-   * Vérifie une réponse. Le défi est à usage unique (consommé même en cas d'erreur).
+   * Vérifie une réponse (en chiffres ou en lettres : « 10 », « dix »). Le défi est à usage
+   * unique (consommé même en cas d'erreur).
    * @returns {'ok'|'expired'|'wrong'|'locked'}
    */
   checkChallenge(guildId, userId, input) {
@@ -371,8 +417,7 @@ class WelcomeService {
     this.challenges.delete(key);
     const now = this.now();
     if (!challenge || challenge.expires <= now) return 'expired';
-    const given = String(input ?? '').replace(/\s+/g, '').toUpperCase();
-    if (given && given === challenge.answer) {
+    if (answerMatches(input, challenge.answer)) {
       this.failures.delete(key);
       return 'ok';
     }
@@ -610,6 +655,10 @@ module.exports = {
   joinRoles,
   verifyRoles,
   verifyRefusal,
+  numberToFrench,
+  normalizeAnswer,
+  answerMatches,
+  challengeFor,
   channelState,
   messageCard,
   messagePayload,
