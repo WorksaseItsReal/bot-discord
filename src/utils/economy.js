@@ -263,10 +263,24 @@ function applyCents(bet, cents) {
 }
 
 /**
- * Gain d'un tirage. Pur.
- * @returns {{ kind: 'triple'|'pair'|null, symbol: string|null, cents: number, payout: number }}
+ * Gain exact de mise × centièmes / 100 : la partie entière (`low`) est versée et le reste,
+ * en centièmes de pièce, devient une pièce de plus (`high`) avec la probabilité `pHigh` égale
+ * à ce reste. L'espérance vaut donc EXACTEMENT mise × multiplicateur, quelle que soit la mise
+ * (un arrondi systématique à l'inférieur ruinait les petites mises). Pur.
+ * @returns {{ low: number, high: number, pHigh: number }}
  */
-function slotsPayout(reels, table, bet) {
+function centsSplit(bet, cents) {
+  const low = applyCents(bet, cents);
+  const rem = ((bet % 100) * cents) % 100;
+  return { low, high: rem ? low + 1 : low, pHigh: rem / 100 };
+}
+
+/**
+ * Gain d'un tirage (reste en centièmes tiré au sort : espérance exacte). Pur (rng injectable,
+ * consommé seulement s'il y a un reste).
+ * @returns {{ kind: 'triple'|'pair'|null, symbol: string|null, cents: number, payout: number, low: number, high: number, pHigh: number }}
+ */
+function slotsPayout(reels, table, bet, rng = Math.random) {
   const [a, b, c] = reels;
   let kind = null;
   let symbol = null;
@@ -282,14 +296,16 @@ function slotsPayout(reels, table, bet) {
   }
   const row = symbol ? table.find((s) => s.emoji === symbol) : null;
   const cents = row ? (kind === 'triple' ? row.tripleCents : row.pairCents) : 0;
-  return { kind, symbol, cents, payout: applyCents(bet, cents) };
+  const split = centsSplit(bet, cents);
+  const payout = split.pHigh > 0 && rng() < split.pHigh ? split.high : split.low;
+  return { kind, symbol, cents, payout, ...split };
 }
 
 /** Partie de machine à sous complète. Pur (rng injectable). */
 function playSlots(bet, edgePercent, rng = Math.random) {
   const table = slotsTable(edgePercent);
   const reels = spinSlots(rng);
-  return { reels, table, ...slotsPayout(reels, table, bet) };
+  return { reels, table, ...slotsPayout(reels, table, bet, rng) };
 }
 
 /** Multiplicateur lisible (« ×1,5 »). Pur. */
@@ -390,6 +406,7 @@ module.exports = {
   tableReturn,
   spinSlots,
   applyCents,
+  centsSplit,
   slotsPayout,
   playSlots,
   multText,

@@ -269,10 +269,11 @@ test('service : virements (taxe détruite, refus, atomicité)', () => {
   svc.adminAdjust(GUILD, BOB, 'set', 950, CAROL);
   assert.throws(() => svc.transfer(GUILD, ALICE, BOB, 100), /plafond/);
   assert.equal(svc.account(GUILD, ALICE).balance, 300);
-  // Taxe arrondie à l'inférieur : le destinataire reçoit toujours au moins 1.
+  // Taxe arrondie au supérieur (revue n° 5) : un virement trop petit pour la payer est refusé.
   config.update(GUILD, { economy: { transfers: { taxPercent: 50 } } });
-  assert.deepEqual(EconomyService.transferSplit(1, 50), { tax: 0, received: 1 });
-  assert.equal(svc.transfer(GUILD, ALICE, CAROL, 3).received, 2);
+  assert.deepEqual(EconomyService.transferSplit(1, 50), { tax: 1, received: 0 });
+  assert.throws(() => svc.transfer(GUILD, ALICE, CAROL, 1), /Montant trop faible/);
+  assert.equal(svc.transfer(GUILD, ALICE, CAROL, 3).received, 1);
   assert.equal(svc.account(GUILD, ALICE).balance, 297);
 });
 

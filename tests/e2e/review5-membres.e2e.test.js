@@ -160,3 +160,35 @@ test('Fil supprimé (THREAD_DELETE) : la partie s\'arrête, les verrous sont lib
     await h.close();
   }
 });
+
+test('Boutique : un rôle non attribué est remboursé EXACTEMENT du débit, même si le prix change pendant l\'achat', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ economy: { enabled: true } });
+  const svc = h.client.services.economy;
+  const G = h.guild.id;
+  try {
+    svc.adminAdjust(G, IDS.users.member, 'set', 1000, IDS.users.admin);
+    const item = svc.addItem(G, { name: 'Notifs', price: 1000, kind: 'role', roleId: IDS.roles.notif });
+    const shop = await h.slash('eco', sub('boutique'), { as: 'member' });
+    const msg = h.messagesOf(shop)[0];
+    const buyId = msg.components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith('cmd:eco:buy:')).custom_id;
+    // Un administrateur baisse le prix à 1 pendant l'acquittement (deferUpdate) de l'achat…
+    h.fake.inject({ match: (c) => {
+      if (c.method === 'POST' && /\/interactions\/\d+\/[^/]+\/callback/.test(c.route) && c.body?.type === 6) {
+        h.client.repositories.economy.updateItem(G, item.id, { name: 'Notifs', price: 1 });
+      }
+      return false;
+    } }, { times: 1e9 });
+    // … et Discord refuse l'attribution du rôle.
+    h.fake.inject({ method: 'PUT', route: /\/members\/\d+\/roles\/\d+$/ }, { status: 403, code: 50013 });
+    const rec = await h.click(msg, buyId, { as: 'member' });
+    await h.settle();
+    assert.match(h.replyText(rec), /remboursé de \*\*1\*\*/);
+    assert.equal(svc.account(G, IDS.users.member).balance, 1000, 'remboursement différent du débit (argent créé)');
+    assert.deepEqual(h.client.repositories.economy.history(G, IDS.users.member, 2).map((t) => `${t.kind}:${t.delta}`), ['refund:1', 'buy:-1']);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -126,9 +126,12 @@ class EconomyService {
 
   // ------------------------------------------------------------ virements
 
-  /** Montant reçu et taxe d'un virement. Pur. */
+  /**
+   * Montant reçu et taxe d'un virement. Pur. Taxe arrondie au SUPÉRIEUR dès qu'elle est
+   * activée : des petits virements successifs ne l'esquivent plus.
+   */
   static transferSplit(amount, taxPercent) {
-    const tax = Math.floor((amount * taxPercent) / 100);
+    const tax = taxPercent > 0 ? Math.ceil((amount * taxPercent) / 100) : 0;
     return { tax, received: amount - tax };
   }
 
@@ -226,8 +229,9 @@ class EconomyService {
       const edge = eco.games.houseEdgePercent;
       const outcome = game === 'slots' ? E.playSlots(bet, edge, rng) : E.playCoinflip(bet, choice === 'face' ? 'face' : 'pile', edge, rng);
       let balance = acc.balance - bet + outcome.payout;
-      // Plafond : un gain ne fait jamais dépasser le solde maximal (une perte reste une perte).
-      if (balance > eco.limits.maxBalance) balance = Math.max(eco.limits.maxBalance, acc.balance - bet);
+      // Plafond : un gain ne fait jamais dépasser le solde maximal, mais ne fait jamais perdre non
+      // plus (solde déjà au-dessus d'un plafond abaissé : gain ramené à ±0) ; une perte reste une perte.
+      if (balance > eco.limits.maxBalance) balance = Math.max(eco.limits.maxBalance, Math.min(acc.balance, balance));
       const ref = game === 'slots' ? outcome.reels.join('') : `${outcome.side} · ${outcome.won ? 'gagné' : 'perdu'}`;
       this.#write(guildId, userId, acc.balance, balance, game, ref, now);
       return { ...outcome, bet, before: acc.balance, balance, delta: balance - acc.balance, capped: balance < acc.balance - bet + outcome.payout, edge };

@@ -267,9 +267,12 @@ function slotsTableText(table) {
 
 function gameView(eco, game, r, user, choice) {
   const meta = GAMES[game];
-  const result = r.delta > 0
-    ? `${ICONS.success} Gagné : **${E.signed(r.delta)}** ${eco.currency.emoji}`
-    : r.delta < 0 ? `${ICONS.error} Perdu : **${E.signed(r.delta)}** ${eco.currency.emoji}` : `${ICONS.info} Mise récupérée : **±0** ${eco.currency.emoji}`;
+  let result;
+  if (r.delta > 0) result = `${ICONS.success} Gagné : **${E.signed(r.delta)}** ${eco.currency.emoji}`;
+  else if (r.delta === 0) result = `${ICONS.info} Mise récupérée : **±0** ${eco.currency.emoji}`;
+  // Gain inférieur à la mise (paire à ×0,98…) : une partie est rendue, ce n'est pas « Perdu ».
+  else if (r.payout > 0) result = `🔄 Presque remboursé : ${E.fmt(r.payout)} rendus sur ${E.fmt(r.bet)} misés, soit **${E.signed(r.delta)}** ${eco.currency.emoji} net`;
+  else result = `${ICONS.error} Perdu : **${E.signed(r.delta)}** ${eco.currency.emoji}`;
   let headline;
   if (game === 'coinflip') headline = `La pièce tourne… et tombe sur **${SIDES[r.side].toUpperCase()}** !`;
   else {
@@ -513,8 +516,9 @@ module.exports = {
       if (!item) throw new UserError('Cet article n\'existe plus : actualisez la boutique.');
       const token = Number(rawToken);
       if (item.kind !== 'role') {
+        // Article relu dans la transaction d'achat (r.item) : prix et nom réellement débités.
         const r = svc.buy(guild.id, userId, item.id, token);
-        await interaction.update(shopView(client, guild, userId, page, `${ICONS.success} **${plain(item.name, 50)}** acheté pour ${money(item.price, eco)}. Il vous attend dans votre inventaire (solde : ${money(r.balance, eco)}).`));
+        await interaction.update(shopView(client, guild, userId, page, `${ICONS.success} **${plain(r.item.name, 50)}** acheté pour ${money(r.item.price, eco)}. Il vous attend dans votre inventaire (solde : ${money(r.balance, eco)}).`));
         return;
       }
       // Rôle : revérifié à l'achat (hiérarchie, permissions sensibles), débit, puis attribution
@@ -525,15 +529,18 @@ module.exports = {
       await interaction.deferUpdate();
       const member = await selfMember(interaction);
       if (member.roles.cache.has(item.role_id)) throw new UserError('Vous avez déjà ce rôle.');
+      // Article relu dans la transaction d'achat : le remboursement rend EXACTEMENT le débit,
+      // même si le prix a changé pendant l'acquittement.
       const r = svc.buy(guild.id, userId, item.id, token);
-      const { failed } = await applyRoles(member, { add: [item.role_id] }, `Achat en boutique : ${plain(item.name, 50)}`, (id, e) =>
+      const bought = r.item;
+      const { failed } = await applyRoles(member, { add: [bought.role_id] }, `Achat en boutique : ${plain(bought.name, 50)}`, (id, e) =>
         logger.warn(`Rôle acheté ${id} non attribué (serveur ${guild.id}, membre ${userId}) :`, e?.message ?? e));
       if (failed.length) {
-        const refund = svc.refund(guild.id, userId, item);
-        await interaction.editReply(shopView(client, guild, userId, page, `${ICONS.warning} Je n'ai pas pu vous donner <@&${item.role_id}> : vous avez été remboursé (solde : ${money(refund.balance, eco)}).`));
+        const refund = svc.refund(guild.id, userId, bought);
+        await interaction.editReply(shopView(client, guild, userId, page, `${ICONS.warning} Je n'ai pas pu vous donner <@&${bought.role_id}> : vous avez été remboursé de ${money(bought.price, eco)} (solde : ${money(refund.balance, eco)}).`));
         return;
       }
-      await interaction.editReply(shopView(client, guild, userId, page, `${ICONS.success} Rôle <@&${item.role_id}> obtenu pour ${money(item.price, eco)} (solde : ${money(r.balance, eco)}).`, { ownedRoles: [item.role_id] }));
+      await interaction.editReply(shopView(client, guild, userId, page, `${ICONS.success} Rôle <@&${bought.role_id}> obtenu pour ${money(bought.price, eco)} (solde : ${money(r.balance, eco)}).`, { ownedRoles: [bought.role_id] }));
     },
     /** cmd:eco:top:<page>:<auteur> — classement public, feuilletable par tous. */
     async top(interaction, client, [page, ownerId]) {
