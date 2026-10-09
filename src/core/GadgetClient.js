@@ -32,6 +32,8 @@ const { ModNoteRepository } = require('../database/repositories/ModNoteRepositor
 const { LevelRepository } = require('../database/repositories/LevelRepository');
 const { InviteJoinRepository } = require('../database/repositories/InviteJoinRepository');
 const { ReportRepository } = require('../database/repositories/ReportRepository');
+const { StarboardRepository } = require('../database/repositories/StarboardRepository');
+const { StickyRepository } = require('../database/repositories/StickyRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -53,6 +55,9 @@ const { LevelService } = require('../services/LevelService');
 const { InviteTrackerService } = require('../services/InviteTrackerService');
 const { StatsCounterService } = require('../services/StatsCounterService');
 const { ReportService } = require('../services/ReportService');
+const { StarboardService } = require('../services/StarboardService');
+const { StickyService } = require('../services/StickyService');
+const { AutoResponderService } = require('../services/AutoResponderService');
 
 const logger = createLogger('client');
 
@@ -110,6 +115,8 @@ class GadgetClient extends Client {
       levels: new LevelRepository(db),
       inviteJoins: new InviteJoinRepository(db),
       reports: new ReportRepository(db),
+      starboard: new StarboardRepository(db),
+      sticky: new StickyRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -141,6 +148,10 @@ class GadgetClient extends Client {
       invites: new InviteTrackerService({ client: this, joins: this.repositories.inviteJoins, config: configService }),
       counters: new StatsCounterService({ client: this, config: configService }),
       reports: new ReportService({ reports: this.repositories.reports, config: configService, logging }),
+      // Communauté : starboard, messages épinglés automatiquement, réponses automatiques.
+      starboard: new StarboardService({ client: this, starboard: this.repositories.starboard, config: configService }),
+      sticky: new StickyService({ client: this, sticky: this.repositories.sticky }),
+      autoResponses: new AutoResponderService({ client: this, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -208,6 +219,18 @@ class GadgetClient extends Client {
     return this.shutdownPromise;
   }
 
+  /** Appelle `method` sur plusieurs services EN PARALLÈLE, chaque appel borné à 3 s. */
+  async #settleAll(names, method, label) {
+    await Promise.all(names.map(async (name) => {
+      try {
+        const run = this.services?.[name]?.[method]?.();
+        if (run) await Promise.race([run, new Promise((r) => setTimeout(r, 3000).unref?.())]);
+      } catch (err) {
+        logger.warn(`${label} ${name} :`, err?.message);
+      }
+    }));
+  }
+
   async #doShutdown() {
     if (this.presenceTimer) clearInterval(this.presenceTimer);
     try {
@@ -237,17 +260,13 @@ class GadgetClient extends Client {
     } catch (err) {
       logger.warn('Arrêt des compteurs de statistiques :', err?.message);
     }
+    // Communauté : minuteurs d'anti-rebond annulés, écritures en cours attendues (bornées à 3 s).
+    // En parallèle : l'arrêt complet doit tenir sous le garde-fou de 10 s.
+    await this.#settleAll(['autoResponses', 'sticky', 'starboard'], 'stop', 'Arrêt du service');
     // Travail différé (éditions de cartes, suppression de tickets fermés) : terminé avant de couper.
     // Tickets d'abord (suppression de salons promise aux membres), chaque vidage borné à 3 s
     // pour rester sous le garde-fou d'arrêt.
-    for (const name of ['tickets', 'giveaways', 'projects']) {
-      try {
-        const flush = this.services?.[name]?.flush?.();
-        if (flush) await Promise.race([flush, new Promise((r) => setTimeout(r, 3000).unref?.())]);
-      } catch (err) {
-        logger.warn(`Vidage du service ${name} :`, err?.message);
-      }
-    }
+    await this.#settleAll(['tickets', 'giveaways', 'projects'], 'flush', 'Vidage du service');
     try {
       await this.destroy();
     } catch (err) {

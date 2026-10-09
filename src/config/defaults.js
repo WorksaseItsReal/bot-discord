@@ -241,6 +241,24 @@ const defaultGuildConfig = Object.freeze({
     pingRoleId: null,       // rôle pingué à chaque signalement (facultatif)
     showReporter: true,     // false : le signaleur est masqué sur la carte du staff
   },
+  // Communauté (/communaute) : starboard et réponses automatiques. Les messages
+  // épinglés automatiquement (/sticky) sont en base (table sticky_messages).
+  community: {
+    starboard: {
+      enabled: false,
+      channelId: null,        // salon où les messages populaires sont repostés
+      emoji: '⭐',            // emoji Unicode ou personnalisé (<:nom:id>)
+      threshold: 3,           // réactions nécessaires (auteur et bots exclus)
+      excludedChannels: [],   // salons (et leurs fils) jamais repostés
+      removeBelow: true,      // retirer la carte si le compte repasse sous le seuil
+    },
+    autoResponses: {
+      enabled: false,
+      // [{ id, pattern, mode: word|contains|starts|exact, response, reaction,
+      //    cooldownSeconds, channels: [], excludedChannels: [], enabled }]
+      triggers: [],
+    },
+  },
 });
 
 module.exports = { defaultGuildConfig };

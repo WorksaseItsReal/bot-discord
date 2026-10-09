@@ -19,6 +19,7 @@ const { GatewayIntentBits, Partials } = require('discord.js');
  *
  * GuildPresences (privilégié) n'est PAS activé : le compteur « En ligne » de /compteurs
  * n'est donc pas proposé. L'ajouter ici (et dans le Developer Portal) suffit à l'activer.
+ *  - GuildMessageReactions ...... starboard (réactions ⭐ ajoutées / retirées).
  *
  * Les intents "Privilégiés" (GuildMembers, MessageContent) doivent être
  * activés dans le Developer Portal (Bot > Privileged Gateway Intents).
@@ -33,8 +34,14 @@ const intents = [
   GatewayIntentBits.DirectMessages,
   GatewayIntentBits.GuildExpressions,
   GatewayIntentBits.GuildInvites,
+  GatewayIntentBits.GuildMessageReactions,
 ];
 
-const partials = [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.User];
+/**
+ * Partials : événements reçus pour des objets absents du cache.
+ *  - Message / Reaction : réactions sur des messages anciens (starboard), suppressions hors cache.
+ *  - Channel : messages privés (ModMail). GuildMember / User : départs et réactions hors cache.
+ */
+const partials = [Partials.Channel, Partials.Message, Partials.Reaction, Partials.GuildMember, Partials.User];
 
 module.exports = { intents, partials };
