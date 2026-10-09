@@ -158,6 +158,8 @@ class AfkService {
     const current = member.displayName ?? member.user?.username ?? '';
     if (current.startsWith(AFK_PREFIX.trim())) return 'kept';
     const nick = afkNickname(current);
+    // Renommage du bot : le filtre des pseudos de l'AutoMod ne le prend pas pour un « dehoist ».
+    this.#allowName(member, nick);
     try {
       await member.setNickname(nick, 'Absence (/afk)');
     } catch (err) {
@@ -166,8 +168,20 @@ class AfkService {
     }
     if (this.repo.setAfkNick(member.guild.id, member.id, nick)) return 'set';
     // Revenu entre-temps (message envoyé pendant le renommage) : pseudo d'origine rétabli.
+    this.#allowName(member, row.old_nick ?? null);
     await member.setNickname(row.old_nick ?? null, 'Retour d\'absence').catch(() => {});
     return 'failed';
+  }
+
+  /** Signale à l'AutoMod (filtre des pseudos) un pseudo posé par le bot lui-même. */
+  #allowName(member, nick) {
+    this.client?.services?.automod?.allowName?.(member.guild.id, member.id, nick);
+  }
+
+  /** Pseudo « [AFK] … » posé par le bot pour un membre absent (null : aucun). */
+  afkNickOf(guildId, userId) {
+    if (!this.isAfk(guildId, userId)) return null;
+    return this.repo.get(guildId, userId)?.afk_nick ?? null;
   }
 
   /** Fin d'absence (synchrone : un second message du membre ne la termine pas deux fois). @returns {object|null} la ligne supprimée */
@@ -178,6 +192,7 @@ class AfkService {
 
   async #restoreNick(member, row) {
     if (!row?.afk_nick || !member || (member.nickname ?? null) !== row.afk_nick || nickBlocker(member)) return false;
+    this.#allowName(member, row.old_nick ?? null);
     try {
       await member.setNickname(row.old_nick ?? null, 'Retour d\'absence');
       return true;

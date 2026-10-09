@@ -14,7 +14,8 @@ const { phishingScore } = require('../utils/automod/phishing');
 const { fingerprint } = require('../utils/automod/normalize');
 const shape = require('../utils/automod/detectors');
 const { nameViolation, nameSkeleton, replacementName, DEFAULT_NAME_TEMPLATE, NAME_CHECKS } = require('../utils/automod/names');
-const { fetchExecutor } = require('../utils/audit');
+const { fetchAuditEntry } = require('../utils/audit');
+const { AFK_PREFIX } = require('./AfkService');
 
 const logger = createLogger('automod');
 
@@ -219,6 +220,17 @@ class AutoModService {
     this.allowedNames.set(this.#key(guildId, userId), { nick: nick ?? null, at: Date.now() });
   }
 
+  /**
+   * Nom à vérifier : le préfixe « [AFK] » posé par /afk est ignoré tant que le pseudo est
+   * exactement celui que le service d'absences a posé (il n'est pas un « dehoist »).
+   */
+  #withoutAfkPrefix(member, name) {
+    const afk = this.logging?.client?.services?.afk;
+    if (!member.nickname || !afk?.afkNickOf) return name;
+    const afkNick = afk.afkNickOf(member.guild.id, member.id);
+    return afkNick && afkNick === member.nickname && name.startsWith(AFK_PREFIX) ? name.slice(AFK_PREFIX.length) : name;
+  }
+
   /** Squelettes des noms du staff (hors `exceptId`), mis en cache 5 minutes. */
   #staffSkeletons(guild, exceptId) {
     const now = Date.now();
@@ -280,7 +292,7 @@ class AutoModService {
     // Mise à jour sans changement de nom (rôles, avatar…) : rien à vérifier.
     if (source === 'update' && previous && !previous.partial && shownName(previous) === name) return null;
     if (this.isNameExempt(member, cfg, fc)) return null;
-    const violation = nameViolation(name, fc, { words: cfg.filters?.badWords?.words ?? [], staff: fc.impersonation === false ? null : this.#staffSkeletons(guild, member.id) });
+    const violation = nameViolation(this.#withoutAfkPrefix(member, name), fc, { words: cfg.filters?.badWords?.words ?? [], staff: fc.impersonation === false ? null : this.#staffSkeletons(guild, member.id) });
     if (!violation) return null;
     const replacement = replacementName(fc.template || DEFAULT_NAME_TEMPLATE, member.id);
     if (replacement === member.nickname) return null; // déjà renommé
@@ -289,8 +301,14 @@ class AutoModService {
     if (me && !me.permissions?.has?.(PermissionFlagsBits.ManageNicknames)) return { renamed: false, violation, from: name, to: replacement };
     // Pseudo posé par un modérateur depuis Discord : son choix est respecté (journal d'audit).
     if (source === 'update' && previous && !previous.partial && previous.nickname !== member.nickname) {
-      const executor = await fetchExecutor(guild, AuditLogEvent.MemberUpdate, member.id);
-      if (executor && executor !== member.id && executor !== this.logging?.client?.user?.id) {
+      const entry = await fetchAuditEntry(guild, AuditLogEvent.MemberUpdate, member.id);
+      const executor = entry?.executorId ?? entry?.executor?.id ?? null;
+      const botId = this.logging?.client?.user?.id;
+      // Pseudo posé par le bot lui-même (préfixe /afk et son retrait…) : jamais refiltré. L'entrée du
+      // bot doit fixer CE pseudo (une entrée plus ancienne du bot ne couvre pas un changement du membre).
+      const nickChange = entry?.changes?.find?.((c) => c.key === 'nick');
+      if (executor && botId && executor === botId && nickChange && (nickChange.new ?? null) === (member.nickname ?? null)) return null;
+      if (executor && executor !== member.id && executor !== botId) {
         const mod = guild.members.cache.get(executor) ?? await guild.members.fetch(executor).catch(() => null);
         if (mod && isStaff(mod)) return null;
       }
