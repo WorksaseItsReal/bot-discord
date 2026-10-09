@@ -83,21 +83,25 @@ function findMatches(index, text) {
   const hits = new Map();
   if (!index?.words?.size || !text) return hits;
   const tokens = tokenize(text);
+  // Clés trouvées d'abord (un mot-clé répété 500 fois ne compte qu'une fois)…
+  const found = new Set();
   for (let i = 0; i < tokens.length; i += 1) {
     let key = tokens[i];
     let j = i;
     for (;;) {
-      const users = index.words.get(key);
-      if (users) {
-        for (const userId of users) {
-          let found = hits.get(userId);
-          if (!found) hits.set(userId, (found = new Set()));
-          found.add(key);
-        }
-      }
+      if (index.words.has(key)) found.add(key);
       j += 1;
       if (j >= tokens.length || !index.prefixes.has(key)) break;
       key = `${key} ${tokens[j]}`;
+    }
+  }
+  // … puis leurs abonnés, développés UNE seule fois par clé : coût en jetons + abonnés, jamais
+  // en occurrences × abonnés.
+  for (const key of found) {
+    for (const userId of index.words.get(key)) {
+      let keys = hits.get(userId);
+      if (!keys) hits.set(userId, (keys = new Set()));
+      keys.add(key);
     }
   }
   return hits;

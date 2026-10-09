@@ -115,3 +115,23 @@ test('virements : taxe arrondie au supérieur, plus d\'esquive par petits montan
   }
   assert.ok(sent - received >= sent * 0.1, `taxe esquivée : ${sent} envoyés, ${received} reçus`);
 });
+
+// ---------------------------------------------------------------- alertes de mots-clés
+
+test('alertes : les abonnés d\'un mot-clé sont développés une seule fois par message, quelle que soit la répétition', () => {
+  const { buildIndex, findMatches } = require('../src/utils/highlights');
+  const entries = Array.from({ length: 50 }, (_, i) => ({ userId: String(300000000000000000n + BigInt(i)), words: ['gadget', 'inspecteur gadget'] }));
+  const index = buildIndex(entries);
+  // Ensembles d'abonnés instrumentés : chaque parcours complet est compté.
+  let walks = 0;
+  for (const [key, users] of index.words) {
+    const counted = new Set(users);
+    const iterate = counted[Symbol.iterator].bind(counted);
+    counted[Symbol.iterator] = () => { walks += 1; return iterate(); };
+    index.words.set(key, counted);
+  }
+  const hits = findMatches(index, 'inspecteur gadget '.repeat(300));
+  assert.equal(hits.size, 50);
+  assert.deepEqual([...hits.values()][0], new Set(['inspecteur gadget', 'gadget']));
+  assert.equal(walks, 2, `abonnés parcourus ${walks} fois (une fois par occurrence au lieu d'une fois par clé)`);
+});
