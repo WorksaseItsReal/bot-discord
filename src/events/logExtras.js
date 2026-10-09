@@ -5,6 +5,7 @@ const { truncate } = require('../utils/embeds');
 const { field, wide, ICONS, userLine, code } = require('../utils/ui');
 const { logCard } = require('../services/LoggingService');
 const { discordTimestamp } = require('../utils/time');
+const { boostChange } = require('../services/AutomationService');
 
 /**
  * Événements complémentaires pour des logs complets : boosts, suppressions en
@@ -30,7 +31,8 @@ module.exports = [
 
       // Rôles et pseudos : journalisés via le journal d'audit (events/auditLogs.js), qui
       // fonctionne aussi pour les membres hors cache et indique l'auteur du changement.
-      if (!oldMember.premiumSince && newMember.premiumSince) {
+      // Même détection que le remerciement de boost (/automatisations) : events/automations.js.
+      if (boostChange(oldMember, newMember) === 'start') {
         await send(client, guildId, 'members', logCard({
           category: 'members',
           tone: 'celebrate',

@@ -615,6 +615,20 @@ class FakeDiscord {
     r('DELETE', '/channels/:channel/messages/:message/reactions', () => undefined);
     r('DELETE', '/channels/:channel/messages/:message/reactions/:emoji', () => undefined);
     r('GET', '/channels/:channel/messages/:message/reactions/:emoji', () => []);
+    r('POST', '/channels/:channel/messages/:message/crosspost', (p, call) => {
+      const ch = this.channel(p.channel, call);
+      const msg = this.messages.get(p.message);
+      if (!msg || msg.channel_id !== p.channel) throw this.#error(call, 404, 10008, 'Unknown Message');
+      if (ch.type !== 5) this.#violate(call, [`publication (crosspost) hors d'un salon d'annonces (type ${ch.type})`], { code: 50068, message: 'Invalid message type' });
+      if ((msg.flags ?? 0) & 1) throw this.#error(call, 400, 40033, 'This message has already been crossposted.');
+      const me = this.client.guilds.cache.get(this.guildId)?.members.me;
+      const perms = me && this.client.channels.cache.get(p.channel)?.permissionsFor(me);
+      const needed = [P.SendMessages, ...(msg.author.id === this.botUser.id ? [] : [P.ManageMessages])];
+      if (perms && !needed.every((f) => perms.has(f))) throw this.#error(call, 403, 50013, 'Missing Permissions');
+      msg.flags = (msg.flags ?? 0) | 1; // CROSSPOSTED
+      this.#echoMessage(msg, 'MESSAGE_UPDATE');
+      return msg;
+    });
     r('PUT', '/channels/:channel/pins/:message', () => undefined);
     r('DELETE', '/channels/:channel/pins/:message', () => undefined);
     r('PUT', '/channels/:channel/messages/pins/:message', () => undefined);

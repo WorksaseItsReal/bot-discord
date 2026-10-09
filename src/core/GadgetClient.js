@@ -45,6 +45,8 @@ const { TimedActionRepository } = require('../database/repositories/TimedActionR
 const { ActivityRepository } = require('../database/repositories/ActivityRepository');
 const { ApplicationRepository } = require('../database/repositories/ApplicationRepository');
 const { TicketRatingRepository } = require('../database/repositories/TicketRatingRepository');
+const { FeedRepository } = require('../database/repositories/FeedRepository');
+const { AutoThreadCounterRepository } = require('../database/repositories/AutoThreadCounterRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -81,6 +83,8 @@ const { TimedLockService } = require('../services/TimedLockService');
 const { ActivityService } = require('../services/ActivityService');
 const { ApplicationService } = require('../services/ApplicationService');
 const { TicketRatingService } = require('../services/TicketRatingService');
+const { FeedService } = require('../services/FeedService');
+const { AutomationService } = require('../services/AutomationService');
 
 const logger = createLogger('client');
 
@@ -160,6 +164,8 @@ class GadgetClient extends Client {
       activity: new ActivityRepository(db),
       applications: new ApplicationRepository(db),
       ticketRatings: new TicketRatingRepository(db),
+      feeds: new FeedRepository(db),
+      autoThreadCounters: new AutoThreadCounterRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -217,6 +223,10 @@ class GadgetClient extends Client {
       activity: new ActivityService({ client: this, activity: this.repositories.activity, config: configService }),
       // Candidatures (/candidatures, /candidature) : formulaires, cartes du staff, entretiens.
       applications: new ApplicationService({ client: this, applications: this.repositories.applications, config: configService, logging, tickets }),
+      // Flux RSS / YouTube (/flux) : seule source de requêtes HTTP sortantes (FEEDS_NETWORK=off la coupe).
+      feeds: new FeedService({ client: this, feeds: this.repositories.feeds, networkEnabled: config.feedsNetwork }),
+      // Automatisations (/automatisations) : publication automatique, fils, rôle vocal, boosts.
+      automations: new AutomationService({ client: this, config: configService, counters: this.repositories.autoThreadCounters }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -244,7 +254,7 @@ class GadgetClient extends Client {
   async startOperations(opts = config) {
     if (opts === config) {
       // Valeur présente mais rejetée par la config (hors bornes, non numérique) : on le signale.
-      const env = { HEALTH_PORT: 'healthPort', DB_BACKUP_INTERVAL_HOURS: 'dbBackupIntervalHours', DB_BACKUP_KEEP: 'dbBackupKeep' };
+      const env = { HEALTH_PORT: 'healthPort', DB_BACKUP_INTERVAL_HOURS: 'dbBackupIntervalHours', DB_BACKUP_KEEP: 'dbBackupKeep', PRESENCE_INTERVAL_MINUTES: 'presenceIntervalMinutes' };
       for (const [name, key] of Object.entries(env)) {
         const raw = process.env[name]?.trim();
         if (raw && Number(raw) !== opts[key]) logger.warn(`${name}=${raw} invalide : ignoré (voir .env.example).`);
@@ -347,6 +357,9 @@ class GadgetClient extends Client {
       ['Arrêt des mini-jeux', () => s.games?.stop()],
       // Statistiques : dernier vidage du tampon de compteurs en base.
       ['Arrêt des statistiques', () => s.activity?.stop()],
+      // Automatisations (file de publication, rôle vocal) et lectures de flux en cours.
+      ['Arrêt des automatisations', () => s.automations?.stop()],
+      ['Arrêt des flux RSS', () => s.feeds?.stop()],
       ['Vidage des tickets', () => s.tickets?.flush?.()],
       ['Vidage des giveaways', () => s.giveaways?.flush?.()],
       ['Vidage des projets', () => s.projects?.flush?.()],

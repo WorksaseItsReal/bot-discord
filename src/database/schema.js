@@ -756,6 +756,52 @@ const migrations = [
     `,
   },
   {
+    id: 22,
+    name: 'feeds_and_automations',
+    up: `
+      -- Flux RSS / Atom / YouTube (/flux) : sondés par le SchedulerService toutes les 10 min.
+      CREATE TABLE IF NOT EXISTS feeds (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id        TEXT NOT NULL,
+        channel_id      TEXT NOT NULL,
+        url             TEXT NOT NULL,
+        title           TEXT,
+        role_id         TEXT,                       -- rôle mentionné à chaque nouveauté
+        filter          TEXT,                       -- mot ou expression exigé (titre ou extrait)
+        etag            TEXT,
+        last_modified   TEXT,
+        synced          INTEGER NOT NULL DEFAULT 0, -- 1 : articles existants déjà marqués comme vus
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        errors          INTEGER NOT NULL DEFAULT 0, -- erreurs consécutives (désactivé à 10)
+        last_error      TEXT,
+        last_checked_at INTEGER,
+        last_posted_at  INTEGER,
+        posted_count    INTEGER NOT NULL DEFAULT 0,
+        created_by      TEXT,
+        created_at      INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_target ON feeds (guild_id, channel_id, url);
+      CREATE INDEX IF NOT EXISTS idx_feeds_due ON feeds (guild_id, enabled, last_checked_at);
+
+      -- Articles déjà vus (déduplication par guid/id), 200 au plus par flux.
+      CREATE TABLE IF NOT EXISTS feed_items (
+        feed_id  INTEGER NOT NULL REFERENCES feeds (id) ON DELETE CASCADE,
+        guid     TEXT NOT NULL,
+        seen_at  INTEGER NOT NULL,
+        PRIMARY KEY (feed_id, guid)
+      );
+      CREATE INDEX IF NOT EXISTS idx_feed_items_seen ON feed_items (feed_id, seen_at);
+
+      -- Fils automatiques (/automatisations) : numéro {n} par salon.
+      CREATE TABLE IF NOT EXISTS auto_thread_counters (
+        guild_id   TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        count      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, channel_id)
+      );
+    `,
+  },
+  {
     id: 23,
     name: 'applications_ticket_ratings_giveaway_conditions',
     up: `

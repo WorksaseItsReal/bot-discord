@@ -314,6 +314,33 @@ const defaultGuildConfig = Object.freeze({
       dmMessage: null,        // modèle du MP aux inactifs (null = modèle par défaut)
     },
   },
+  // Automatisations (/automatisations). Les flux RSS (/flux) sont en base (table feeds) ;
+  // la présence du bot est globale (variables PRESENCE_STATUSES / PRESENCE_INTERVAL_MINUTES).
+  automations: {
+    // Publication automatique (crosspost) des messages des salons d'annonces choisis.
+    crosspost: { enabled: false, channels: [] },
+    // Fil ouvert sous chaque message (mode all) ou chaque message avec image / lien (mode media).
+    autoThreads: {
+      enabled: false,
+      channels: [],
+      mode: 'all',                          // all | media
+      nameTemplate: 'Discussion de {pseudo}', // variables : {pseudo} {n}
+      archiveMinutes: 1440,                 // 60 | 1440 | 4320 | 10080
+    },
+    // Rôle porté tant qu'un membre est en vocal : global (roleId) et/ou par salon.
+    voiceRole: {
+      enabled: false,
+      roleId: null,
+      channels: [],                         // [{ channelId, roleId }] (10 max)
+    },
+    // Remerciement de boost (le log « Nouveau boost » reste dans /logs → Membres).
+    boost: {
+      enabled: false,
+      channelId: null,
+      message: null,                        // null = message par défaut ; {membre} {serveur} {boosts}
+      roleId: null,                         // rôle donné au booster (retiré à la fin du boost)
+    },
+  },
 });
 
 module.exports = { defaultGuildConfig };
