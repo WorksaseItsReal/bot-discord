@@ -192,3 +192,66 @@ test('Boutique : un rôle non attribué est remboursé EXACTEMENT du débit, mê
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- classement des jeux
+
+const T = require('../../src/utils/games/morpion');
+
+const EPHEMERAL_FLAG = 1 << 6;
+const cardOf = (h, rec) => h.messagesOf(rec).find((m) => !((m?.flags ?? 0) & EPHEMERAL_FLAG)) ?? null;
+const gameIdOf = (msg) => /Partie ([a-z0-9]{8})/.exec(msg?.embeds?.[0]?.footer?.text ?? '')?.[1] ?? null;
+const scoreOf = (h, as, game) => h.client.repositories.gameScores.get(h.guild.id, IDS.users[as] ?? as, game);
+const cardText = (msg) => (msg?.embeds ?? []).map((e) => [e.title, e.description, ...(e.fields ?? []).map((f) => `${f.name} ${f.value}`)].join('\n')).join('\n');
+
+test('Classement des jeux : abandon avant 2 coups non compté, nul contre le bot sans point, quiz en solo non compté', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  const games = h.client.services.games;
+  try {
+    // Défi accepté puis abandon immédiat (complice) : rien n'est enregistré.
+    const duel = async () => {
+      const rec = await h.slash('jeu', sub('morpion', [opt('adversaire', 6, IDS.users.target)]), { as: 'member' });
+      const msg = cardOf(h, rec);
+      const id = gameIdOf(msg);
+      await h.click(h.message(msg.id), `cmd:jeu:accepter:${id}`, { as: 'target' });
+      return { msg, id, game: games.get(id) };
+    };
+    let { msg, id } = await duel();
+    await h.click(h.message(msg.id), `cmd:jeu:abandon:${id}`, { as: 'target' });
+    assert.match(cardText(h.message(msg.id)), /partie non comptée/);
+    assert.equal(scoreOf(h, 'member', 'morpion'), null, 'victoire comptée sur un abandon immédiat');
+    assert.equal(scoreOf(h, 'target', 'morpion'), null);
+
+    // Abandon après 2 coups de l'abandonneur : compté (victoire de l'adversaire).
+    let game;
+    ({ msg, id, game } = await duel());
+    const free = () => game.state.board.findIndex((c, i) => c === T.EMPTY && ![0, 1, 2].includes(i) && !T.outcomeOf(Object.assign([...game.state.board], { [i]: game.state.marks[game.state.turn] })));
+    for (let k = 0; k < 4; k += 1) await h.click(h.message(msg.id), `cmd:jeu:jouer:${id}:${free()}`, { as: game.state.turn });
+    assert.equal(game.state.moves[IDS.users.target], 2);
+    await h.click(h.message(msg.id), `cmd:jeu:abandon:${id}`, { as: 'target' });
+    assert.deepEqual([scoreOf(h, 'member', 'morpion').wins, scoreOf(h, 'member', 'morpion').points], [1, 3]);
+    assert.equal(scoreOf(h, 'target', 'morpion').losses, 1);
+
+    // Nul contre le bot (IA imbattable) : compté comme nul, sans point.
+    const vsBot = await h.slash('jeu', sub('morpion'), { as: 'target' });
+    const botMsg = cardOf(h, vsBot);
+    const botGame = games.get(gameIdOf(botMsg));
+    botGame.state.board = [T.X, T.O, T.X, T.X, T.O, T.O, T.O, T.X, T.EMPTY];
+    botGame.state.turn = IDS.users.target;
+    await h.click(h.message(botMsg.id), `cmd:jeu:jouer:${botGame.id}:8`, { as: 'target' });
+    assert.match(cardText(h.message(botMsg.id)), /Match nul ! \*\(aucun point contre moi\)\*/);
+    const s = scoreOf(h, 'target', 'morpion');
+    assert.deepEqual([s.draws, s.points], [1, 0], 'nul contre le bot payé en points');
+
+    // Quiz en solo (un seul participant) : rien n'est enregistré.
+    const quiz = await h.slash('jeu', sub('quiz', [opt('manches', 4, 1)]), { as: 'admin' });
+    const qMsg = cardOf(h, quiz);
+    const qGame = games.get(gameIdOf(qMsg));
+    await h.click(h.message(qMsg.id), `cmd:jeu:reponse:${qGame.id}:0-${qGame.state.questions[0].answer}`, { as: 'admin' });
+    assert.match(cardText(h.message(qMsg.id)), /Moins de 2 participants/);
+    assert.equal(scoreOf(h, 'admin', 'quiz'), null, 'quiz en solo compté');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

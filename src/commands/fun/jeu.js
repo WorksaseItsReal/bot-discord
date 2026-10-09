@@ -39,8 +39,12 @@ const GAMES = Object.freeze({
   devine: { label: 'Devine le nombre', emoji: '🔢' },
 });
 const ALL = 'tous';
-/** Points d'un duel (morpion, puissance 4). */
+/** Points d'un duel (morpion, puissance 4). Un nul contre le bot ne rapporte rien (voir recordDuel). */
 const DUEL_POINTS = Object.freeze({ win: 3, draw: 1, loss: 0 });
+/** Coups joués au minimum par l'abandonneur pour que l'abandon compte (sinon : partie non comptée). */
+const MIN_MOVES_BEFORE_ABANDON = 2;
+/** Participants (ayant répondu) au minimum pour qu'un quiz rapporte des points. */
+const MIN_QUIZ_PLAYERS = 2;
 const PAGE_SIZE = 10;
 const MEDALS = ['🥇', '🥈', '🥉'];
 const KEYCAPS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
@@ -138,7 +142,8 @@ function duelOutcome(game) {
   const bot = game.state.botId;
   const human = (id) => id !== bot;
   if (r.type === 'win') return `🏆 ${mention(r.winner)} gagne la partie !${human(r.winner) ? ` **+${pts(DUEL_POINTS.win)}**` : ''}`;
-  if (r.type === 'draw') return `🤝 Match nul ! **+${pts(DUEL_POINTS.draw)}**${game.state.vsBot ? '' : ' chacun'}`;
+  if (r.type === 'draw') return game.state.vsBot ? '🤝 Match nul ! *(aucun point contre moi)*' : `🤝 Match nul ! **+${pts(DUEL_POINTS.draw)}** chacun`;
+  if (r.type === 'abandon' && r.uncounted) return `🏳️ ${mention(r.loser)} abandonne avant d'avoir joué ${MIN_MOVES_BEFORE_ABANDON} coups : partie non comptée.`;
   if (r.type === 'abandon') return `🏳️ ${mention(r.loser)} abandonne : victoire de ${mention(r.winner)}.`;
   return '🏁 Partie terminée.';
 }
@@ -174,12 +179,22 @@ function botTurn(game) {
   s.turn = opponentOf(game, s.botId);
 }
 
-/** Résultats d'un duel en base (le bot n'est jamais classé). */
+/**
+ * Résultats d'un duel en base (le bot n'est jamais classé). Un nul contre le bot ne rapporte
+ * aucun point : il est toujours à portée contre une IA imbattable (morpion), donc « farmable ».
+ */
 function recordDuel(client, game, winnerId) {
   games(client).record(game.players.map((userId) => {
     const outcome = winnerId == null ? 'draw' : userId === winnerId ? 'win' : 'loss';
-    return { guildId: game.guildId, userId, game: game.type, outcome, points: DUEL_POINTS[outcome] };
+    const points = outcome === 'draw' && game.state.vsBot ? 0 : DUEL_POINTS[outcome];
+    return { guildId: game.guildId, userId, game: game.type, outcome, points };
   }));
+}
+
+/** Coup d'un joueur compté (abandon : seul celui qui a joué assez de coups fait gagner l'autre). */
+function countMove(game, userId) {
+  game.state.moves ??= {};
+  game.state.moves[userId] = (game.state.moves[userId] ?? 0) + 1;
 }
 
 /** Fin de partie si la grille est gagnée ou pleine. @returns {boolean} */
@@ -384,6 +399,7 @@ function quizView(game) {
     let head = '🏁 **Quiz terminé !**';
     if (game.status === 'expired') head = EXPIRED;
     else if (game.result?.type === 'stopped') head = `⏹️ Quiz arrêté par ${mention(game.result.by)} : aucun point n'est enregistré.`;
+    else if (game.result?.uncounted) head = `🏁 **Quiz terminé !**\n${subtext(`Moins de ${MIN_QUIZ_PLAYERS} participants : aucun point n'est enregistré.`)}`;
     return {
       embeds: [gameCard(game, {
         tone: ranking.length && game.result?.type === 'done' ? 'gold' : 'neutral',
@@ -427,7 +443,7 @@ function quizView(game) {
       fields: [
         field('🏷️', 'Thème', themeLabel),
         field(ICONS.stats, 'Scores', top.length ? top.map((r) => `${mention(r.userId)} · **${r.points}**`).join('\n') : 'Aucun point'),
-        field(ICONS.info, 'Règle', 'Premier à répondre juste : **1 point**. Une seule réponse par question.'),
+        field(ICONS.info, 'Règle', `Premier à répondre juste : **1 point**. Une seule réponse par question. Points enregistrés à partir de ${MIN_QUIZ_PLAYERS} participants.`),
       ],
     })],
     components: [
@@ -471,7 +487,12 @@ function finishQuiz(client, game, result) {
   game.result = result;
   if (result.type === 'done') {
     const ranking = Q.finalRanking(game.state.scores);
-    service.record(ranking.map((r) => ({ guildId: game.guildId, userId: r.userId, game: 'quiz', outcome: r.outcome, points: r.points })));
+    // Quiz « en solo » : rien n'est enregistré (classement non gonflable seul).
+    if (ranking.length >= MIN_QUIZ_PLAYERS) {
+      service.record(ranking.map((r) => ({ guildId: game.guildId, userId: r.userId, game: 'quiz', outcome: r.outcome, points: r.points })));
+    } else {
+      game.result = { ...result, uncounted: true };
+    }
   }
   service.end(game);
 }
@@ -687,6 +708,8 @@ module.exports = {
   autoDelete: false,
   GAMES,
   DUEL_POINTS,
+  MIN_MOVES_BEFORE_ABANDON,
+  MIN_QUIZ_PLAYERS,
   render,
   boardView,
   disabledRows,
@@ -771,6 +794,7 @@ module.exports = {
       const index = Number(cell);
       if (s.board[index] !== T.EMPTY) throw new UserError('Cette case est déjà prise.');
       s.board[index] = s.marks[interaction.user.id];
+      countMove(game, interaction.user.id);
       s.turn = opponentOf(game, interaction.user.id);
       if (!settleDuel(client, game) && s.vsBot) {
         botTurn(game);
@@ -790,6 +814,7 @@ module.exports = {
       if (!P4.canPlay(s.board, col)) throw new UserError('Cette colonne est pleine ou invalide.');
       const mark = s.marks[interaction.user.id];
       s.last = { col, row: P4.drop(s.board, col, mark), mark };
+      countMove(game, interaction.user.id);
       s.turn = opponentOf(game, interaction.user.id);
       if (!settleDuel(client, game) && s.vsBot) {
         botTurn(game);
@@ -909,8 +934,10 @@ module.exports = {
             game.result = { type: userId === game.ownerId ? 'cancelled' : 'declined' };
           } else {
             const winner = opponentOf(game, userId);
-            game.result = { type: 'abandon', loser: userId, winner };
-            recordDuel(client, game, winner);
+            // Abandon avant 2 coups de l'abandonneur (complice qui accepte puis abandonne) : rien n'est compté.
+            const uncounted = (game.state.moves?.[userId] ?? 0) < MIN_MOVES_BEFORE_ABANDON;
+            game.result = { type: 'abandon', loser: userId, winner, uncounted };
+            if (!uncounted) recordDuel(client, game, winner);
           }
           break;
         }
