@@ -3,6 +3,72 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.6.0] — Non publié — Nouvelles fonctionnalités, revue n° 4
+
+### Added
+- **Signalements** : menu contextuel « Signaler le message » pour tous (raison facultative, anti-abus), carte du staff
+  (Supprimer, Avertir, Timeout 10 min, Classer, Rejeter), tableau de bord `/signalements` ; menus des modérateurs
+  « Infos du membre », « Sanctions du membre », « Note de modération ».
+- **Invitations et compteurs** : invitation utilisée affichée dans le log d'arrivée, `/invitations voir|classement|reinitialiser|reglages` ;
+  `/compteurs` (salons vocaux verrouillés : membres, humains, bots, boosts, salons, rôles).
+- **Communauté** : starboard et réponses automatiques (`/communaute`), messages épinglés automatiques (`/sticky definir|retirer|liste`).
+- **Planifié** : rôles temporaires (`/role temporaire|temporaires`), annonces programmées avec répétition (`/annonce programmer|liste`),
+  anniversaires (`/anniversaire definir|retirer|liste|config`).
+- **Candidatures** : `/candidatures` (formulaires, panneau « Postuler », carte du staff Accepter / Refuser / Entretien, une seule décision,
+  MP, journal) et `/candidature statut|retirer` ; **notation des tickets** en MP et vue « Statistiques » de `/tickets` (notes, délais, staff) ;
+  **conditions de giveaway** `niveau_min`, `invitations_min`, `anciennete_min`.
+- **Outils des membres** : `/afk` (préfixe [AFK], réponse aux mentions, retour automatique), `/alertes` (mots-clés en MP, blocages,
+  pause automatique), `/snipe supprime|modifie` (10 min en mémoire, AutoMod et bots exclus, consultation journalisée), réglages `/alertes config`.
+- **Économie** (désactivée par défaut) : `/eco` et `/economie` — monnaie virtuelle sans valeur réelle, quotidien (série) et hebdo, travail,
+  virements taxables avec confirmation, boutique d'objets et de rôles, inventaire, classement, historique, pile ou face et machine à sous
+  à espérance négative réglable, tableau de bord journalisé ; soldes écrits en transactions SQLite, jamais négatifs.
+- **Mini-jeux `/jeu`** : morpion (IA imbattable), puissance 4, pendu (solo ou salon), quiz (140 questions), devine le nombre,
+  défis entre membres, scores et classement.
+- **Statistiques** : `/statistiques serveur|membre|reglages` (messages, vocal, arrivées, salons, membres, heures de pointe en UTC, croissance ;
+  compteurs uniquement, conservation réglable) et `/activite` (membres inactifs, actions groupées : rôle, MP hebdomadaire, expulsion limitée à 50).
+- **Outils d'administration** : `/softban`, `/modstats`, levées automatiques (`/lock duree`, `/slowmode pendant`, `/lockdown enable duree`),
+  décroissance des strikes (`/settings moderation decroissance`), filtre AutoMod « Pseudos » (désactivé par défaut), `/role modifier`,
+  `/channel creer|supprimer|cloner|renommer|sujet|nsfw`, `/emoji ajouter|supprimer|renommer`.
+- **Limites levées** : AntiRaid sur les expulsions massives (seuil « Expulsions », désactivé par défaut), niveaux sans les membres partis
+  (XP conservée, purge dans `/niveaux`), `/backup restore` dans l'ordre des rôles et avec permissions sur option, pièces jointes archivées
+  avec les transcripts (désactivé par défaut), question anti-robot de `/bienvenue` en toutes lettres.
+- **Logs** : 8 nouveaux événements (notes des tickets, signalements, candidatures, `/snipe`, inactifs, levées automatiques, pseudos renommés, économie).
+- **Tests de chaos** (`npm run test:chaos`, `CHAOS_SEED`) : valeurs hostiles, double clics, marches aléatoires, bot sans droits ;
+  audit UX de bout en bout (chaque sous-commande répond par une embed, en admin comme en membre).
+- Migrations #13 (signalements), #14 (invitations), #15 (starboard, sticky), #16 (rôles temporaires, annonces, anniversaires),
+  #17 (départs des niveaux), #18 (économie), #19 (statistiques), #20 (outils des membres), #21 (strikes datés, levées automatiques),
+  #23 (candidatures, notes des tickets, conditions de giveaway), #24 (scores des mini-jeux), #25 (réessais des rôles temporaires, garde des anniversaires).
+
+### Changed
+- **`/channel` et `/emoji` passent en sous-commandes** : l'affichage devient `/channel info` et `/emoji info` (relancer `npm run deploy`).
+- 41 descriptions d'options clarifiées ; raccourcis (boutons du projet après modification, « Prochains anniversaires »,
+  « Classement » des invitations, « Ouvrir l'AntiRaid » depuis `/whitelist`) ; `/help` présente les menus contextuels et la catégorie Économie.
+- Intents `GuildInvites` (suivi des invitations) et `GuildMessageReactions` (starboard) ajoutés.
+
+### Security
+- La permission déclarée par chaque commande est revérifiée par le bot : un rôle autorisé dans Paramètres du serveur › Intégrations
+  ne permet plus de bannir, expulser ou rendre muet sans la permission Discord correspondante (28 commandes concernées).
+- Option texte `__proto__`, `constructor`… : ne corrompt plus les caches de discord.js (interactionGuard).
+- Signalements : « Supprimer » exige « Gérer les messages » dans le salon du message signalé, plus dans celui de la carte.
+- Annonces : permission de mention de l'auteur revérifiée à chaque envoi programmé.
+- Starboard : jamais de repost d'un salon ou d'un fil privé dans un starboard public ; images spoiler jamais affichées en clair.
+
+### Fixed
+- **Starboard et sticky** : plus de carte orpheline ni de doublon, plus d'auto-étoile par super-réaction ; sticky sans ping-pong entre bots.
+- **Annonces** : « Envoyer maintenant » ne publie plus deux fois. **Rôles temporaires** : un serveur bloqué ne retarde plus les autres,
+  `/role remove` clôt le rôle temporaire. **Anniversaires** : pas de fête le jour d'une modification, au plus une par 300 jours,
+  rôle d'anniversaire jamais oublié en silence.
+- **Signalements** : actions verrouillées par signalement et relues (pas de double avertissement), salon supprimé → repli sur les logs
+  Modération et contrôle dans `/diagnostics`, avertissement si le rôle mentionné ne sera pas notifié.
+- **Arrivées** : mute et rôles d'arrivée réappliqués sans attendre le suivi des invitations (raids) ; une lecture des invitations par lot.
+- **Niveaux et invitations** : départs survenus hors ligne rattrapés au démarrage ; un gain d'XP différé ne remet plus un membre parti au classement.
+- **AntiRaid** : le lockdown automatique attend un verrouillage ou une levée en cours ; un échec propose « Réessayer le lockdown ».
+- **Double clics** : boutons de levée (démute, timeout, débannissement), salon créateur de `/tempvoice`, lockdowns globaux simultanés.
+- **Arrêt du bot** : un seul passage parallèle borné à 6 s, puis déconnexion et fermeture de la base ; budget de temps par étape du scheduler.
+- **Divers** : compteurs bornés face aux limites de renommage de Discord ; compteurs et vocaux temporaires exclus des sauvegardes ;
+  tickets archivés sans téléchargement à l'arrêt ; texte fait d'espaces refusé proprement dans les embeds ; `/diagnostics` signale
+  aussi la catégorie des vocaux temporaires et le rôle gestionnaire des projets supprimés.
+
 ## [0.5.2] — Non publié — Revue n° 3 et tests de bout en bout
 
 ### Added
