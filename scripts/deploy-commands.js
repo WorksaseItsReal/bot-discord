@@ -53,7 +53,10 @@ async function main() {
   const where = target === 'guild' ? `sur le serveur ${config.devGuildId}` : 'globalement';
   if (dryRun) {
     if (clearGuild) logger.info(`[dry-run] Toutes les commandes seraient supprimées ${where}.`);
-    else logger.info(`[dry-run] ${body.length} commande(s) seraient déployée(s) ${where} : ${body.map((c) => c.name).sort().join(', ')}`);
+    else {
+      const menus = body.filter((c) => c.type === 2 || c.type === 3).length;
+      logger.info(`[dry-run] ${body.length} commande(s) seraient déployée(s) ${where} (dont ${menus} menu(s) contextuel(s)) : ${body.map((c) => c.name).sort().join(', ')}`);
+    }
     return;
   }
 

@@ -405,6 +405,35 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_role_menus_message ON role_menus (message_id);
     `,
   },
+  {
+    id: 13,
+    name: 'reports',
+    up: `
+      -- Signalements de messages (menu contextuel « Signaler le message »).
+      CREATE TABLE IF NOT EXISTS reports (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id         TEXT NOT NULL,
+        reporter_id      TEXT NOT NULL,
+        target_id        TEXT NOT NULL,              -- auteur du message signalé
+        channel_id       TEXT NOT NULL,
+        message_id       TEXT NOT NULL,
+        content          TEXT,                       -- copie tronquée du message
+        attachments      TEXT NOT NULL DEFAULT '[]', -- JSON string[] : noms des pièces jointes
+        reason           TEXT,                       -- raison donnée par le signaleur (facultative)
+        status           TEXT NOT NULL DEFAULT 'open', -- open | handled | dismissed
+        actions          TEXT NOT NULL DEFAULT '[]', -- JSON [{ type, by, at, note? }] : actions du staff
+        handled_by       TEXT,
+        handled_at       INTEGER,
+        card_channel_id  TEXT,                       -- carte publiée dans le salon du staff
+        card_message_id  TEXT,
+        created_at       INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_reports_guild_status ON reports (guild_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_reports_message ON reports (guild_id, message_id);
+      -- Au plus UN signalement ouvert par (signaleur, message) : garanti même en cas de double envoi.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_open_unique ON reports (guild_id, reporter_id, message_id) WHERE status = 'open';
+    `,
+  },
 ];
 
 module.exports = { migrations };

@@ -19,7 +19,7 @@
  * Utilisation : `const h = await createHarness(); h.configureAll();`
  *   `await h.slash('ban', [{ name: 'membre', type: 6, value: IDS.users.target }])`,
  *   `await h.click(message, customId, { as: 'member', values })`, `await h.submitModal(rec)`,
- *   `await h.userMessage({ as, channel, content })`, `await h.voice(as, salon)`…
+ *   `await h.contextMenu('Signaler le message', message)` (menus contextuels), `await h.userMessage({ as, channel, content })`, `await h.voice(as, salon)`…
  *   puis `assert.equal(h.problemCount(), 0, h.formatProblems())` et `await h.close()`.
  * Exploration automatique des composants : lib/explore.js.
  */
@@ -321,6 +321,9 @@ async function createHarness(opts = {}) {
       // Les cooldowns du bot (2 s par commande) ralentiraient les scénarios : levés sauf demande.
       if (!ctx.keepCooldowns) client.cooldowns.expiries.clear();
       const command = client.commands.get(name);
+      // Menu contextuel (clic droit → Applications) : même pipeline, cible au lieu d'options.
+      const type = command?.data?.type;
+      if (type === 2 || type === 3) return this.contextMenu(name, ctx.target, ctx);
       const refs = collectRefs(options);
       const channelId = ctx.channel === 'dm' ? this.dmChannel(ctx.as ?? 'admin').id : this.channelId(ctx.channel ?? 'general');
       const data = {
@@ -335,6 +338,35 @@ async function createHarness(opts = {}) {
       if (!command) data.id = nextId();
       const raw = this.baseInteraction(2, { ...ctx, data });
       return this.dispatchInteraction(raw, ctx.label ?? `/${name}${describeOptions(options)}`);
+    },
+
+    /**
+     * Menu contextuel (type 2 : utilisateur, type 3 : message).
+     * @param {string} name nom du menu (« Signaler le message »)
+     * @param {string|object} [target] utilisateur (clé d'IDS.users ou identifiant) ou message
+     *   (brut ou identifiant) ; par défaut : le membre « target », ou un nouveau message de lui
+     * @param {{ as?: string, channel?: string, label?: string }} [ctx]
+     */
+    async contextMenu(name, target, ctx = {}) {
+      if (!ctx.keepCooldowns) client.cooldowns.expiries.clear();
+      const command = client.commands.get(name);
+      const type = command?.data?.type ?? 2;
+      const channelId = this.channelId(ctx.channel ?? 'general');
+      const data = { id: snowflakeAt(Date.parse('2024-01-01'), name.length), name, type, guild_id: guild.id };
+      if (type === 3) {
+        const message = typeof target === 'object' && target
+          ? target
+          : (target && fake.messages.get(target)) ?? fake.buildMessage({ channelId, body: { content: 'Message de test à signaler' }, author: fake.users.get(IDS.users.target) });
+        data.target_id = message.id;
+        data.resolved = { messages: { [message.id]: JSON.parse(JSON.stringify(message)) } };
+        ctx = { ...ctx, channel: message.channel_id };
+      } else {
+        const userId = IDS.users[target] ?? target ?? IDS.users.target;
+        data.target_id = userId;
+        data.resolved = this.resolvedFor([{ type: 'user', id: userId }], channelId);
+      }
+      const raw = this.baseInteraction(2, { ...ctx, data });
+      return this.dispatchInteraction(raw, ctx.label ?? `menu « ${name} »`);
     },
 
     /** Autocomplétion (option `focused: true` dans `options`). */

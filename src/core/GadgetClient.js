@@ -30,6 +30,7 @@ const { AutomodEventRepository } = require('../database/repositories/AutomodEven
 const { AutomodQuarantineRepository } = require('../database/repositories/AutomodQuarantineRepository');
 const { ModNoteRepository } = require('../database/repositories/ModNoteRepository');
 const { LevelRepository } = require('../database/repositories/LevelRepository');
+const { ReportRepository } = require('../database/repositories/ReportRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -48,6 +49,7 @@ const { ProjectService } = require('../services/ProjectService');
 const { LogSetupService } = require('../services/LogSetupService');
 const { WelcomeService } = require('../services/WelcomeService');
 const { LevelService } = require('../services/LevelService');
+const { ReportService } = require('../services/ReportService');
 
 const logger = createLogger('client');
 
@@ -103,6 +105,7 @@ class GadgetClient extends Client {
       automodQuarantines: new AutomodQuarantineRepository(db),
       modNotes: new ModNoteRepository(db),
       levels: new LevelRepository(db),
+      reports: new ReportRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -131,6 +134,7 @@ class GadgetClient extends Client {
       logSetup: new LogSetupService({ config: configService }),
       welcome: new WelcomeService({ client: this, config: configService, logging }),
       levels: new LevelService({ client: this, levels: this.repositories.levels, config: configService }),
+      reports: new ReportService({ reports: this.repositories.reports, config: configService, logging }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 const { ApplicationCommandOptionType: T } = require('discord.js');
-const { CommandHandler } = require('../src/core/CommandHandler');
+const { CommandHandler, isContextMenu } = require('../src/core/CommandHandler');
 
 /**
  * Valide TOUTES les slash commands contre les limites de l'API Discord,
@@ -13,6 +13,8 @@ const { CommandHandler } = require('../src/core/CommandHandler');
 const handler = new CommandHandler();
 const commands = handler.loadAll(path.join(__dirname, '..', 'src', 'commands'));
 const NAME_RE = /^[-_\p{Ll}\p{N}\p{sc=Deva}\p{sc=Thai}]{1,32}$/u;
+/** Menus contextuels : 1 à 32 caractères, majuscules et espaces permis, pas de description ni d'options. */
+const CONTEXT_NAME_RE = /^[^\s].{0,30}[^\s]$|^[^\s]$/u;
 
 function checkOptions(cmdName, options, depth = 0) {
   assert.ok(options.length <= 25, `/${cmdName} : plus de 25 options/sous-commandes`);
@@ -52,6 +54,7 @@ test('chaque fichier de commande est chargé (aucun échec silencieux)', () => {
 test('noms et descriptions de commandes conformes', () => {
   for (const cmd of commands.values()) {
     const json = cmd.data.toJSON();
+    if (isContextMenu(cmd)) continue; // vérifiés par le test des menus contextuels
     assert.match(json.name, NAME_RE, `nom invalide : ${json.name}`);
     assert.ok(json.description && json.description.length <= 100, `/${json.name} : description absente ou > 100`);
     assert.ok(typeof cmd.execute === 'function');
@@ -87,6 +90,27 @@ test('taille totale du payload de chaque commande < 8000 caractères', () => {
     const size = JSON.stringify(json).length;
     assert.ok(size < 8000, `/${json.name} : payload ${size}`);
   }
+});
+
+test('menus contextuels (clic droit → Applications) : types, noms, limites Discord', () => {
+  const menus = [...commands.values()].filter(isContextMenu);
+  assert.ok(menus.length >= 4, `${menus.length} menu(s) contextuel(s)`);
+  const perType = { 2: 0, 3: 0 };
+  for (const cmd of menus) {
+    const json = cmd.data.toJSON();
+    assert.ok([2, 3].includes(json.type), `${json.name} : type ${json.type}`);
+    perType[json.type] += 1;
+    assert.match(json.name, CONTEXT_NAME_RE, `menu « ${json.name} » : nom invalide (1 à 32 caractères, sans espace aux bords)`);
+    assert.ok(json.name.length <= 32);
+    assert.ok(!json.description, `${json.name} : un menu contextuel n'a pas de description`);
+    assert.ok(!json.options?.length, `${json.name} : un menu contextuel n'a pas d'options`);
+    assert.equal(typeof cmd.description, 'string', `${json.name} : texte d'aide (description) manquant`);
+    assert.ok(cmd.description.length <= 100, `${json.name} : texte d'aide > 100`);
+  }
+  // Discord : au plus 5 menus de chaque type par application.
+  assert.ok(perType[2] <= 5 && perType[3] <= 5, `menus : ${perType[2]} utilisateur, ${perType[3]} message (5 max chacun)`);
+  // Commandes slash : au plus 100 par application.
+  assert.ok([...commands.values()].filter((c) => !isContextMenu(c)).length <= 100);
 });
 
 test('chaque catégorie de commande est connue de /help', () => {

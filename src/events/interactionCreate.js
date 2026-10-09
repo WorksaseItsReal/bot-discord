@@ -9,6 +9,7 @@ const { missingPermissions, permissionLabel } = require('../utils/permissionName
 const { discordTimestamp } = require('../utils/time');
 const { deleteButton, status } = require('../utils/ui');
 const { MessagePayload } = require('discord.js');
+const { commandLabel } = require('../core/CommandHandler');
 
 const logger = createLogger('interaction');
 
@@ -74,7 +75,7 @@ async function handleCommand(client, interaction) {
     const remaining = client.cooldowns.hit(cooldownKey, command.cooldown ?? DEFAULT_COOLDOWN_MS);
     if (remaining > 0) {
       await interaction.reply({
-        embeds: [status.warn(`Doucement ! Vous pourrez réutiliser \`/${command.data.name}\` ${discordTimestamp(Date.now() + remaining, 'R')}.`)],
+        embeds: [status.warn(`Doucement ! Vous pourrez réutiliser **${commandLabel(command)}** ${discordTimestamp(Date.now() + remaining, 'R')}.`)],
         ephemeral: true,
       });
       return;

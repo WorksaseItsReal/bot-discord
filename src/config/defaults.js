@@ -212,6 +212,13 @@ const defaultGuildConfig = Object.freeze({
     ignoredRoles: [],       // rôles sans XP
     multipliers: [],        // [{ roleId, multiplier }] : le plus élevé du membre s'applique
   },
+  // Signalements de messages (clic droit → Applications → « Signaler le message », /signalements).
+  reports: {
+    enabled: true,
+    channelId: null,        // salon des signalements (null : salon de logs Modération)
+    pingRoleId: null,       // rôle pingué à chaque signalement (facultatif)
+    showReporter: true,     // false : le signaleur est masqué sur la carte du staff
+  },
 });
 
 module.exports = { defaultGuildConfig };
