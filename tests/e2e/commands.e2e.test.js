@@ -17,7 +17,7 @@ const { OVERRIDES } = require('./lib/overrides');
 
 const key = (name, leaf) => [name, ...leaf.path].join(' ');
 const opt = (name, type, value) => ({ name, type, value });
-const DASHBOARDS = ['automod', 'logs', 'antiraid', 'tickets', 'bienvenue', 'niveaux', 'settings', 'tempvoice'];
+const DASHBOARDS = ['automod', 'logs', 'antiraid', 'tickets', 'bienvenue', 'niveaux', 'settings', 'tempvoice', 'compteurs', 'signalements', 'communaute'];
 
 test('chaque commande slash, en administrateur, avec exploration des composants', async (t) => {
   const h = await createHarness();
@@ -43,7 +43,9 @@ test('chaque commande slash, en administrateur, avec exploration des composants'
     assert.ok(h.client.commands.size >= 73, `${h.client.commands.size} commandes chargées`);
     const missing = missingNavViews(stats);
     assert.deepEqual(missing, [], `vues de tableau de bord jamais ouvertes : ${missing.join(', ')}`);
-    for (const name of DASHBOARDS.filter((n) => n !== 'settings')) {
+    // Tableaux de bord navigués par boutons ou par un menu de choix (pas de menu « nav »).
+    const NO_NAV = ['settings', 'compteurs', 'signalements'];
+    for (const name of DASHBOARDS.filter((n) => !NO_NAV.includes(n))) {
       assert.ok([...stats.navOptions.keys()].some((id) => id.startsWith(`cmd:${name}:`)), `/${name} : menu de navigation non rencontré`);
     }
     t.diagnostic(`${leaves} sous-commandes · ${stats.actions} actions (${stats.buttons} boutons, ${stats.selects} menus, ${stats.modals} formulaires) · ${stats.keys.size} composants distincts · ${[...stats.navChosen].filter((k) => k.includes(':nav=')).length} vues de tableaux de bord`);
