@@ -294,9 +294,16 @@ async function add(interaction, client) {
   if (!channel || !TEXT_TYPES.includes(channel.type)) throw new UserError('Choisissez un salon textuel ou d\'annonces de ce serveur.');
   const issue = channelIssue(guild, channel.id);
   if (issue) throw new UserError(`Je ne peux pas publier dans <#${channel.id}> : ${issue}.`);
+  // L'auteur doit lui-même pouvoir lire et écrire dans ce salon (comme /annonce) : sinon
+  // un flux qu'il contrôle publierait dans un salon qui lui est fermé.
+  const authorPerms = interaction.member && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+  if (authorPerms && !authorPerms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+    throw new UserError(`Vous ne pouvez pas écrire dans <#${channel.id}> : choisissez un salon où vous avez le droit de publier.`);
+  }
   // Jamais @everyone / @here depuis un flux (contenu externe).
   if (role?.id === guild.id) throw new UserError('Un flux ne peut pas mentionner **@everyone** : choisissez un rôle dédié (ex : « Notifications »).');
-  if (role) assertMentionAllowed(guild, role.id, interaction.memberPermissions);
+  // « Mentionner @everyone » lu dans CE salon (une surcharge peut la retirer).
+  if (role) assertMentionAllowed(guild, role.id, authorPerms ?? interaction.memberPermissions);
   if (client.repositories.feeds.count(guild.id) >= MAX_FEEDS_PER_GUILD) throw new UserError(`**${MAX_FEEDS_PER_GUILD}** flux au plus par serveur : retirez-en un d'abord (\`/flux retirer\`).`);
 
   await interaction.deferReply({ ephemeral: true });

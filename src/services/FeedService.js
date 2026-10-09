@@ -7,7 +7,7 @@ const { card, fitEmbeds, linkButton, buttonRows, field, ICONS } = require('../ut
 const { truncate } = require('../utils/embeds');
 const { safeFetch } = require('../utils/safeFetch');
 const { parseFeed, decodeBody, normalizeFeedUrl, matchesFilter, isYoutubeFeed, safeHttpUrl, FeedError } = require('../utils/feeds');
-const { channelIssue } = require('./AnnouncementService');
+const { channelIssue, mentionAuthorIssue } = require('./AnnouncementService');
 const { logCard } = require('./LoggingService');
 
 const logger = createLogger('feeds');
@@ -28,6 +28,8 @@ const MAX_ERRORS = 10;
 /** Nouveautés publiées au plus par lecture (les autres sont marquées comme vues). */
 const MAX_POSTS_PER_POLL = 5;
 const BUTTON_URL_MAX = 512;
+/** Discord : corps de message invalide (article au contenu refusé). */
+const INVALID_FORM_BODY = 50035;
 /** Contenu externe : TOUT le Markdown est neutralisé (liens masqués compris). */
 const ESCAPE_ALL = Object.freeze({ maskedLink: true, heading: true, bulletedList: true, numberedList: true });
 const USER_AGENT = `InspecteurGadget/${require('../../package.json').version} (bot Discord ; lecteur de flux RSS)`;
@@ -75,7 +77,7 @@ class FeedService {
    * @param {{
    *   client: import('discord.js').Client, feeds: import('../database/repositories/FeedRepository').FeedRepository,
    *   networkEnabled?: boolean, allowLoopback?: boolean, http?: typeof safeFetch, netOptions?: object,
-   * }} deps `allowLoopback` / `netOptions` (lookup, fetchImpl) : tests uniquement
+   * }} deps `allowLoopback` / `netOptions` (lookup, allowedPorts) : tests uniquement
    */
   constructor({ client, feeds, networkEnabled = true, allowLoopback = false, http = safeFetch, netOptions = {} }) {
     this.client = client;
@@ -89,6 +91,8 @@ class FeedService {
     /** @type {Promise<unknown> | null} passage en cours (attendu par stop()) */
     this.running = null;
     this.cursor = 0;
+    /** Flux dont la mention a déjà été signalée comme retirée (`<flux>:<rôle>`). */
+    this.mentionWarned = new Set();
   }
 
   /**
@@ -101,12 +105,21 @@ class FeedService {
     const headers = { 'user-agent': USER_AGENT, accept: ACCEPT };
     if (etag) headers['if-none-match'] = etag;
     if (lastModified) headers['if-modified-since'] = lastModified;
-    const res = await this.http(url, {
-      ...this.netOptions,
-      headers,
-      allowLoopback: this.allowLoopback,
-      signal: signal ? AbortSignal.any([signal, this.abort.signal]) : this.abort.signal,
-    });
+    // Contrôleur local relayé (et nettoyé) : AbortSignal.any() lié au signal permanent
+    // `this.abort` retenait chaque signal combiné (fuite d'environ 180 octets par lecture).
+    const local = new AbortController();
+    const relay = () => local.abort();
+    const sources = [this.abort.signal, signal].filter(Boolean);
+    for (const source of sources) {
+      if (source.aborted) local.abort();
+      else source.addEventListener('abort', relay, { once: true });
+    }
+    let res;
+    try {
+      res = await this.http(url, { ...this.netOptions, headers, allowLoopback: this.allowLoopback, signal: local.signal });
+    } finally {
+      for (const source of sources) source.removeEventListener('abort', relay);
+    }
     if (res.status === 304) return { notModified: true, status: 304 };
     if (!res.ok) throw new FeedError(res.status === 404 || res.status === 410 ? `le flux est introuvable (HTTP ${res.status})` : `le site a répondu HTTP ${res.status}`);
     const feed = parseFeed(decodeBody(res.body, res.headers.get('content-type')), { baseUrl: res.url });
@@ -263,6 +276,13 @@ class FeedService {
       try {
         await this.publish(guild, fresh, item, result.feed);
       } catch (err) {
+        if (err?.code === INVALID_FORM_BODY) {
+          // Article refusé par Discord (contenu invalide) : ignoré, les suivants sont publiés.
+          // Sinon il bloquait tout le flux, puis le désactivait à la 10e lecture.
+          logger.warn(`Flux #${fresh.id} (serveur ${fresh.guild_id}) : article ${JSON.stringify(truncate(item.title || item.id, 80))} refusé par Discord, ignoré —`, err?.message ?? err);
+          this.repo.markSeen(fresh.id, [item.id], now);
+          continue;
+        }
         // Les articles restants seront retentés à la prochaine lecture.
         return this.#fail(guild, fresh, `publication impossible : ${describeError(err)}`, now);
       }
@@ -278,8 +298,34 @@ class FeedService {
   async publish(guild, row, item, feed) {
     const channel = guild.channels.cache.get(row.channel_id);
     // Jamais @everyone : un rôle disparu ou égal au serveur n'est pas mentionné.
-    const roleId = row.role_id && row.role_id !== guild.id && guild.roles.cache.has(row.role_id) ? row.role_id : null;
+    let roleId = row.role_id && row.role_id !== guild.id && guild.roles.cache.has(row.role_id) ? row.role_id : null;
+    if (roleId) {
+      // Revérifié à chaque publication (comme les annonces programmées) : rôle non mentionnable
+      // et auteur parti ou sans « Mentionner @everyone » dans ce salon → publié sans mention.
+      const issue = await mentionAuthorIssue(guild, { roleId, authorId: row.created_by, channel });
+      if (issue) {
+        roleId = null;
+        await this.#warnMention(guild, row, issue);
+      }
+    }
     await channel.send(itemPayload(item, { feedTitle: row.title || feed?.title, youtube: isYoutubeFeed(row.url), roleId }));
+  }
+
+  /** Mention retirée d'un flux : log du serveur une seule fois (par flux et par rôle). */
+  async #warnMention(guild, row, issue) {
+    const key = `${row.id}:${row.role_id}`;
+    if (this.mentionWarned.has(key)) return;
+    this.mentionWarned.add(key);
+    logger.info(`Flux #${row.id} (serveur ${row.guild_id}) : publié sans mention — ${issue}`);
+    const embed = logCard({
+      category: 'server',
+      tone: 'warning',
+      icon: ICONS.warning,
+      title: 'Flux RSS publié sans mention',
+      description: `Le flux **${escapeMarkdown(truncate(row.title || row.url, 200))}** ne mentionne plus <@&${row.role_id}> : ${issue}. Recréez le flux avec un auteur autorisé, ou rendez le rôle mentionnable.`,
+      fields: [field(ICONS.channel, 'Salon', `<#${row.channel_id}>`), field(ICONS.id, 'Flux', `#${row.id}`)],
+    });
+    await this.client.services?.logging?.send(guild.id, 'server', embed, undefined, { event: 'feeds' }).catch(() => {});
   }
 
   /** Erreur de lecture : compteur incrémenté, désactivation (et log) à la 10e consécutive. */

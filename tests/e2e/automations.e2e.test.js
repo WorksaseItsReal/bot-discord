@@ -131,6 +131,7 @@ test('fils automatiques : nom {pseudo}/{n}, archivage, mode image/lien, bots et 
   h.configureAll();
   const svc = h.client.services.automations;
   svc.delayMs = 5;
+  svc.threadCooldownMs = 0; // un fil par membre toutes les 30 s : testé à part
   const general = G().general;
   const threadCalls = (mark) => callsTo(h, 'POST', new RegExp(`^/channels/${general}/messages/\\d+/threads$`), mark);
   try {

@@ -164,9 +164,11 @@ function parseXml(input) {
     if (text.startsWith('<!', lt)) {
       // DOCTYPE (sous-ensemble interne compris) : ignoré, aucune entité n'est déclarée.
       let gt = text.indexOf('>', lt + 2);
-      const bracket = text.indexOf('[', lt + 2);
-      if (bracket !== -1 && gt !== -1 && bracket < gt) {
-        const close = text.indexOf(']', bracket);
+      // « [ » cherché UNIQUEMENT avant ce « > » : un indexOf sur tout le reste du document,
+      // répété à chaque « <!x> », rendait l'analyse quadratique (2 s pour 1 Mo hostile).
+      const bracket = gt === -1 ? -1 : text.slice(lt + 2, gt).indexOf('[');
+      if (bracket !== -1) {
+        const close = text.indexOf(']', lt + 2 + bracket);
         gt = close === -1 ? -1 : text.indexOf('>', close);
       }
       if (gt === -1) break;
@@ -349,9 +351,13 @@ function firstImgSrc(html) {
 
 // ---------------------------------------------------------------- flux
 
+/** Dates acceptées : 1970 → 9999 (au-delà, l'horodatage ISO étendu « +020240-… » est refusé par Discord). */
+const MIN_DATE = 0;
+const MAX_DATE = Date.UTC(9999, 11, 31, 23, 59, 59);
+
 function parseDate(value) {
   const t = Date.parse(String(value ?? '').trim());
-  return Number.isFinite(t) ? t : null;
+  return Number.isFinite(t) && t >= MIN_DATE && t <= MAX_DATE ? t : null;
 }
 
 const imageType = (t) => /^image\//i.test(String(t ?? ''));
@@ -436,8 +442,12 @@ function parseFeed(xml, { baseUrl } = {}) {
     return true;
   });
   // Plus récents d'abord quand les dates le permettent (certains flux sont du plus ancien au plus récent).
-  if (items.length > 1 && items.filter((it) => it.date != null).length >= items.length / 2) {
+  const dated = items.filter((it) => it.date != null);
+  if (items.length > 1 && dated.length >= items.length / 2) {
     items = items.map((it, k) => ({ it, k })).sort((a, b) => (b.it.date ?? -Infinity) - (a.it.date ?? -Infinity) || a.k - b.k).map((x) => x.it);
+  } else if (dated.length >= 2 && dated[0].date < dated[dated.length - 1].date) {
+    // Peu de dates, mais l'ordre du document est croissant : les plus récents sont à la fin.
+    items = items.reverse();
   }
   return { format, title: title || 'Flux sans titre', link, items: items.slice(0, MAX_ITEMS) };
 }
@@ -521,6 +531,7 @@ function decodeBody(buffer, contentType) {
 
 module.exports = {
   FeedError,
+  MAX_DATE,
   MAX_ITEMS,
   EXCERPT_MAX,
   decodeEntities,
