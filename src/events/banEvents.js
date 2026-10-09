@@ -11,6 +11,7 @@ const DESTRUCTIVE_AUDIT_ACTIONS = {
   [AuditLogEvent.ChannelDelete]: 'channelDelete',
   [AuditLogEvent.RoleDelete]: 'roleDelete',
   [AuditLogEvent.MemberBanAdd]: 'ban',
+  [AuditLogEvent.MemberKick]: 'kick',
 };
 
 /**
@@ -21,8 +22,8 @@ const DESTRUCTIVE_AUDIT_ACTIONS = {
  * sans dépendre de l'audit log (qui peut arriver en retard ou être illisible).
  *
  * + guildAuditLogEntryCreate : détection AntiRaid des actions faites hors du bot
- * (salons, rôles, bans) — une entrée = une action, pas de double comptage. Les bans
- * faits VIA le bot (signés par lui) sont signalés par ModerationService avec le modérateur.
+ * (salons, rôles, bans, expulsions) — une entrée = une action, pas de double comptage. Les
+ * bans et kicks faits VIA le bot (signés par lui) sont signalés par ModerationService avec le modérateur.
  */
 module.exports = [
   {
@@ -80,8 +81,8 @@ module.exports = [
     async execute(client, entry, guild) {
       const type = DESTRUCTIVE_AUDIT_ACTIONS[entry?.action];
       if (!type || !guild || !entry.executorId) return;
-      // Cible transmise pour les bans : bannir un arrivant récent (raider) n'est pas compté.
-      const target = type === 'ban' ? { targetId: entry.targetId ?? null } : undefined;
+      // Cible transmise pour les bans et kicks : sanctionner un arrivant récent (raider) n'est pas compté.
+      const target = type === 'ban' || type === 'kick' ? { targetId: entry.targetId ?? null } : undefined;
       await client.services.antiraid?.handleDestructive(guild, entry.executorId, type, target).catch(() => {});
     },
   },

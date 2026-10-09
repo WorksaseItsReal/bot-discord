@@ -25,13 +25,13 @@ function rankCard({ user, member = null, row = null, rank = null, total = 0, cfg
     icon: '🏅',
     title: `Rang de ${member?.displayName ?? user.globalName ?? user.username}`,
     description: [
-      `**Niveau ${p.level}** · ${rank ? `**#${rank}** sur ${total}` : 'pas encore classé'}`,
+      `**Niveau ${p.level}** · ${rank ? `**#${rank}** sur ${total}` : row?.left_at != null ? 'a quitté le serveur (XP conservée)' : 'pas encore classé'}`,
       `\`${progressBar(p.ratio, 18)}\` **${pct} %**`,
       subtext(`${fmt(p.current)} / ${fmt(p.needed)} XP · encore ${fmt(p.remaining)} XP avant le niveau ${p.level + 1}`),
     ],
     fields: [
       field('📈', 'Niveau', `**${p.level}**`),
-      field('🏆', 'Rang', rank ? `**#${rank}** / ${total}` : '*Non classé*'),
+      field('🏆', 'Rang', rank ? `**#${rank}** / ${total}` : row?.left_at != null ? '*Parti du serveur*' : '*Non classé*'),
       field(ICONS.star, 'XP totale', `**${fmt(xp)}**`),
       field(ICONS.channel, 'Messages', fmt(row?.messages)),
       field(ICONS.voice, 'Minutes vocales', fmt(row?.voice_minutes)),

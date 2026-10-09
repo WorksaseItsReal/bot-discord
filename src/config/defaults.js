@@ -109,6 +109,7 @@ const defaultGuildConfig = Object.freeze({
     channelDeleteThreshold: 3,
     roleDeleteThreshold: 3,
     banThreshold: 5,
+    kickThreshold: 0, // expulsions massives (0 = désactivé : rien ne change pour les serveurs existants)
     destructiveWindowSeconds: 10,
     punishExecutor: 'strip', // strip (retire les rôles) | ban | none
   },
@@ -127,6 +128,9 @@ const defaultGuildConfig = Object.freeze({
     panelChannelId: null,
     panelMessageId: null,
     stats: { opened: 0, closed: 0 },
+    // Archive des transcripts (tickets ET ModMail) : pièces jointes ≤ 8 Mo (24 Mo au total)
+    // re-téléversées avec le .txt. false : seuls leurs liens figurent (comportement historique).
+    archiveAttachments: false,
   },
   modmail: {
     enabled: false,

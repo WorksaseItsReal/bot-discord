@@ -43,7 +43,9 @@ const DANGEROUS_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.ManageGuild,
 ]);
 
-const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements' };
+const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements', kick: 'Expulsions' };
+/** Sanctions de membres : expulser ou bannir un arrivant récent (raider) n'est pas compté. */
+const MEMBER_SANCTIONS = new Set(['ban', 'kick']);
 const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
 
 /** Bouton « Lever le lockdown » joint aux alertes qui ont déclenché un lockdown automatique. */
@@ -116,6 +118,22 @@ class AntiRaidService {
     if (joinedAt && now - joinedAt < RECENT_JOIN_MS) return true;
     const at = userId ? this.recentJoiners.get(guildId)?.get(userId) : null;
     return Boolean(at && now - at < RECENT_JOIN_MS);
+  }
+
+  /**
+   * Départ d'un membre (guildMemberRemove) : s'il était arrivé il y a moins de 10 min,
+   * son arrivée est mémorisée. L'entrée d'audit d'un kick arrive souvent APRÈS le départ
+   * (membre sorti du cache) : l'exemption des raiders expulsés reste ainsi fiable, même
+   * pour un arrivant que le bot n'a pas vu entrer (redémarrage).
+   */
+  rememberDeparture(member, now = Date.now()) {
+    const guildId = member?.guild?.id;
+    const joinedAt = member?.joinedTimestamp;
+    if (!guildId || !member.id || !joinedAt || now - joinedAt >= RECENT_JOIN_MS) return false;
+    if (!this.config.get(guildId).antiraid?.enabled) return false;
+    if (this.recentJoiners.get(guildId)?.has(member.id)) return false;
+    this.#rememberJoin(guildId, member.id, joinedAt);
+    return true;
   }
 
   /** Oublie les fenêtres d'actions destructrices devenues vides. */
@@ -268,20 +286,20 @@ class AntiRaidService {
    * Action destructrice détectée via audit log (suppression salon/rôle, ban…).
    * Alimentée par l'événement `guildAuditLogEntryCreate` (une entrée = une action,
    * pas de double comptage ni de fetch des audit logs par événement).
-   * Aussi appelée par ModerationService après un ban fait via le bot (l'audit log
-   * l'attribue au bot) avec l'identifiant du modérateur.
+   * Aussi appelée par ModerationService après un ban ou un kick fait via le bot
+   * (l'audit log l'attribue au bot) avec l'identifiant du modérateur.
    * @param {import('discord.js').Guild} guild
    * @param {string} executorId
-   * @param {'channelDelete'|'roleDelete'|'ban'} type
-   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban (exemption des arrivants récents)
+   * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
+   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban/kick (exemption des arrivants récents)
    */
   async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null } = {}) {
     const cfg = this.config.get(guild.id).antiraid;
     if (!cfg?.enabled || !executorId) return;
     if (executorId === this.client.user?.id) return;
     if (executorId === guild.ownerId) return;
-    // Bannir un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
-    if (type === 'ban' && targetId) {
+    // Bannir ou expulser un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
+    if (MEMBER_SANCTIONS.has(type) && targetId) {
       const joinedAt = targetJoinedAt ?? guild.members?.cache?.get?.(targetId)?.joinedTimestamp ?? null;
       if (this.isRecentJoiner(guild.id, targetId, joinedAt)) return;
     }
@@ -292,6 +310,7 @@ class AntiRaidService {
       channelDelete: cfg.channelDeleteThreshold,
       roleDelete: cfg.roleDeleteThreshold,
       ban: cfg.banThreshold,
+      kick: cfg.kickThreshold, // 0 / absent (anciennes configs) : désactivé
     };
     const limit = thresholds[type];
     if (!limit) return;

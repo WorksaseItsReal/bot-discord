@@ -24,6 +24,9 @@ const VOICE_TOLERANCE_MS = 2_000;
 const DELETED_TTL_MS = 60_000;
 const DELETED_MAX = 2_000;
 const COOLDOWN_PRUNE_AT = 5_000;
+const DAY_MS = 86_400_000;
+/** Purge des membres partis : ancienneté maximale du départ (jours). */
+const MAX_LEFT_DAYS = 3650;
 
 /** Message d'annonce par défaut. */
 const DEFAULT_ANNOUNCE = 'Bravo {membre}, vous passez au **niveau {niveau}** ! 🎉';
@@ -265,7 +268,7 @@ class LevelService {
     if (!cfg.enabled) return null;
     const base = randomXp(cfg.xpMin ?? 15, cfg.xpMax ?? 25, this.rng);
     const xp = Math.round(base * multiplierFor(roleIdsOf(message.member), cfg.multipliers));
-    return this.award(message.guild, message.author.id, { xp, messages: 1, at: Date.now() }, { member: message.member, channel: message.channel });
+    return this.award(message.guild, message.author.id, { xp, messages: 1, at: Date.now(), present: true }, { member: message.member, channel: message.channel });
   }
 
   /**
@@ -425,7 +428,7 @@ class LevelService {
       if (minutes <= 0) continue;
       entry.credited += minutes * 60_000;
       const xp = Math.round(Math.max(0, cfg.voice.xpPerMinute ?? 10) * minutes * multiplierFor(roleIdsOf(state.member), cfg.multipliers));
-      await this.award(guild, entry.userId, { xp, voiceMinutes: minutes }, { member: state.member, channel: state.channel }).catch((err) => logger.debug('XP vocale :', err?.message));
+      await this.award(guild, entry.userId, { xp, voiceMinutes: minutes, present: true }, { member: state.member, channel: state.channel }).catch((err) => logger.debug('XP vocale :', err?.message));
       credited += 1;
     }
     return credited;
@@ -457,6 +460,35 @@ class LevelService {
     return n;
   }
 
+  // ------------------------------------------------------------ départs
+
+  /** Départ d'un membre (guildMemberRemove) : son XP est conservée mais il quitte le classement. */
+  markLeft(guildId, userId, at = Date.now()) {
+    if (!guildId || !userId) return false;
+    return this.levels.markLeft(guildId, userId, at);
+  }
+
+  /** Retour d'un membre (guildMemberAdd) : il retrouve sa place au classement. */
+  markReturned(guildId, userId) {
+    if (!guildId || !userId) return false;
+    return this.levels.markReturned(guildId, userId);
+  }
+
+  /** Limite de date d'une purge « partis depuis plus de N jours » (0 : tous les partis). Pur. */
+  static leftBefore(days, now = Date.now()) {
+    return now - Math.max(0, Math.floor(Number(days) || 0)) * DAY_MS;
+  }
+
+  /** Membres partis depuis plus de `days` jours. */
+  countLeft(guildId, days, now = Date.now()) {
+    return this.levels.countLeft(guildId, LevelService.leftBefore(days, now));
+  }
+
+  /** Supprime l'XP des membres partis depuis plus de `days` jours. @returns {number} */
+  purgeLeft(guildId, days, now = Date.now()) {
+    return this.levels.purgeLeft(guildId, LevelService.leftBefore(days, now));
+  }
+
   /** Réinitialise tout le serveur (les rôles déjà attribués sont conservés). */
   resetGuild(guildId) {
     for (const key of this.cooldowns.keys()) if (key.startsWith(`${guildId}:`)) this.cooldowns.delete(key);
@@ -481,4 +513,5 @@ module.exports = {
   ANNOUNCE_MODES,
   GRANT_DELAY_MS,
   MAX_LEVEL,
+  MAX_LEFT_DAYS,
 };

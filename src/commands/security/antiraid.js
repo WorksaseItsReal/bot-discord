@@ -57,6 +57,7 @@ const BOUNDS = {
   channelDeleteThreshold: [0, 100],
   roleDeleteThreshold: [0, 100],
   banThreshold: [0, 100],
+  kickThreshold: [0, 100],
   destructiveWindowSeconds: [1, 3600],
 };
 
@@ -68,19 +69,19 @@ const PRESETS = {
     label: 'Faible',
     emoji: '🟢',
     description: 'Peu de faux positifs : vagues de 20 arrivées en 10 s (expulsion), pas de filtre d\'âge ni d\'anti-bot, seuils de destruction larges.',
-    patch: { enabled: true, joinThreshold: 20, joinWindowSeconds: 10, action: 'kick', minAccountAgeDays: 0, antiBot: false, newAccountAction: 'kick', channelDeleteThreshold: 5, roleDeleteThreshold: 5, banThreshold: 10, destructiveWindowSeconds: 10, punishExecutor: 'strip' },
+    patch: { enabled: true, joinThreshold: 20, joinWindowSeconds: 10, action: 'kick', minAccountAgeDays: 0, antiBot: false, newAccountAction: 'kick', channelDeleteThreshold: 5, roleDeleteThreshold: 5, banThreshold: 10, kickThreshold: 0, destructiveWindowSeconds: 10, punishExecutor: 'strip' },
   },
   equilibre: {
     label: 'Équilibré',
     emoji: '🟡',
     description: 'Recommandé : 10 arrivées en 10 s (expulsion), comptes de moins d\'1 jour expulsés, anti-bot, 3 suppressions en 10 s → rôles retirés.',
-    patch: { enabled: true, joinThreshold: 10, joinWindowSeconds: 10, action: 'kick', minAccountAgeDays: 1, antiBot: true, newAccountAction: 'kick', channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, destructiveWindowSeconds: 10, punishExecutor: 'strip' },
+    patch: { enabled: true, joinThreshold: 10, joinWindowSeconds: 10, action: 'kick', minAccountAgeDays: 1, antiBot: true, newAccountAction: 'kick', channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, kickThreshold: 0, destructiveWindowSeconds: 10, punishExecutor: 'strip' },
   },
   strict: {
     label: 'Strict',
     emoji: '🔴',
-    description: 'Serveur ciblé : 6 arrivées en 10 s → lockdown, comptes de moins de 7 jours bannis, anti-bot, 2 suppressions en 15 s → bannissement.',
-    patch: { enabled: true, joinThreshold: 6, joinWindowSeconds: 10, action: 'lockdown', minAccountAgeDays: 7, antiBot: true, newAccountAction: 'ban', channelDeleteThreshold: 2, roleDeleteThreshold: 2, banThreshold: 3, destructiveWindowSeconds: 15, punishExecutor: 'ban' },
+    description: 'Serveur ciblé : 6 arrivées en 10 s → lockdown, comptes de moins de 7 jours bannis, anti-bot, 2 suppressions (ou 5 expulsions) en 15 s → bannissement.',
+    patch: { enabled: true, joinThreshold: 6, joinWindowSeconds: 10, action: 'lockdown', minAccountAgeDays: 7, antiBot: true, newAccountAction: 'ban', channelDeleteThreshold: 2, roleDeleteThreshold: 2, banThreshold: 3, kickThreshold: 5, destructiveWindowSeconds: 15, punishExecutor: 'ban' },
   },
 };
 
@@ -88,7 +89,7 @@ const NAV = [
   { value: 'home', label: 'Accueil', emoji: '🏠', description: 'État, interrupteur et dernier déclenchement' },
   { value: 'joins', label: 'Vague d\'arrivées', emoji: '🌊', description: 'Seuil, fenêtre et action en cas de raid' },
   { value: 'accounts', label: 'Comptes récents & bots', emoji: '🐣', description: 'Âge minimal du compte, anti-bot' },
-  { value: 'destructive', label: 'Destruction', emoji: '💣', description: 'Suppressions massives de salons, rôles, bans' },
+  { value: 'destructive', label: 'Destruction', emoji: '💣', description: 'Suppressions massives de salons, rôles, bans, expulsions' },
   { value: 'alerts', label: 'Alertes', emoji: '🔔', description: 'Salon où publier les alertes' },
   { value: 'whitelist', label: 'Whitelist', emoji: '🔐', description: 'Membres et rôles jamais sanctionnés' },
   { value: 'presets', label: 'Préréglages', emoji: '🎚️', description: 'Faible, Équilibré ou Strict en un clic' },
@@ -150,6 +151,7 @@ function destructiveText(c) {
     ['Salons supprimés', threshold(c.channelDeleteThreshold)],
     ['Rôles supprimés', threshold(c.roleDeleteThreshold)],
     ['Bannissements', threshold(c.banThreshold)],
+    ['Expulsions', threshold(c.kickThreshold)],
     ['Sanction de l\'auteur', EXECUTOR_LABELS[c.punishExecutor] ?? c.punishExecutor],
   ]);
 }
@@ -297,13 +299,14 @@ function destructiveView(client, guildId, notice) {
         title: 'Actions destructrices',
         description: [
           notice ? `${ICONS.success} ${notice}\n` : null,
-          `Un membre qui supprime trop de salons, de rôles ou bannit trop de membres en **${c.destructiveWindowSeconds} s** déclenche une alerte et la sanction choisie.`,
-          subtext('0 = surveillance désactivée pour ce type d\'action. Détection via le journal d\'audit.'),
+          `Un membre qui supprime trop de salons, de rôles, bannit ou expulse trop de membres en **${c.destructiveWindowSeconds} s** déclenche une alerte et la sanction choisie.`,
+          subtext('0 = surveillance désactivée pour ce type d\'action. Détection via le journal d\'audit et les sanctions faites avec le bot. Bannir ou expulser un membre arrivé il y a moins de 10 min (raider) n\'est pas compté.'),
         ],
         fields: [
           field(ICONS.channel, 'Salons supprimés', threshold(c.channelDeleteThreshold)),
           field(ICONS.role, 'Rôles supprimés', threshold(c.roleDeleteThreshold)),
           field(ICONS.ban, 'Bannissements', threshold(c.banThreshold)),
+          field(ICONS.kick, 'Expulsions', threshold(c.kickThreshold)),
           field(ICONS.time, 'Fenêtre', `**${c.destructiveWindowSeconds}** s`),
           field(ICONS.shield, 'Sanction de l\'auteur', EXECUTOR_LABELS[c.punishExecutor] ?? c.punishExecutor),
         ],
@@ -486,6 +489,7 @@ function simulate(c, perms, { alertChannelOk = true } = {}) {
     c.channelDeleteThreshold && `${c.channelDeleteThreshold} salons supprimés`,
     c.roleDeleteThreshold && `${c.roleDeleteThreshold} rôles supprimés`,
     c.banThreshold && `${c.banThreshold} bannissements`,
+    c.kickThreshold && `${c.kickThreshold} expulsions`,
   ].filter(Boolean);
   lines.push(destructive.length
     ? `💣 ${destructive.join(' ou ')} en **${c.destructiveWindowSeconds} s** → ${c.punishExecutor === 'none' ? 'alerte seule' : `auteur : ${EXECUTOR_LABELS[c.punishExecutor]?.toLowerCase()}`}.`
@@ -549,6 +553,7 @@ function settingsModal(kind, c) {
       input('channelDeleteThreshold', 'Salons supprimés (0 = désactivé, max 100)', { value: c.channelDeleteThreshold, max: 3 }),
       input('roleDeleteThreshold', 'Rôles supprimés (0 = désactivé, max 100)', { value: c.roleDeleteThreshold, max: 3 }),
       input('banThreshold', 'Bannissements (0 = désactivé, max 100)', { value: c.banThreshold, max: 3 }),
+      input('kickThreshold', 'Expulsions (0 = désactivé, max 100)', { value: c.kickThreshold ?? 0, max: 3 }),
       input('destructiveWindowSeconds', 'Fenêtre en secondes (1 à 3600)', { value: c.destructiveWindowSeconds, max: 4 }),
     );
 }
@@ -556,7 +561,7 @@ function settingsModal(kind, c) {
 const SETTING_FIELDS = {
   joins: [['joinThreshold', 'Seuil'], ['joinWindowSeconds', 'Fenêtre']],
   accounts: [['minAccountAgeDays', 'Âge minimal']],
-  destructive: [['channelDeleteThreshold', 'Salons supprimés'], ['roleDeleteThreshold', 'Rôles supprimés'], ['banThreshold', 'Bannissements'], ['destructiveWindowSeconds', 'Fenêtre']],
+  destructive: [['channelDeleteThreshold', 'Salons supprimés'], ['roleDeleteThreshold', 'Rôles supprimés'], ['banThreshold', 'Bannissements'], ['kickThreshold', 'Expulsions'], ['destructiveWindowSeconds', 'Fenêtre']],
 };
 
 // ---------------------------------------------------------------- commande

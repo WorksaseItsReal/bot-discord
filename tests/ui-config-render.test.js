@@ -165,7 +165,7 @@ test('backup : composition, fiche détaillée et permission Administrateur', asy
   const i = fakeInteraction({ granted: [PermissionFlagsBits.Administrator] });
   await backup.buttons.info(i, client, ['abc123']);
   const { ids } = assertPayload(i.calls.reply);
-  assert.deepStrictEqual(ids, ['cmd:backup:restore:abc123', 'cmd:backup:remove:abc123']);
+  assert.deepStrictEqual(ids, ['cmd:backup:restore:abc123', 'cmd:backup:restore:abc123:perms', 'cmd:backup:remove:abc123']);
   assert.strictEqual(i.calls.reply.ephemeral, true);
 });
 

@@ -558,7 +558,11 @@ class ModerationService {
     if (!targetMember.kickable) {
       throw new UserError('Je ne peux pas expulser ce membre (rôle trop élevé ou permission « Expulser » manquante).');
     }
-    return this.record(guild, targetMember.user, moderator, { type: 'kick', reason, escalationStep }, () => targetMember.kick(reason || undefined));
+    const joinedAt = targetMember.joinedTimestamp ?? null;
+    const result = await this.record(guild, targetMember.user, moderator, { type: 'kick', reason, escalationStep }, () => targetMember.kick(reason || undefined));
+    // Comme pour les bans : le kick est signé par le bot, on signale le MODÉRATEUR à l'AntiRaid.
+    await this.#reportDestructive(guild, moderator, 'kick', targetMember.id, joinedAt);
+    return result;
   }
 
   async ban(guild, targetUser, moderator, reason, { durationMs, deleteMessageSeconds = 0, targetMember, escalationStep = null } = {}) {
@@ -590,15 +594,15 @@ class ModerationService {
     });
     // Le ban porte la signature du bot dans l'audit log (ignorée par l'AntiRaid) :
     // on signale le MODÉRATEUR à la détection des bannissements en masse.
-    await this.#reportBan(guild, moderator, targetUser.id, joinedAt);
+    await this.#reportDestructive(guild, moderator, 'ban', targetUser.id, joinedAt);
     return result;
   }
 
-  /** Signale un ban fait via le bot à l'AntiRaid (best-effort, jamais bloquant). */
-  async #reportBan(guild, moderator, targetId, targetJoinedAt) {
+  /** Signale un ban ou un kick fait via le bot à l'AntiRaid (best-effort, jamais bloquant). */
+  async #reportDestructive(guild, moderator, type, targetId, targetJoinedAt) {
     if (!this.antiraid?.handleDestructive || !moderator?.id) return;
     try {
-      await this.antiraid.handleDestructive(guild, moderator.id, 'ban', { targetId, targetJoinedAt });
+      await this.antiraid.handleDestructive(guild, moderator.id, type, { targetId, targetJoinedAt });
     } catch {
       // La détection ne doit jamais faire échouer la sanction déjà appliquée.
     }

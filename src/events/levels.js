@@ -6,6 +6,9 @@
  * L'XP d'un message est accordée APRÈS l'AutoMod : LevelService#handleMessage programme
  * le gain quelques secondes plus tard et l'abandonne si le message a été supprimé
  * entre-temps (messageDelete ci-dessous, ou marque posée par l'AutoMod dans LoggingService).
+ *
+ * Départs et retours (guildMemberRemove / guildMemberAdd) : marque `left_at` posée puis
+ * effacée ; un membre parti n'apparaît plus au classement mais garde son XP.
  */
 module.exports = [
   {
@@ -26,6 +29,22 @@ module.exports = [
     name: 'messageDeleteBulk',
     execute(client, messages) {
       for (const id of messages?.keys?.() ?? []) client.services.levels?.markDeleted(id);
+    },
+  },
+  {
+    // Départ : l'XP est conservée mais le membre quitte le classement (left_at).
+    name: 'guildMemberRemove',
+    execute(client, member) {
+      if (!member?.guild || member.user?.bot) return;
+      client.services.levels?.markLeft(member.guild.id, member.id);
+    },
+  },
+  {
+    // Retour : le membre retrouve sa place (et son XP) au classement.
+    name: 'guildMemberAdd',
+    execute(client, member) {
+      if (!member?.guild || member.user?.bot) return;
+      client.services.levels?.markReturned(member.guild.id, member.id);
     },
   },
   {

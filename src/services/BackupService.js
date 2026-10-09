@@ -62,6 +62,62 @@ function resolveOverwrites(overwrites, guild, skipped) {
   return out;
 }
 
+/** Ordre de Discord (position, puis identifiant) : négatif si `a` est sous `b`. Pur. */
+function compareRoles(a, b) {
+  if (a.position !== b.position) return a.position - b.position;
+  return BigInt(a.id) < BigInt(b.id) ? 1 : BigInt(a.id) > BigInt(b.id) ? -1 : 0;
+}
+
+/**
+ * Nouvelles positions des rôles pour retrouver l'ordre RELATIF de la sauvegarde. Pur.
+ *
+ * Seuls les rôles de la sauvegarde (par nom, non gérés) situés SOUS le rôle le plus haut
+ * du bot sont réordonnés, et seulement entre les emplacements qu'ils occupent déjà : les
+ * autres rôles gardent leur place, rien ne passe au-dessus du bot. Les positions sous le
+ * bot sont normalisées (1…n) pour lever les égalités.
+ * @param {Array<{ id: string, name: string, position: number, managed?: boolean }>} roles rôles du serveur (sans @everyone)
+ * @param {string[]} backupOrder noms des rôles de la sauvegarde, du plus haut au plus bas
+ * @param {number} botPosition position du rôle le plus haut du bot
+ * @returns {Array<{ role: string, position: number }>} changements (vide : déjà dans l'ordre)
+ */
+function planRolePositions(roles, backupOrder, botPosition) {
+  const below = roles.filter((r) => r.position < botPosition).toSorted(compareRoles);
+  /** Rang dans la sauvegarde (premier rôle d'un même nom seulement). */
+  const rankOf = new Map();
+  backupOrder.forEach((name, i) => {
+    if (!rankOf.has(name)) rankOf.set(name, i);
+  });
+  const used = new Set();
+  const slots = [];
+  const movable = [];
+  below.forEach((r, i) => {
+    if (r.managed || !rankOf.has(r.name) || used.has(r.name)) return;
+    used.add(r.name);
+    slots.push(i);
+    movable.push(r);
+  });
+  // Du plus haut (rang 0) au plus bas, vers les emplacements du plus haut au plus bas.
+  const ordered = movable.toSorted((a, b) => rankOf.get(a.name) - rankOf.get(b.name));
+  const next = [...below];
+  slots.toReversed().forEach((slot, i) => {
+    next[slot] = ordered[i];
+  });
+  if (next.every((r, i) => r === below[i])) return []; // déjà dans l'ordre : aucun appel
+  const changes = [];
+  next.forEach((r, i) => {
+    if (r.position !== i + 1) changes.push({ role: r.id, position: i + 1 });
+  });
+  return changes;
+}
+
+/** Surcharges identiques (même cible, mêmes permissions), quel que soit l'ordre ? Pur. */
+function sameOverwrites(current, wanted) {
+  const key = (o) => `${o.id}:${o.type}:${BigInt(o.allow ?? 0)}:${BigInt(o.deny ?? 0)}`;
+  const a = current.map(key).sort();
+  const b = wanted.map(key).sort();
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+}
+
 /**
  * Le bot doit pouvoir gérer les rôles et les salons : sans cela, chaque création
  * échouerait une à une (et la restauration semblerait « vide »).
@@ -161,27 +217,30 @@ class BackupService {
   }
 
   /**
-   * Restauration best-effort : recrée les rôles et salons manquants.
-   * Une seule restauration à la fois par serveur (sinon tout est créé en double).
+   * Restauration best-effort : recrée les rôles et salons manquants, remet les rôles
+   * dans l'ordre de la sauvegarde et, sur demande, rétablit les permissions des salons
+   * qui existent déjà. Une seule restauration à la fois par serveur.
+   * @param {{ syncPermissions?: boolean }} [opts] syncPermissions : réécrire les surcharges
+   *   des salons existants d'après la sauvegarde (désactivé par défaut)
    * @returns {Promise<RestoreResult>}
    */
-  async restore(guild, id) {
+  async restore(guild, id, opts = {}) {
     const backup = this.get(guild.id, id);
     // Verrou posé de façon SYNCHRONE, avant toute attente.
     if (this.restoring.has(guild.id)) throw new UserError('Une restauration est déjà en cours sur ce serveur : attendez qu\'elle se termine.');
     this.restoring.add(guild.id);
     try {
-      return await this.#restore(guild, backup, id);
+      return await this.#restore(guild, backup, id, opts);
     } finally {
       this.restoring.delete(guild.id);
     }
   }
 
   /**
-   * @typedef {{ roles: number, channels: number, failed: Array<{ kind: 'role'|'channel', name: string, code: string|number }>,
-   *   skippedOverwrites: string[], reparented: number }} RestoreResult
+   * @typedef {{ roles: number, channels: number, failed: Array<{ kind: 'role'|'channel'|'order'|'permissions', name: string, code: string|number }>,
+   *   skippedOverwrites: string[], reparented: number, reordered: number, permissionsSynced: number, syncPermissions: boolean }} RestoreResult
    */
-  async #restore(guild, backup, id) {
+  async #restore(guild, backup, id, { syncPermissions = false } = {}) {
     assertRestorePermissions(guild);
     const data = backup.data;
     let createdRoles = 0;
@@ -206,15 +265,24 @@ class BackupService {
         .then(() => (createdRoles += 1), fail('role', role.name));
     }
 
+    // Rôles recréés : Discord les place tout en bas. Un seul appel remet l'ordre relatif
+    // de la sauvegarde, sous le rôle le plus haut du bot.
+    const reordered = createdRoles > 0 ? await this.#reorderRoles(guild, data.roles ?? [], failed) : 0;
+
     // Catégories d'abord
     const channels = (data.channels ?? []).filter((c) => !THREAD_TYPES.has(c.type));
     const categories = channels.filter((c) => c.type === ChannelType.GuildCategory);
     const findCategory = (name) => guild.channels.cache.find((c) => c.name === name && c.type === ChannelType.GuildCategory);
+    /** Salons et catégories recréés pendant cette restauration (exclus de la resynchronisation). */
+    const createdIds = new Set();
     for (const cat of categories) {
       if (findCategory(cat.name)) continue;
       await guild.channels
         .create({ name: cat.name, type: ChannelType.GuildCategory, permissionOverwrites: resolveOverwrites(cat.overwrites, guild, skippedOverwrites) })
-        .then(() => (createdChannels += 1), fail('channel', cat.name));
+        .then((c) => {
+          createdChannels += 1;
+          if (c?.id) createdIds.add(c.id);
+        }, fail('channel', cat.name));
     }
     /** Salons créés sans leur catégorie (introuvable à ce moment-là). */
     const orphans = [];
@@ -237,6 +305,7 @@ class BackupService {
           return c;
         }, fail('channel', ch.name));
       if (created && ch.parentName && !parent) orphans.push([created, ch.parentName]);
+      if (created?.id) createdIds.add(created.id);
     }
 
     // Second passage : rattache les salons dont la catégorie existe désormais
@@ -247,8 +316,70 @@ class BackupService {
       if (!parent || typeof channel.setParent !== 'function') continue;
       await channel.setParent(parent.id, { lockPermissions: false, reason: `Restauration backup ${id}` }).then(() => (reparented += 1), () => {});
     }
-    return { roles: createdRoles, channels: createdChannels, failed, skippedOverwrites: [...new Set(skippedOverwrites)], reparented };
+
+    // Option : permissions des salons qui existaient déjà (jamais ceux recréés à l'instant).
+    const permissionsSynced = syncPermissions ? await this.#syncOverwrites(guild, channels, createdIds, id, skippedOverwrites, fail) : 0;
+    return {
+      roles: createdRoles,
+      channels: createdChannels,
+      failed,
+      skippedOverwrites: [...new Set(skippedOverwrites)],
+      reparented,
+      reordered,
+      permissionsSynced,
+      syncPermissions: Boolean(syncPermissions),
+    };
+  }
+
+  /**
+   * Remet les rôles de la sauvegarde dans leur ordre relatif (un seul appel setPositions).
+   * @returns {Promise<number>} rôles de la sauvegarde déplacés (0 si déjà dans l'ordre ou en cas d'échec, noté dans `failed`)
+   */
+  async #reorderRoles(guild, backupRoles, failed) {
+    const botPosition = guild.members?.me?.roles?.highest?.position;
+    if (!botPosition || typeof guild.roles?.setPositions !== 'function') return 0;
+    const roles = [...guild.roles.cache.values()].filter((r) => r.id !== guild.id);
+    const names = backupRoles.map((r) => r.name);
+    const changes = planRolePositions(roles, names, botPosition);
+    if (!changes.length) return 0;
+    try {
+      await guild.roles.setPositions(changes);
+    } catch (err) {
+      failed.push({ kind: 'order', name: 'Ordre des rôles', code: err?.code ?? err?.status ?? err?.message ?? 'inconnu' });
+      return 0;
+    }
+    const inBackup = new Set(names);
+    const nameOf = new Map(roles.map((r) => [r.id, r.name]));
+    return changes.filter((c) => inBackup.has(nameOf.get(c.role))).length;
+  }
+
+  /**
+   * Réécrit les surcharges des salons EXISTANTS d'après la sauvegarde. Les surcharges des
+   * rôles gérés (intégrations, dont celui du bot) et du bot lui-même sont conservées.
+   * @returns {Promise<number>} salons dont les permissions ont été modifiées
+   */
+  async #syncOverwrites(guild, channels, createdIds, id, skippedOverwrites, fail) {
+    let synced = 0;
+    const done = new Set(createdIds);
+    const meId = guild.members?.me?.id;
+    const plain = (o) => ({ id: o.id, type: o.type, allow: o.allow.bitfield, deny: o.deny.bitfield });
+    for (const ch of channels) {
+      if (!Array.isArray(ch.overwrites)) continue; // ancienne sauvegarde sans permissions
+      const existing = guild.channels.cache.find((c) => c.name === ch.name && c.type === ch.type && !done.has(c.id));
+      if (!existing?.permissionOverwrites?.cache) continue;
+      done.add(existing.id);
+      const wanted = resolveOverwrites(ch.overwrites, guild, skippedOverwrites);
+      const current = [...existing.permissionOverwrites.cache.values()].map(plain);
+      const kept = current.filter((o) => !wanted.some((w) => w.id === o.id)
+        && (o.id === meId || (o.type === OverwriteType.Role && guild.roles.cache.get(o.id)?.managed)));
+      const next = [...wanted, ...kept];
+      if (sameOverwrites(current, next)) continue;
+      await existing.permissionOverwrites
+        .set(next, `Restauration backup ${id} : permissions`)
+        .then(() => (synced += 1), fail('permissions', existing.name));
+    }
+    return synced;
   }
 }
 
-module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD };
+module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD, planRolePositions, sameOverwrites, resolveOverwrites };

@@ -6,6 +6,7 @@ const { logSection } = require('./LoggingService');
 const { card, field, wide, ICONS, userLine, code, subtext, bullets, status } = require('../utils/ui');
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
+const { sendTranscriptArchive, ARCHIVE_FILE_MAX, ARCHIVE_TOTAL_MAX } = require('../utils/transcriptArchive');
 
 /** Nombre maximal de messages repris dans un transcript. */
 const TRANSCRIPT_MAX = 1000;
@@ -13,6 +14,25 @@ const TRANSCRIPT_MAX = 1000;
 const OPEN_COOLDOWN_MS = 60_000;
 /** Mention de transcript : les fichiers ne sont pas copiés, seuls leurs liens figurent. */
 const ATTACHMENTS_NOTE = 'Les pièces jointes ne sont pas archivées : seuls leurs liens figurent, et ils expirent une fois le salon supprimé.';
+/** Mention de transcript quand `tickets.archiveAttachments` est activé. */
+const ATTACHMENTS_ARCHIVED_NOTE = `Les pièces jointes (${ARCHIVE_FILE_MAX / 1024 / 1024} Mo max. chacune, ${ARCHIVE_TOTAL_MAX / 1024 / 1024} Mo au total) sont jointes au message d'archive ; la liste figure à la fin de ce fichier.`;
+
+/** Champs « pièces jointes » d'une carte d'archive (résumé de sendTranscriptArchive). Pur. */
+function attachmentFields(summary) {
+  if (!summary) return [];
+  const { archived = 0, skipped = [] } = summary;
+  if (!archived && !skipped.length) return [];
+  const lines = skipped.slice(0, 10).map((x) => `› ${code(String(x.name).slice(0, 40))} · ${x.reason}`);
+  return [
+    field('📎', 'Pièces jointes', `**${archived}** archivée${archived > 1 ? 's' : ''}${skipped.length ? `\n${skipped.length} non archivée${skipped.length > 1 ? 's' : ''}` : ''}`),
+    skipped.length ? wide(ICONS.warning, 'Non archivées', `${lines.join('\n')}${skipped.length > 10 ? `\n${subtext(`+${skipped.length - 10} autre(s) : voir la fin du transcript`)}` : ''}`) : null,
+  ].filter(Boolean);
+}
+
+/** Carte de suite d'une archive (pièces jointes envoyées en plusieurs messages). Pur. */
+function archiveContinuationCard(title, part, total) {
+  return card({ tone: 'neutral', section: 'tickets', icon: '📎', title: `${title} · pièces jointes (${part}/${total})`, description: 'Suite des pièces jointes archivées.' });
+}
 
 /**
  * Création refusée parce que la catégorie est pleine (50 salons, 50035) ou le
@@ -157,6 +177,8 @@ class TicketService {
      * @type {Map<string, { flushed: boolean, skip: (() => void) | null, done: Promise<void> | null }>}
      */
     this.closeJobs = new Map();
+    /** Téléchargement des pièces jointes archivées (fetch natif ; injectable pour les tests). */
+    this.fetch = (...args) => globalThis.fetch(...args);
     /** Dernière ouverture par membre (`guildId:userId` → horodatage). */
     this.lastOpened = new Map();
     this.openCooldownMs = OPEN_COOLDOWN_MS;
@@ -455,21 +477,24 @@ class TicketService {
     return (await this.#transcript(channel)).content;
   }
 
-  /** Transcript texte + nombre réel de messages repris (pas de comptage de lignes). */
-  async #transcript(channel) {
+  /**
+   * Transcript texte + nombre réel de messages repris (pas de comptage de lignes) + messages.
+   * @param {{ archiveAttachments?: boolean }} [opts] mention adaptée si les pièces jointes sont archivées
+   */
+  async #transcript(channel, { archiveAttachments = false } = {}) {
     const history = await this.fetchHistory(channel);
-    if (!history) return { content: 'Transcript indisponible.', count: 0 };
+    if (!history) return { content: 'Transcript indisponible.', count: 0, messages: [] };
     const { messages, truncated } = history;
     const ticket = this.tickets.getByChannel(channel.id);
     const header = [
       `Transcript — #${channel.name ?? channel.id}${ticket ? ` (ticket #${ticket.id})` : ''}`,
       `Généré le ${new Date().toISOString()} · ${messages.length} message(s)`,
       truncated ? `⚠ Transcript tronqué : seuls les ${messages.length} derniers messages sont inclus.` : null,
-      messages.some((m) => m.attachments?.size) ? `⚠ ${ATTACHMENTS_NOTE}` : null,
+      messages.some((m) => m.attachments?.size) ? `⚠ ${archiveAttachments ? ATTACHMENTS_ARCHIVED_NOTE : ATTACHMENTS_NOTE}` : null,
       '─'.repeat(60),
     ].filter(Boolean);
     // Embeds (cartes du bot) repris avec leur titre et leur texte, comme le ModMail.
-    return { content: [...header, ...messages.map(transcriptLine)].join('\n'), count: messages.length };
+    return { content: [...header, ...messages.map(transcriptLine)].join('\n'), count: messages.length, messages };
   }
 
   /**
@@ -565,7 +590,8 @@ class TicketService {
       });
     }
     const cfg = this.config.get(channel.guild.id).tickets;
-    const transcript = await this.generateTranscript(channel);
+    const archiveAttachments = cfg.archiveAttachments === true;
+    const { content: transcript, messages } = await this.#transcript(channel, { archiveAttachments });
     const closedAt = Date.now();
     this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
     this.bumpStat(channel.guild.id, 'closed');
@@ -573,20 +599,27 @@ class TicketService {
     if (cfg.logChannel) {
       const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);
       if (logCh?.isTextBased()) {
-        await logCh
-          .send({
-            embeds: [this.closureCard(ticket, closedBy, closedAt, channel)],
-            files: [{ attachment: Buffer.from(transcript, 'utf8'), name: `ticket-${ticket.id}.txt` }],
-          })
-          .catch(() => {});
+        // Pièces jointes re-téléversées si `tickets.archiveAttachments` (échecs ignorés et listés).
+        await sendTranscriptArchive(logCh, {
+          transcript: { name: `ticket-${ticket.id}.txt`, content: transcript },
+          messages,
+          archiveAttachments,
+          guild: channel.guild,
+          fetchImpl: this.fetch,
+          card: (summary) => this.closureCard(ticket, closedBy, closedAt, channel, summary),
+          continuation: (part, total) => archiveContinuationCard(`Ticket #${ticket.id}`, part, total),
+        }).catch(() => {});
       }
     }
     this.tickets.delete(channel.id);
     await channel.delete().catch(() => {});
   }
 
-  /** Carte d'archive d'un ticket fermé (salon de logs). */
-  closureCard(ticket, closedBy, closedAt = Date.now(), channel) {
+  /**
+   * Carte d'archive d'un ticket fermé (salon de logs).
+   * @param {{ archived: number, skipped: Array<{ name: string, reason: string }> } | null} [attachments] pièces jointes archivées
+   */
+  closureCard(ticket, closedBy, closedAt = Date.now(), channel, attachments = null) {
     return card({
       tone: 'neutral',
       section: 'tickets',
@@ -600,6 +633,7 @@ class TicketService {
         field(ICONS.date, 'Ouvert', ticket.created_at ? discordTimestamp(ticket.created_at, 'f') : '—'),
         field(ICONS.duration, 'Durée', ticket.created_at ? formatDuration(closedAt - ticket.created_at) : '—'),
         field(ICONS.id, 'Identifiant', code(`#${ticket.id}`)),
+        ...attachmentFields(attachments),
       ],
       footer: `Ticket #${ticket.id}`,
     });
@@ -639,4 +673,6 @@ module.exports = {
   channelGone,
   createInCategory,
   transcriptLine,
+  attachmentFields,
+  archiveContinuationCard,
 };
