@@ -12,8 +12,8 @@ const { UserError } = require('../../core/errors');
 /**
  * /modstats : activité de l'équipe de modération sur 7, 30 ou 90 jours, à partir des
  * tables existantes — sanctions (par modérateur, par type, tendance, raisons les plus
- * fréquentes), signalements traités et tickets pris en charge (encore ouverts : un
- * ticket fermé est retiré de la base). Réponse éphémère, « Exclure temporairement des
+ * fréquentes), signalements traités et tickets pris en charge (ouverts, ou fermés via les
+ * instantanés de ticket_ratings). Réponse éphémère, « Exclure temporairement des
  * membres » revérifiée à chaque clic.
  *
  * Boutons : cmd:modstats:view:<jours>:<idModérateur|all>
@@ -114,7 +114,13 @@ function statsView(client, guild, { days, moderatorId = null, now = Date.now() }
   const dismissed = reports.filter((r) => r.status === 'dismissed').reduce((a, r) => a + r.n, 0);
   const reportsByMod = new Map();
   for (const r of reports) reportsByMod.set(r.handled_by, (reportsByMod.get(r.handled_by) ?? 0) + r.n);
-  const tickets = client.repositories.tickets?.claimedStats?.(guild.id, { since, moderatorId }) ?? [];
+  // Tickets pris en charge : encore ouverts (tickets) + fermés (instantanés de ticket_ratings).
+  const ticketCounts = new Map();
+  for (const r of [
+    ...(client.repositories.tickets?.claimedStats?.(guild.id, { since, moderatorId }) ?? []),
+    ...(client.repositories.ticketRatings?.claimedStats?.(guild.id, { since, moderatorId }) ?? []),
+  ]) ticketCounts.set(r.claimed_by, (ticketCounts.get(r.claimed_by) ?? 0) + r.n);
+  const tickets = [...ticketCounts].map(([claimedBy, n]) => ({ claimed_by: claimedBy, n }));
   const claimed = tickets.reduce((a, r) => a + r.n, 0);
 
   const modLines = moderators.slice(0, MAX_MODERATORS).map((m, i) => `\`${i + 1}.\` ${moderatorLabel(client, m.id)} — **${m.total}** · ${typeBreakdown(m.byType)}`);
@@ -141,7 +147,7 @@ function statsView(client, guild, { days, moderatorId = null, now = Date.now() }
         fields: [
           field(ICONS.count, 'Sanctions', `**${total}**`),
           field(REPORT_ICON, 'Signalements traités', `**${handled + dismissed}**${handled + dismissed ? `\n${subtext(`${handled} traité(s) · ${dismissed} classé(s)`)}` : ''}`),
-          field(ICONS.ticket, 'Tickets pris en charge', `**${claimed}**\n${subtext('tickets encore ouverts')}`),
+          field(ICONS.ticket, 'Tickets pris en charge', `**${claimed}**\n${subtext('ouverts ou fermés')}`),
           wide(ICONS.list, 'Par type', TYPE_ORDER.filter((t) => byType[t]).map((t) => `${sanctionIcon(t)} ${TYPE_LABELS[t] ?? t} · **${byType[t]}**`).join('\n') || '*Aucune sanction sur cette période.*'),
           moderatorId ? null : wide(ICONS.moderator, 'Par modérateur', modLines.join('\n') || '*Aucune sanction sur cette période.*'),
           wide(ICONS.reason, 'Raisons les plus fréquentes', sanctions.reasons.map((r, i) => `\`${i + 1}.\` ${truncate(r.reason.replace(/\s+/g, ' ').replace(/`/g, 'ˋ'), 90)} — **${r.n}**`).join('\n') || '*Aucune raison renseignée.*'),

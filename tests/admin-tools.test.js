@@ -308,7 +308,9 @@ function softbanWorld({ unbanFails = 0, alreadyBanned = false } = {}) {
         }
         calls.push(['unban', id]);
       },
-      fetch: async (id) => {
+      // discord.js : bans.fetch(id) ou bans.fetch({ user, force }).
+      fetch: async (opts) => {
+        const id = opts?.user ?? opts;
         if (alreadyBanned) return { user: { id } };
         throw Object.assign(new Error('Unknown Ban'), { code: 10026 });
       },

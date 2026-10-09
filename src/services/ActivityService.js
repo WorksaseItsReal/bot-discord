@@ -17,6 +17,14 @@ const RETENTION = Object.freeze({ min: 7, max: 365, default: 90 });
 const DM_GAP_MS = 7 * DAY_MS;
 /** Les traces de MP plus anciennes ne servent plus à rien. */
 const DM_KEEP_MS = 30 * DAY_MS;
+/** Vues de /statistiques : résultats gardés 60 s (500 au plus), délai entre deux clics d'un membre. */
+const VIEW_CACHE_TTL_MS = 60_000;
+const VIEW_CACHE_MAX = 500;
+const VIEW_COOLDOWN_MS = 5_000;
+/** Battement de la collecte (dernier vidage) : écrit au plus toutes les 5 minutes. */
+const HEARTBEAT_MS = 5 * 60_000;
+/** Au-delà de cet écart entre deux battements, la collecte est considérée interrompue (trou). */
+const GAP_MS = 6 * 3_600_000;
 
 const newBuffer = () => ({ messages: new Map(), hours: new Map(), voice: new Map(), flows: new Map() });
 const bufferSize = (b) => b.messages.size + b.hours.size + b.voice.size + b.flows.size;
@@ -86,6 +94,54 @@ class ActivityService {
     this.timer = null;
     this.stopped = false;
     this.lastPurgeAt = 0;
+    this.lastHeartbeatAt = 0;
+    /**
+     * Résultats des vues de /statistiques (requêtes lourdes sur un gros serveur), par
+     * (serveur, vue, période, portée) : `${guildId}:…` → { at, value }.
+     * @type {Map<string, { at: number, value: unknown }>}
+     */
+    this.viewCache = new Map();
+    /** Fin du délai entre deux clics de /statistiques : `${guildId}:${userId}` → ms. */
+    this.viewCooldowns = new Map();
+  }
+
+  /**
+   * Résultat mis en cache 60 s (`refresh` : recalculé). Le calcul ne se fait qu'en cas d'absence.
+   * @template T
+   * @param {string} key commence par l'identifiant du serveur
+   * @param {() => T} compute
+   * @returns {T}
+   */
+  cachedView(key, compute, { refresh = false } = {}) {
+    const now = this.clock();
+    const hit = this.viewCache.get(key);
+    if (hit && !refresh && now - hit.at < VIEW_CACHE_TTL_MS) return hit.value;
+    const value = compute();
+    if (this.viewCache.size >= VIEW_CACHE_MAX) {
+      for (const [k, v] of this.viewCache) if (now - v.at >= VIEW_CACHE_TTL_MS) this.viewCache.delete(k);
+      while (this.viewCache.size >= VIEW_CACHE_MAX) this.viewCache.delete(this.viewCache.keys().next().value);
+    }
+    this.viewCache.set(key, { at: now, value });
+    return value;
+  }
+
+  /** Oublie les vues en cache d'un serveur (données effacées, collecte coupée ou réactivée). */
+  forgetViews(guildId) {
+    for (const key of this.viewCache.keys()) if (key.startsWith(`${guildId}:`)) this.viewCache.delete(key);
+  }
+
+  /**
+   * Délai entre deux clics d'un membre sur /statistiques (navigation, actualisation).
+   * @returns {number} millisecondes restantes (0 : autorisé, le délai repart)
+   */
+  takeViewCooldown(guildId, userId, ms = VIEW_COOLDOWN_MS) {
+    const now = this.clock();
+    const key = `${guildId}:${userId}`;
+    const until = this.viewCooldowns.get(key) ?? 0;
+    if (until > now) return until - now;
+    if (this.viewCooldowns.size > 1_000) for (const [k, t] of this.viewCooldowns) if (t <= now) this.viewCooldowns.delete(k);
+    this.viewCooldowns.set(key, now + ms);
+    return 0;
   }
 
   settings(guildId) {
@@ -122,6 +178,8 @@ class ActivityService {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.flush();
+    // Dernier battement : un arrêt prolongé sera reconnu comme un trou dès le redémarrage.
+    this.#heartbeat({ force: true });
     this.sessions.clear();
   }
 
@@ -136,12 +194,44 @@ class ActivityService {
   onGuildAvailable(guild) {
     if (this.stopped || !guild?.id || !this.collecting(guild.id)) return;
     this.#ensure(guild.id);
+    // Battement immédiat : un trou (bot hors ligne, serveur quitté puis rejoint) est enregistré
+    // dès le retour, avant toute action groupée.
+    this.#heartbeat({ force: true, guildIds: [guild.id] });
     const now = this.clock();
     for (const state of guild.voiceStates?.cache?.values?.() ?? []) {
       const key = `${guild.id}:${state.id}`;
       if (!state.channelId || state.member?.user?.bot || this.sessions.has(key)) continue;
       if (!state.member) continue;
       if (this.#voiceCounts(guild, state.channel, state.channelId)) this.sessions.set(key, { guildId: guild.id, userId: state.id, channelId: state.channelId, since: now });
+    }
+  }
+
+  /** Connexion à Discord établie (sinon les messages ne sont pas reçus : pas de battement). */
+  #connected() {
+    const shards = this.client?.ws?.shards;
+    if (!shards?.size) return true;
+    return shards.every((shard) => shard.status === 0); // Status.Ready
+  }
+
+  /**
+   * Battement de la collecte (au plus toutes les 5 minutes, sauf `force`) pour les serveurs
+   * présents, disponibles et collectés. Un écart de plus de 6 h est enregistré comme trou.
+   * @param {{ force?: boolean, guildIds?: string[] }} [opts]
+   */
+  #heartbeat({ force = false, guildIds = null } = {}) {
+    const now = this.clock();
+    if (!force && now - this.lastHeartbeatAt < HEARTBEAT_MS) return;
+    if (!this.#connected()) return;
+    if (!guildIds) this.lastHeartbeatAt = now;
+    const cache = this.client?.guilds?.cache;
+    const ids = (guildIds ?? [...(cache?.keys?.() ?? [])]).filter((id) => {
+      const guild = cache?.get?.(id);
+      return guild && guild.available !== false && this.collecting(id);
+    });
+    try {
+      this.repo.heartbeat?.(ids, now, GAP_MS);
+    } catch (err) {
+      logger.debug('Battement de la collecte non enregistré :', err?.message);
     }
   }
 
@@ -244,12 +334,20 @@ class ActivityService {
    */
   flush() {
     const now = this.clock();
+    const ready = Boolean(this.client?.isReady?.());
     for (const [key, s] of this.sessions) {
-      this.#credit(s, now);
       const guild = this.client?.guilds?.cache?.get?.(s.guildId);
+      // Serveur quitté (client prêt, serveur absent du cache) : la session est close sans crédit
+      // supplémentaire (sinon elle compterait du vocal indéfiniment).
+      if (!guild && ready) {
+        this.sessions.delete(key);
+        continue;
+      }
+      this.#credit(s, now);
       const state = guild?.voiceStates?.cache?.get?.(s.userId);
       if (!this.collecting(s.guildId) || (guild && state?.channelId !== s.channelId)) this.sessions.delete(key);
     }
+    if (!this.stopped) this.#heartbeat();
     if (!bufferSize(this.buffer)) return 0;
     const buffer = this.buffer;
     this.buffer = newBuffer();
@@ -302,16 +400,39 @@ class ActivityService {
     return since ? Math.max(0, Math.floor((now - since) / DAY_MS)) : 0;
   }
 
+  /**
+   * Dernier trou de collecte (bot hors ligne plus de 6 h) se terminant dans les `days` derniers
+   * jours, ou null : pendant ce trou, personne n'a été compté actif.
+   * @returns {{ start: number, end: number } | null}
+   */
+  gapWithin(guildId, days, now = this.clock()) {
+    const gap = this.repo.getGap?.(guildId) ?? null;
+    return gap?.end && gap.end > now - days * DAY_MS ? gap : null;
+  }
+
   /** Les actions groupées sur « inactifs depuis `days` jours » sont-elles fiables ? */
   canAct(guildId, days, now = this.clock()) {
     const since = this.since(guildId);
-    return Boolean(since && this.collecting(guildId) && now - since >= days * DAY_MS);
+    return Boolean(since && this.collecting(guildId) && now - since >= days * DAY_MS && !this.gapWithin(guildId, days, now));
+  }
+
+  /** Serveur quitté (guildDelete) : sessions vocales closes (créditées jusqu'ici), plus de début de collecte en mémoire. */
+  onGuildRemoved(guildId) {
+    if (!guildId) return;
+    const now = this.clock();
+    for (const [key, s] of this.sessions) {
+      if (s.guildId !== guildId) continue;
+      this.#credit(s, now);
+      this.sessions.delete(key);
+    }
+    this.ensured.delete(guildId);
   }
 
   /** Active ou coupe la collecte. La réactiver redémarre le décompte (trou dans les données). */
   setCollecting(guildId, enabled) {
     this.config.update(guildId, { stats: { enabled } });
     this.ensured.delete(guildId);
+    this.forgetViews(guildId);
     if (enabled) {
       this.repo.setSince(guildId, this.clock());
       this.ensured.add(guildId);
@@ -326,6 +447,7 @@ class ActivityService {
   wipe(guildId) {
     this.flush();
     const n = this.repo.wipe(guildId);
+    this.forgetViews(guildId);
     this.ensured.delete(guildId);
     for (const s of this.sessions.values()) if (s.guildId === guildId) s.since = this.clock();
     if (this.collecting(guildId)) this.#ensure(guildId);
@@ -385,4 +507,4 @@ class ActivityService {
   }
 }
 
-module.exports = { ActivityService, retentionDays, isIgnoredChannel, toBatch, RETENTION, DM_GAP_MS, FLUSH_INTERVAL_MS };
+module.exports = { ActivityService, retentionDays, isIgnoredChannel, toBatch, RETENTION, DM_GAP_MS, FLUSH_INTERVAL_MS, GAP_MS, HEARTBEAT_MS, VIEW_CACHE_TTL_MS, VIEW_COOLDOWN_MS };

@@ -338,6 +338,22 @@ function revokeHandler({ permission, type, done, run }) {
 }
 
 /**
+ * Refuse un softban si l'utilisateur est déjà banni (ban relu sur l'API, jamais le cache) :
+ * le débannissement immédiat lèverait un bannissement voulu. UserError sinon.
+ */
+async function assertNotBanned(guild, userId) {
+  let fetchError = null;
+  const existing = await guild.bans.fetch({ user: userId, force: true }).catch((err) => {
+    fetchError = err;
+    return null;
+  });
+  if (existing?.user?.id === userId) {
+    throw new UserError('Cet utilisateur est **déjà banni** : un softban le débannirait. Rien n\'a été modifié.');
+  }
+  if (fetchError && fetchError.code !== 10026) throw new UserError('Impossible de vérifier les bannissements pour le moment. Réessayez dans quelques secondes.');
+}
+
+/**
  * Orchestre les actions de modération : garde-fous de hiérarchie, exécution de
  * l'action Discord, enregistrement de la sanction, DM au membre et log.
  * Les commandes restent fines et délèguent toute la logique ici.
@@ -639,21 +655,16 @@ class ModerationService {
       }
     } else {
       // Hors du serveur : refuse s'il est déjà banni (le débannissement immédiat le lèverait).
-      let fetchError = null;
-      const existing = await guild.bans.fetch(targetUser.id).catch((err) => {
-        fetchError = err;
-        return null;
-      });
-      if (existing?.user?.id === targetUser.id) {
-        throw new UserError('Cet utilisateur est **déjà banni** : un softban le débannirait. Rien n\'a été modifié.');
-      }
-      if (fetchError && fetchError.code !== 10026) throw new UserError('Impossible de vérifier les bannissements pour le moment. Réessayez dans quelques secondes.');
+      await assertNotBanned(guild, targetUser.id);
     }
     const seconds = Math.min(604_800, Math.max(0, Math.floor(deleteMessageSeconds)));
     const auditReason = truncate(`Softban${reason ? ` : ${reason}` : ''}`, 500);
     const joinedAt = targetMember?.joinedTimestamp ?? null;
     let unbanned = false;
     const result = await this.record(guild, targetUser, moderator, { type: 'softban', reason }, async () => {
+      // Relu JUSTE avant le bannissement, membre ou non : un ban posé pendant la confirmation
+      // (autre modérateur, AntiRaid) serait sinon levé par le débannissement immédiat.
+      await assertNotBanned(guild, targetUser.id);
       await this.#asBot('ban', guild.id, targetUser.id, () => guild.bans.create(targetUser.id, { reason: auditReason, deleteMessageSeconds: seconds }));
       // Débannissement immédiat (deux essais) : un échec ne doit pas annuler l'enregistrement,
       // le bannissement ayant bien eu lieu.
@@ -669,6 +680,28 @@ class ModerationService {
     });
     await this.#reportDestructive(guild, moderator, 'ban', targetUser.id, joinedAt);
     return { id: result.id, unbanned };
+  }
+
+  /**
+   * Action destructrice exécutée PAR LE BOT pour un modérateur (/channel supprimer, /role delete) :
+   * l'audit log l'attribue au bot (ignoré par l'AntiRaid), on signale donc le MODÉRATEUR.
+   * Best-effort, ne lève jamais.
+   * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
+   */
+  async reportDestructiveAction(guild, moderator, type, { targetId = null, targetJoinedAt = null } = {}) {
+    await this.#reportDestructive(guild, moderator, type, targetId, targetJoinedAt);
+  }
+
+  /**
+   * Expulsion déjà faite par une action groupée (/activite) : sanction « kick » enregistrée
+   * (historique, fiches, /modstats) sans MP ni carte par membre (l'action groupée a son propre
+   * log), puis signalée à l'AntiRaid au nom du modérateur.
+   * @returns {Promise<number>} identifiant de la sanction
+   */
+  async recordBulkKick(guild, targetUser, moderator, reason, { targetJoinedAt = null } = {}) {
+    const id = this.sanctions.create({ guildId: guild.id, userId: targetUser.id, moderatorId: moderator.id, type: 'kick', reason });
+    await this.#reportDestructive(guild, moderator, 'kick', targetUser.id, targetJoinedAt);
+    return id;
   }
 
   /** Signale un ban ou un kick fait via le bot à l'AntiRaid (best-effort, jamais bloquant). */

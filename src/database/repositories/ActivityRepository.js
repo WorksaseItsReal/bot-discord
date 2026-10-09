@@ -1,5 +1,10 @@
 'use strict';
 
+/** Liste de salons retenus → paramètre JSON (null : tous les salons). Pur. */
+function allowOf(channels) {
+  return Array.isArray(channels) ? JSON.stringify(channels.map(String)) : null;
+}
+
 /**
  * Statistiques du serveur (/statistiques, /activite) : compteurs agrégés par jour UTC
  * (AAAA-MM-JJ), jamais de contenu. Écritures groupées (ActivityService vide son tampon
@@ -37,6 +42,19 @@ class ActivityRepository {
     this.setSinceStmt = db.prepare('INSERT INTO stats_guilds (guild_id, since) VALUES (?, ?) ON CONFLICT (guild_id) DO UPDATE SET since = excluded.since');
     this.getSinceStmt = db.prepare('SELECT since FROM stats_guilds WHERE guild_id = ?');
     this.clearSinceStmt = db.prepare('DELETE FROM stats_guilds WHERE guild_id = ?');
+    // Battement (migration 27) : un battement plus de `gap` ms après le précédent enregistre un
+    // trou de collecte [dernier battement, maintenant]. SET lit les valeurs d'AVANT la mise à jour.
+    this.heartbeatStmt = db.prepare(
+      `UPDATE stats_guilds SET
+         gap_start = CASE WHEN last_seen IS NOT NULL AND @now - last_seen > @gap THEN last_seen ELSE gap_start END,
+         gap_end   = CASE WHEN last_seen IS NOT NULL AND @now - last_seen > @gap THEN @now ELSE gap_end END,
+         last_seen = @now
+       WHERE guild_id = @guildId AND (last_seen IS NULL OR last_seen < @now)`,
+    );
+    this.gapStmt = db.prepare('SELECT gap_start, gap_end FROM stats_guilds WHERE guild_id = ?');
+    this.heartbeatTx = db.transaction((guildIds, now, gap) => {
+      for (const guildId of guildIds) this.heartbeatStmt.run({ guildId, now, gap });
+    });
     this.guildsStmt = db.prepare(
       `SELECT guild_id FROM stats_guilds
        UNION SELECT DISTINCT guild_id FROM member_flow_daily
@@ -57,31 +75,38 @@ class ActivityRepository {
       return n;
     });
 
-    // Lectures « serveur ».
+    // Lectures « serveur » et « membre ». @allow : salons retenus (JSON), NULL = tous. Un lecteur
+    // sans « Gérer le serveur » ne voit que les salons visibles par @everyone (confidentialité).
+    const ALLOW = '(@allow IS NULL OR channel_id IN (SELECT value FROM json_each(@allow)))';
     this.dailyStmt = db.prepare(
       `SELECT day, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
-       WHERE guild_id = ? AND day >= ? GROUP BY day ORDER BY day`,
+       WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY day ORDER BY day`,
     );
     this.totalsStmt = db.prepare(
       `SELECT COALESCE(SUM(messages), 0) AS messages, COALESCE(SUM(voice_seconds), 0) AS voice,
               COUNT(DISTINCT user_id) AS members, COUNT(DISTINCT CASE WHEN messages > 0 THEN channel_id END) AS channels
-       FROM activity_daily WHERE guild_id = ? AND day >= ?`,
+       FROM activity_daily WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW}`,
+    );
+    // Somme seule (vue « salons ») : sans COUNT(DISTINCT), bien moins coûteuse sur un gros serveur.
+    this.sumsStmt = db.prepare(
+      `SELECT COALESCE(SUM(messages), 0) AS messages, COALESCE(SUM(voice_seconds), 0) AS voice
+       FROM activity_daily WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW}`,
     );
     this.topChannelsStmt = db.prepare(
       `SELECT channel_id, SUM(messages) AS messages, COUNT(DISTINCT user_id) AS members FROM activity_daily
-       WHERE guild_id = ? AND day >= ? AND messages > 0 GROUP BY channel_id ORDER BY messages DESC, channel_id LIMIT ?`,
+       WHERE guild_id = @guildId AND day >= @fromDay AND messages > 0 AND ${ALLOW} GROUP BY channel_id ORDER BY messages DESC, channel_id LIMIT @limit`,
     );
     this.topVoiceChannelsStmt = db.prepare(
       `SELECT channel_id, SUM(voice_seconds) AS voice, COUNT(DISTINCT user_id) AS members FROM activity_daily
-       WHERE guild_id = ? AND day >= ? AND voice_seconds > 0 GROUP BY channel_id ORDER BY voice DESC, channel_id LIMIT ?`,
+       WHERE guild_id = @guildId AND day >= @fromDay AND voice_seconds > 0 AND ${ALLOW} GROUP BY channel_id ORDER BY voice DESC, channel_id LIMIT @limit`,
     );
     this.topMembersStmt = db.prepare(
       `SELECT user_id, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
-       WHERE guild_id = ? AND day >= ? GROUP BY user_id HAVING SUM(messages) > 0 ORDER BY messages DESC, user_id LIMIT ?`,
+       WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY user_id HAVING SUM(messages) > 0 ORDER BY messages DESC, user_id LIMIT @limit`,
     );
     this.topVoiceMembersStmt = db.prepare(
       `SELECT user_id, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
-       WHERE guild_id = ? AND day >= ? GROUP BY user_id HAVING SUM(voice_seconds) > 0 ORDER BY voice DESC, user_id LIMIT ?`,
+       WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY user_id HAVING SUM(voice_seconds) > 0 ORDER BY voice DESC, user_id LIMIT @limit`,
     );
     this.hourlyStmt = db.prepare(
       'SELECT hour, SUM(messages) AS messages FROM activity_hourly WHERE guild_id = ? AND day >= ? GROUP BY hour ORDER BY hour',
@@ -91,17 +116,17 @@ class ActivityRepository {
     // Lectures « membre ».
     this.memberDailyStmt = db.prepare(
       `SELECT day, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
-       WHERE guild_id = ? AND user_id = ? AND day >= ? GROUP BY day ORDER BY day`,
+       WHERE guild_id = @guildId AND user_id = @userId AND day >= @fromDay AND ${ALLOW} GROUP BY day ORDER BY day`,
     );
     this.memberChannelsStmt = db.prepare(
       `SELECT channel_id, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
-       WHERE guild_id = ? AND user_id = ? AND day >= ? GROUP BY channel_id
-       ORDER BY messages DESC, voice DESC, channel_id LIMIT ?`,
+       WHERE guild_id = @guildId AND user_id = @userId AND day >= @fromDay AND ${ALLOW} GROUP BY channel_id
+       ORDER BY messages DESC, voice DESC, channel_id LIMIT @limit`,
     );
-    this.memberLastStmt = db.prepare('SELECT MAX(day) AS day FROM activity_daily WHERE guild_id = ? AND user_id = ?');
+    this.memberLastStmt = db.prepare(`SELECT MAX(day) AS day FROM activity_daily WHERE guild_id = @guildId AND user_id = @userId AND ${ALLOW}`);
     this.rankStmt = db.prepare(
-      `SELECT COUNT(*) AS n FROM (SELECT user_id FROM activity_daily WHERE guild_id = ? AND day >= ?
-       GROUP BY user_id HAVING SUM(messages) > ?)`,
+      `SELECT COUNT(*) AS n FROM (SELECT user_id FROM activity_daily WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW}
+       GROUP BY user_id HAVING SUM(messages) > @messages)`,
     );
     this.lastActiveStmt = db.prepare('SELECT user_id, MAX(day) AS day FROM activity_daily WHERE guild_id = ? GROUP BY user_id');
 
@@ -138,6 +163,20 @@ class ActivityRepository {
     this.clearSinceStmt.run(guildId);
   }
 
+  /**
+   * Battement de la collecte des serveurs donnés (une transaction). Un écart de plus de `gapMs`
+   * depuis le battement précédent est mémorisé comme dernier trou de collecte.
+   */
+  heartbeat(guildIds, now = Date.now(), gapMs = 6 * 3_600_000) {
+    if (guildIds.length) this.heartbeatTx(guildIds, now, gapMs);
+  }
+
+  /** @returns {{ start: number, end: number } | null} dernier trou de collecte du serveur */
+  getGap(guildId) {
+    const row = this.gapStmt.get(guildId);
+    return row?.gap_end ? { start: row.gap_start, end: row.gap_end } : null;
+  }
+
   /** Serveurs ayant des statistiques (purge quotidienne). */
   guilds() {
     const ids = new Set(this.guildsStmt.all().map((r) => r.guild_id));
@@ -164,28 +203,38 @@ class ActivityRepository {
     return this.wipeTx(guildId);
   }
 
-  daily(guildId, fromDay) {
-    return this.dailyStmt.all(guildId, fromDay);
+  /*
+   * Lectures : `channels` (facultatif) = identifiants des salons retenus ; null/absent = tous.
+   * Un tableau vide ne retient aucun salon.
+   */
+
+  daily(guildId, fromDay, channels = null) {
+    return this.dailyStmt.all({ guildId, fromDay, allow: allowOf(channels) });
   }
 
-  totals(guildId, fromDay) {
-    return this.totalsStmt.get(guildId, fromDay);
+  totals(guildId, fromDay, channels = null) {
+    return this.totalsStmt.get({ guildId, fromDay, allow: allowOf(channels) });
   }
 
-  topChannels(guildId, fromDay, limit = 10) {
-    return this.topChannelsStmt.all(guildId, fromDay, limit);
+  /** Messages et secondes de vocal de la période (sans les décomptes distincts de `totals`). */
+  sums(guildId, fromDay, channels = null) {
+    return this.sumsStmt.get({ guildId, fromDay, allow: allowOf(channels) });
   }
 
-  topVoiceChannels(guildId, fromDay, limit = 5) {
-    return this.topVoiceChannelsStmt.all(guildId, fromDay, limit);
+  topChannels(guildId, fromDay, limit = 10, channels = null) {
+    return this.topChannelsStmt.all({ guildId, fromDay, limit, allow: allowOf(channels) });
   }
 
-  topMembers(guildId, fromDay, limit = 10) {
-    return this.topMembersStmt.all(guildId, fromDay, limit);
+  topVoiceChannels(guildId, fromDay, limit = 5, channels = null) {
+    return this.topVoiceChannelsStmt.all({ guildId, fromDay, limit, allow: allowOf(channels) });
   }
 
-  topVoiceMembers(guildId, fromDay, limit = 5) {
-    return this.topVoiceMembersStmt.all(guildId, fromDay, limit);
+  topMembers(guildId, fromDay, limit = 10, channels = null) {
+    return this.topMembersStmt.all({ guildId, fromDay, limit, allow: allowOf(channels) });
+  }
+
+  topVoiceMembers(guildId, fromDay, limit = 5, channels = null) {
+    return this.topVoiceMembersStmt.all({ guildId, fromDay, limit, allow: allowOf(channels) });
   }
 
   hourly(guildId, fromDay) {
@@ -196,22 +245,22 @@ class ActivityRepository {
     return this.flowsStmt.all(guildId, fromDay);
   }
 
-  memberDaily(guildId, userId, fromDay) {
-    return this.memberDailyStmt.all(guildId, userId, fromDay);
+  memberDaily(guildId, userId, fromDay, channels = null) {
+    return this.memberDailyStmt.all({ guildId, userId, fromDay, allow: allowOf(channels) });
   }
 
-  memberChannels(guildId, userId, fromDay, limit = 5) {
-    return this.memberChannelsStmt.all(guildId, userId, fromDay, limit);
+  memberChannels(guildId, userId, fromDay, limit = 5, channels = null) {
+    return this.memberChannelsStmt.all({ guildId, userId, fromDay, limit, allow: allowOf(channels) });
   }
 
   /** @returns {string|null} dernier jour d'activité du membre (dans la rétention) */
-  memberLastDay(guildId, userId) {
-    return this.memberLastStmt.get(guildId, userId)?.day ?? null;
+  memberLastDay(guildId, userId, channels = null) {
+    return this.memberLastStmt.get({ guildId, userId, allow: allowOf(channels) })?.day ?? null;
   }
 
   /** Rang d'un membre par messages sur la période (1 = le plus actif). */
-  rank(guildId, fromDay, messages) {
-    return this.rankStmt.get(guildId, fromDay, messages).n + 1;
+  rank(guildId, fromDay, messages, channels = null) {
+    return this.rankStmt.get({ guildId, fromDay, messages, allow: allowOf(channels) }).n + 1;
   }
 
   /** @returns {Map<string, string>} membre → dernier jour d'activité (messages ou vocal) */

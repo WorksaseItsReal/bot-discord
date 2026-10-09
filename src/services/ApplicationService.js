@@ -30,6 +30,8 @@ const SHORT_ANSWER_MAX = 300;
 const LONG_ANSWER_MAX = 1000;
 const MAX_REASON = 500;
 const TEXT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+/** Au plus un ping du rôle par formulaire sur cette durée (la carte part toujours, sans ping sinon). */
+const PING_GAP_MS = 10 * 60_000;
 
 /** Présentation des statuts d'une candidature. */
 const STATUS = Object.freeze({
@@ -175,6 +177,8 @@ class ApplicationService {
     this.tickets = tickets;
     /** Entretiens en cours d'ouverture (`guildId:id`) : anti double clic. */
     this.opening = new Set();
+    /** Dernier ping du rôle par formulaire (ms) : un candidat ne peut pas pinguer l'équipe en boucle. */
+    this.lastPings = new Map();
   }
 
   // ------------------------------------------------------------ formulaires
@@ -224,6 +228,7 @@ class ApplicationService {
       await channel?.messages?.delete?.(form.panel_message_id).catch(() => {});
     }
     this.applications.deleteForm(guild.id, form.id);
+    this.lastPings.delete(form.id);
     return form;
   }
 
@@ -238,6 +243,23 @@ class ApplicationService {
       const problem = roleProblem(guild, role, actor);
       if (problem) throw new UserError(`Le rôle ${role ? `**${truncate(role.name, 80)}**` : code(id)} ne peut pas être donné automatiquement : ${problem}.`);
     }
+  }
+
+  /**
+   * Salon de réception visible par @everyone : les réponses des candidats (âge, motivations…)
+   * y seraient lisibles par tous. Avertissement (texte) ou null.
+   */
+  reviewWarning(guild, form) {
+    const channel = form.review_channel_id ? guild.channels?.cache?.get(form.review_channel_id) : null;
+    const everyone = guild.roles?.everyone ?? guild.roles?.cache?.get?.(guild.id);
+    if (!channel?.permissionsFor || !everyone) return null;
+    if (!channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel)) return null;
+    return `<#${channel.id}> est visible par @everyone : les réponses des candidats y seront lisibles par tous. Choisissez un salon réservé à l'équipe.`;
+  }
+
+  /** Un relecteur ne décide jamais de sa propre candidature (ni n'ouvre son propre entretien). */
+  assertNotApplicant(app, userId) {
+    if (app.user_id === userId) throw new UserError('Vous ne pouvez pas traiter votre propre candidature : laissez un autre membre de l\'équipe décider.');
   }
 
   /**
@@ -391,7 +413,12 @@ class ApplicationService {
     if (!id) throw new UserError(`Vous avez déjà une candidature **${form.name}** en attente.`);
     const app = this.applications.getApplication(guild.id, id);
     const channel = guild.channels.cache.get(form.review_channel_id);
-    const role = form.ping_role_id && form.ping_role_id !== guild.id && guild.roles?.cache?.has(form.ping_role_id) ? form.ping_role_id : null;
+    const now = Date.now();
+    const previousPing = this.lastPings.get(form.id) ?? 0;
+    // Ping du rôle au plus une fois par formulaire toutes les 10 minutes (réservé avant l'envoi :
+    // deux candidatures simultanées ne pinguent pas deux fois) ; la carte part toujours.
+    const role = form.ping_role_id && form.ping_role_id !== guild.id && guild.roles?.cache?.has(form.ping_role_id) && now - previousPing >= PING_GAP_MS ? form.ping_role_id : null;
+    if (role) this.lastPings.set(form.id, now);
     try {
       const sent = await channel.send({
         ...(role ? { content: `<@&${role}>` } : {}),
@@ -401,6 +428,7 @@ class ApplicationService {
       this.applications.setCard(guild.id, id, sent.channelId ?? channel.id, sent.id);
     } catch (err) {
       logger.debug(`Carte de candidature non publiée (${guild.id}) :`, err?.message);
+      if (role && this.lastPings.get(form.id) === now) this.lastPings.set(form.id, previousPing); // ping non parti
       this.applications.deleteApplication(guild.id, id);
       throw new UserError('Je n\'ai pas pu transmettre votre candidature à l\'équipe. Prévenez un administrateur (`/candidatures`).');
     }
@@ -707,6 +735,7 @@ module.exports = {
   MAX_DESCRIPTION,
   MAX_ROLES,
   MAX_REASON,
+  PING_GAP_MS,
   SHORT_ANSWER_MAX,
   LONG_ANSWER_MAX,
   TEXT_TYPES,

@@ -1,6 +1,6 @@
 'use strict';
 
-const { PermissionFlagsBits, ChannelType } = require('discord.js');
+const { PermissionFlagsBits, ChannelType, PermissionOverwrites } = require('discord.js');
 const { card, field, wide, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { snowflake } = require('../utils/buttonGuard');
@@ -117,10 +117,32 @@ async function restoreEveryone(channel, perms, reason) {
     else if (value === false) deny |= bit;
   }
   if (allow === 0n && deny === 0n && typeof channel.permissionOverwrites.delete === 'function') {
-    if (current) await channel.permissionOverwrites.delete(everyone, reason);
+    if (current) {
+      await channel.permissionOverwrites.delete(everyone, reason);
+      channel.permissionOverwrites.cache?.delete?.(everyone.id);
+    }
     return;
   }
+  await editEveryone(channel, perms, reason);
+}
+
+/**
+ * Modifie la surcharge de @everyone et met le cache à jour tout de suite. discord.js ne le met à
+ * jour qu'à réception de l'événement de la passerelle : une opération enchaînée sur le même salon
+ * (levée automatique puis /lock) lirait sinon l'état d'AVANT et sauvegarderait « verrouillé »
+ * comme état d'origine.
+ */
+async function editEveryone(channel, perms, reason) {
+  const everyone = channel.guild.roles.everyone;
+  const existing = channel.permissionOverwrites.cache?.get?.(everyone.id);
   await channel.permissionOverwrites.edit(everyone, perms, { reason });
+  try {
+    if (typeof channel.permissionOverwrites._add !== 'function') return;
+    const { allow, deny } = PermissionOverwrites.resolveOverwriteOptions(perms, existing ?? {});
+    channel.permissionOverwrites._add({ id: everyone.id, type: 0, allow: allow.bitfield.toString(), deny: deny.bitfield.toString() });
+  } catch {
+    // cache non mis à jour : l'événement de la passerelle le fera
+  }
 }
 
 function normalizeLock(data) {
@@ -164,6 +186,25 @@ class LockdownService {
      * @type {Map<string, Promise<unknown>>}
      */
     this.busy = new Map();
+    /**
+     * Opérations en cours par salon (lock, unlock, levée automatique) : sérialisées pour qu'une
+     * levée programmée et un /lock simultanés ne s'entrelacent jamais (état sauvegardé effacé
+     * alors que le salon vient d'être re-verrouillé).
+     * @type {Map<string, Promise<unknown>>}
+     */
+    this.channelOps = new Map();
+  }
+
+  /** Exécute `fn` après les opérations déjà en cours sur ce salon. */
+  async #serial(channelId, fn) {
+    const previous = this.channelOps.get(channelId) ?? Promise.resolve();
+    const run = previous.catch(() => {}).then(fn);
+    this.channelOps.set(channelId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.channelOps.get(channelId) === run) this.channelOps.delete(channelId);
+    }
   }
 
   /**
@@ -197,10 +238,18 @@ class LockdownService {
    * il ne fait que compléter les permissions qui n'étaient pas encore sauvegardées.
    * Un /lock manuel sur un salon déjà verrouillé par un lockdown le fait passer en
    * portée « manuel » : la levée du lockdown ne doit pas annuler ce verrouillage voulu.
-   * @param {{ scope?: 'manual'|'lockdown' }} [opts]
+   * `timer` (/lock) : null = verrouillage permanent (levée programmée annulée), { durationMs,
+   * moderatorId } = levée programmée ; appliqué dans la même section que le verrouillage.
+   * Absent (lockdown) : les levées programmées des salons ne sont pas touchées.
+   * @param {{ scope?: 'manual'|'lockdown', timer?: { durationMs: number, moderatorId?: string|null }|null }} [opts]
+   * @returns {Promise<number|null>} échéance de la levée programmée (timer fourni), sinon null
    */
-  async lockChannel(channel, moderator, reason, { scope = SCOPES.manual } = {}) {
+  async lockChannel(channel, moderator, reason, { scope = SCOPES.manual, timer } = {}) {
     assertOverwritable(channel);
+    return this.#serial(channel.id, () => this.#lock(channel, reason, { scope, timer }));
+  }
+
+  async #lock(channel, reason, { scope, timer }) {
     const everyone = channel.guild.roles.everyone;
     const perms = lockPermsFor(channel);
     const saved = this.locks.get(channel.guild.id, channel.id);
@@ -214,13 +263,22 @@ class LockdownService {
       this.locks.save(channel.guild.id, channel.id, { v: 2, scope: state.scope, perms: state.perms });
     }
     try {
-      await channel.permissionOverwrites.edit(everyone, Object.fromEntries(perms.map((p) => [p, false])), { reason });
+      await editEveryone(channel, Object.fromEntries(perms.map((p) => [p, false])), reason);
     } catch (err) {
       // Salon non verrouillé : on n'en garde pas une trace qui fausserait le statut du lockdown.
       if (!saved) this.locks.delete(channel.guild.id, channel.id);
       else if (promote) this.locks.save(channel.guild.id, channel.id, saved.data);
       throw err;
     }
+    if (timer === undefined || !this.timed) return null;
+    if (timer === null) {
+      this.#cancelTimer(channel.guild.id, 'lock', channel.id, 'replaced');
+      return null;
+    }
+    const now = Date.now();
+    const expiresAt = now + timer.durationMs;
+    this.timed.schedule({ guildId: channel.guild.id, channelId: channel.id, kind: 'lock', moderatorId: timer.moderatorId ?? null, expiresAt, now });
+    return expiresAt;
   }
 
   /**
@@ -228,18 +286,25 @@ class LockdownService {
    * Sans état sauvegardé (salon non verrouillé par le bot) : on ne retire que le
    * refus d'écriture (SendMessages → neutre), sans toucher aux autres réglages.
    * Une levée automatique programmée pour ce salon (/lock duree) est close.
-   * @param {{ timerReason?: string }} [opts] motif de clôture de la levée programmée
+   * @param {{ timerReason?: string, onlyIf?: () => boolean }} [opts] motif de clôture de la levée
+   *   programmée ; onlyIf (levée automatique) : condition relue juste avant d'agir, une fois les
+   *   opérations en cours sur le salon terminées (faux : rien n'est fait)
+   * @returns {Promise<boolean>} false si `onlyIf` a refusé la levée
    */
-  async unlockChannel(channel, reason, { timerReason = 'cancelled' } = {}) {
+  async unlockChannel(channel, reason, { timerReason = 'cancelled', onlyIf = null } = {}) {
     assertOverwritable(channel);
-    const saved = this.locks.get(channel.guild.id, channel.id);
-    if (saved) {
-      await restoreEveryone(channel, normalizeLock(saved.data).perms, reason);
-      this.locks.delete(channel.guild.id, channel.id);
-    } else {
-      await restoreEveryone(channel, { SendMessages: null }, reason);
-    }
-    this.#cancelTimer(channel.guild.id, 'lock', channel.id, timerReason);
+    return this.#serial(channel.id, async () => {
+      if (onlyIf && !onlyIf()) return false;
+      const saved = this.locks.get(channel.guild.id, channel.id);
+      if (saved) {
+        await restoreEveryone(channel, normalizeLock(saved.data).perms, reason);
+        this.locks.delete(channel.guild.id, channel.id);
+      } else {
+        await restoreEveryone(channel, { SendMessages: null }, reason);
+      }
+      this.#cancelTimer(channel.guild.id, 'lock', channel.id, timerReason);
+      return true;
+    });
   }
 
   /** Clôt une levée programmée (best-effort : la base ne doit pas faire échouer l'action). */
@@ -262,7 +327,7 @@ class LockdownService {
       const current = channel.permissionOverwrites.cache.get(everyone.id);
       this.locks.save(channel.guild.id, channel.id, { v: 2, perms: { ViewChannel: overwriteState(current, 'ViewChannel') } }, 'hide');
     }
-    await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }, { reason });
+    await editEveryone(channel, { ViewChannel: false }, reason);
   }
 
   /**

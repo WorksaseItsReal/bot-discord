@@ -37,6 +37,56 @@ const isManager = (interaction) => Boolean(interaction.memberPermissions?.has(Pe
 const statsOf = (client, guildId) => client.services.config.get(guildId).stats ?? {};
 
 /**
+ * Salons visibles par @everyone (fils exclus : leurs messages comptent pour leur salon).
+ * Un lecteur sans « Gérer le serveur » ne voit les chiffres QUE de ces salons. Pur.
+ * @returns {string[]}
+ */
+function publicChannels(guild) {
+  const everyone = guild?.roles?.everyone ?? guild?.roles?.cache?.get?.(guild?.id);
+  const channels = guild?.channels?.cache;
+  if (!everyone || !channels?.values) return [];
+  return [...channels.values()].filter((c) => !c.isThread?.() && c.permissionsFor?.(everyone)?.has?.(PermissionFlagsBits.ViewChannel)).map((c) => c.id);
+}
+
+/**
+ * Lecteur d'une vue : gestionnaire (tout) ou non (salons visibles par @everyone pour les
+ * chiffres, et seulement les salons que LUI peut voir dans les listes de salons).
+ * @param {{ member?: object|null, refresh?: boolean }} [opts]
+ */
+function makeReader(guild, manager, { member = null, refresh = false } = {}) {
+  if (manager) return { manager: true, scope: null, scopeKey: 'all', canSee: () => true, refresh };
+  const scope = publicChannels(guild);
+  const visible = new Set(scope);
+  const canSee = (id) => {
+    if (!visible.has(id)) return false;
+    const channel = guild?.channels?.cache?.get?.(id);
+    const perms = member && channel?.permissionsFor ? channel.permissionsFor(member) : null;
+    return perms ? perms.has(PermissionFlagsBits.ViewChannel) : true;
+  };
+  return { manager: false, scope, scopeKey: 'public', canSee, refresh };
+}
+
+/** Lecteur d'une interaction (« Actualiser » ne recalcule que pour un gestionnaire). */
+function readerOf(interaction, { refresh = false } = {}) {
+  const manager = isManager(interaction);
+  return makeReader(interaction.guild, manager, { member: interaction.member, refresh: refresh && manager });
+}
+
+/** Données d'une vue, en cache 60 s par (serveur, vue, période, portée du lecteur). */
+function viewData(client, guild, reader, key, compute) {
+  const activity = client.services.activity;
+  const fullKey = `${guild.id}:${key}:${reader.scopeKey}`;
+  return activity.cachedView ? activity.cachedView(fullKey, compute, { refresh: reader.refresh }) : compute();
+}
+
+/** Délai entre deux clics (navigation, actualisation) d'un lecteur sans « Gérer le serveur ». */
+function assertViewCooldown(interaction, client) {
+  if (isManager(interaction)) return;
+  const left = client.services.activity.takeViewCooldown?.(interaction.guildId, interaction.user.id) ?? 0;
+  if (left > 0) throw new UserError(`Patientez **${Math.ceil(left / 1000)} s** avant de changer de vue ou d'actualiser les statistiques.`);
+}
+
+/**
  * Lecture autorisée ? « Gérer le serveur », statistiques publiques, ou ses propres statistiques.
  * @param {string} [selfId] membre consulté (vue « membre »)
  */
@@ -112,14 +162,14 @@ function emptyNote(totals) {
 
 // ---------------------------------------------------------------- vues
 
-function serverView(client, guild, period, now, manager, notice) {
-  const repo = client.services.activity.read();
+function serverView(client, guild, period, now, manager, notice, reader) {
   const span = Math.max(period, 30);
   const days = A.lastDays(span, now);
-  const series = A.fillSeries(repo.daily(guild.id, days[0]), days);
   const from = A.addDays(A.dayKey(now), -(period - 1));
-  const totals = repo.totals(guild.id, from);
-  const flows = repo.flows(guild.id, from);
+  const { series, totals, flows } = viewData(client, guild, reader, `serveur:${period}:${A.dayKey(now)}`, () => {
+    const repo = client.services.activity.read();
+    return { series: A.fillSeries(repo.daily(guild.id, days[0], reader.scope), days), totals: repo.totals(guild.id, from, reader.scope), flows: repo.flows(guild.id, from) };
+  });
   const joins = flows.reduce((n, f) => n + f.joins, 0);
   const leaves = flows.reduce((n, f) => n + f.leaves, 0);
   const periodSeries = series.slice(-period);
@@ -166,12 +216,16 @@ function serverView(client, guild, period, now, manager, notice) {
   };
 }
 
-function channelsView(client, guild, period, now, manager) {
-  const repo = client.services.activity.read();
+function channelsView(client, guild, period, now, manager, reader) {
   const from = A.addDays(A.dayKey(now), -(period - 1));
-  const totals = repo.totals(guild.id, from);
-  const text = repo.topChannels(guild.id, from, 10);
-  const voice = repo.topVoiceChannels(guild.id, from, 5);
+  const data = viewData(client, guild, reader, `salons:${period}:${A.dayKey(now)}`, () => {
+    const repo = client.services.activity.read();
+    // Marge (15 / 10) : les salons que ce lecteur ne voit pas sont retirés ensuite.
+    return { totals: repo.sums(guild.id, from, reader.scope), text: repo.topChannels(guild.id, from, 15, reader.scope), voice: repo.topVoiceChannels(guild.id, from, 10, reader.scope) };
+  });
+  const totals = data.totals;
+  const text = data.text.filter((c) => reader.canSee(c.channel_id)).slice(0, 10);
+  const voice = data.voice.filter((c) => reader.canSee(c.channel_id)).slice(0, 5);
   const textLines = text.map((c, i) => `**${i + 1}.** ${channelMention(c.channel_id)} · **${A.fr(c.messages)}** msg · ${A.percent(c.messages, totals.messages)} · ${A.fr(c.members)} membre(s)`);
   const voiceLines = voice.map((c, i) => `**${i + 1}.** ${channelMention(c.channel_id)} · **${A.formatVoice(c.voice)}** · ${A.fr(c.members)} membre(s)`);
   return {
@@ -198,12 +252,12 @@ function channelsView(client, guild, period, now, manager) {
   };
 }
 
-function membersView(client, guild, period, now, manager) {
-  const repo = client.services.activity.read();
+function membersView(client, guild, period, now, manager, reader) {
   const from = A.addDays(A.dayKey(now), -(period - 1));
-  const totals = repo.totals(guild.id, from);
-  const text = repo.topMembers(guild.id, from, 10);
-  const voice = repo.topVoiceMembers(guild.id, from, 5);
+  const { totals, text, voice } = viewData(client, guild, reader, `membres:${period}:${A.dayKey(now)}`, () => {
+    const repo = client.services.activity.read();
+    return { totals: repo.totals(guild.id, from, reader.scope), text: repo.topMembers(guild.id, from, 10, reader.scope), voice: repo.topVoiceMembers(guild.id, from, 5, reader.scope) };
+  });
   const textLines = text.map((m, i) => `**${i + 1}.** ${mention(m.user_id)} · **${A.fr(m.messages)}** msg${m.voice ? ` · ${ICONS.voice} ${A.formatVoice(m.voice)}` : ''}`);
   const voiceLines = voice.map((m, i) => `**${i + 1}.** ${mention(m.user_id)} · **${A.formatVoice(m.voice)}**${m.messages ? ` · ${A.fr(m.messages)} msg` : ''}`);
   return {
@@ -230,11 +284,12 @@ function membersView(client, guild, period, now, manager) {
   };
 }
 
-function hoursView(client, guild, period, now, manager) {
-  const repo = client.services.activity.read();
+function hoursView(client, guild, period, now, manager, reader) {
   const from = A.addDays(A.dayKey(now), -(period - 1));
   const values = Array.from({ length: 24 }, () => 0);
-  for (const r of repo.hourly(guild.id, from)) if (r.hour >= 0 && r.hour < 24) values[r.hour] = Number(r.messages) || 0;
+  // Heures de pointe : compteurs par heure, sans dimension salon (aucun salon n'y est nommé).
+  const rows = viewData(client, guild, reader, `heures:${period}:${A.dayKey(now)}`, () => client.services.activity.read().hourly(guild.id, from));
+  for (const r of rows) if (r.hour >= 0 && r.hour < 24) values[r.hour] = Number(r.messages) || 0;
   const total = values.reduce((a, b) => a + b, 0);
   const peak = values.reduce((b, v, h) => (v > values[b] ? h : b), 0);
   const quiet = values.reduce((b, v, h) => (v < values[b] ? h : b), 0);
@@ -266,14 +321,13 @@ function hoursView(client, guild, period, now, manager) {
   };
 }
 
-function growthView(client, guild, period, now, manager) {
+function growthView(client, guild, period, now, manager, reader) {
   const activity = client.services.activity;
-  const repo = activity.read();
   const since = activity.since(guild.id);
   let days = A.lastDays(period, now);
   // Avant la collecte, les flux sont inconnus : la courbe commence au premier jour collecté.
   if (since) days = days.filter((d) => d >= A.dayKey(since));
-  const rows = repo.flows(guild.id, days[0] ?? A.dayKey(now));
+  const rows = viewData(client, guild, reader, `croissance:${period}:${days[0] ?? ''}:${A.dayKey(now)}`, () => activity.read().flows(guild.id, days[0] ?? A.dayKey(now)));
   const map = new Map(rows.map((r) => [r.day, r]));
   const flows = days.map((d) => ({ joins: map.get(d)?.joins ?? 0, leaves: map.get(d)?.leaves ?? 0 }));
   const members = A.reconstructMembers(guild.memberCount, flows);
@@ -386,22 +440,23 @@ function wipeView() {
  * Vue du serveur.
  * @param {{ view?: string, period?: number, manager?: boolean, now?: number, notice?: string }} [opts]
  */
-function render(client, guild, { view = 'serveur', period = DEFAULT_PERIOD, manager = false, now = Date.now(), notice } = {}) {
+function render(client, guild, { view = 'serveur', period = DEFAULT_PERIOD, manager = false, now = Date.now(), notice, reader = null } = {}) {
+  const r = reader ?? makeReader(guild, manager);
   switch (view) {
     case 'salons':
-      return channelsView(client, guild, period, now, manager);
+      return channelsView(client, guild, period, now, manager, r);
     case 'membres':
-      return membersView(client, guild, period, now, manager);
+      return membersView(client, guild, period, now, manager, r);
     case 'heures':
-      return hoursView(client, guild, period, now, manager);
+      return hoursView(client, guild, period, now, manager, r);
     case 'croissance':
-      return growthView(client, guild, period, now, manager);
+      return growthView(client, guild, period, now, manager, r);
     case 'reglages':
       return settingsView(client, guild, notice);
     case 'wipe':
       return wipeView();
     default:
-      return serverView(client, guild, period, now, manager, notice);
+      return serverView(client, guild, period, now, manager, notice, r);
   }
 }
 
@@ -410,18 +465,29 @@ function render(client, guild, { view = 'serveur', period = DEFAULT_PERIOD, mana
  * @param {{ id: string, username?: string, toString(): string }} user
  * @param {import('discord.js').GuildMember|null} member
  */
-function renderMember(client, guild, user, member, { period = DEFAULT_PERIOD, now = Date.now(), canSeeServer = false } = {}) {
-  const repo = client.services.activity.read();
+function renderMember(client, guild, user, member, { period = DEFAULT_PERIOD, now = Date.now(), canSeeServer = false, reader = null, manager = false } = {}) {
+  const r = reader ?? makeReader(guild, manager);
   const days = A.lastDays(period, now);
-  const daily = repo.memberDaily(guild.id, user.id, days[0]);
-  const messages = A.fillSeries(daily, days);
-  const voice = A.fillSeries(daily, days, 'voice');
+  const data = viewData(client, guild, r, `membre:${user.id}:${period}:${A.dayKey(now)}`, () => {
+    const repo = client.services.activity.read();
+    const daily = repo.memberDaily(guild.id, user.id, days[0], r.scope);
+    const sum = daily.reduce((n, d) => n + (Number(d.messages) || 0), 0);
+    return {
+      daily,
+      // Marge : les salons que ce lecteur ne voit pas sont retirés ensuite.
+      channels: repo.memberChannels(guild.id, user.id, days[0], 10, r.scope),
+      lastDay: repo.memberLastDay(guild.id, user.id, r.scope),
+      rank: sum ? repo.rank(guild.id, days[0], sum, r.scope) : null,
+    };
+  });
+  const messages = A.fillSeries(data.daily, days);
+  const voice = A.fillSeries(data.daily, days, 'voice');
   const totalMessages = messages.reduce((a, b) => a + b, 0);
   const totalVoice = voice.reduce((a, b) => a + b, 0);
   const activeDays = days.filter((_, i) => messages[i] || voice[i]).length;
-  const channels = repo.memberChannels(guild.id, user.id, days[0], 5);
-  const lastDay = repo.memberLastDay(guild.id, user.id);
-  const rank = totalMessages ? repo.rank(guild.id, days[0], totalMessages) : null;
+  const channels = data.channels.filter((c) => r.canSee(c.channel_id)).slice(0, 5);
+  const lastDay = data.lastDay;
+  const rank = totalMessages ? data.rank : null;
   const channelLines = channels.map((c, i) => `**${i + 1}.** ${channelMention(c.channel_id)} · ${[c.messages ? `**${A.fr(c.messages)}** msg` : null, c.voice ? `${ICONS.voice} ${A.formatVoice(c.voice)}` : null].filter(Boolean).join(' · ')}`);
   const name = member?.displayName ?? user.globalName ?? user.username ?? 'Membre';
   return {
@@ -480,6 +546,8 @@ module.exports = {
   category: 'information',
   cooldown: 3_000,
   render,
+  makeReader,
+  publicChannels,
   renderMember,
   periodOfMessage,
   data: new SlashCommandBuilder()
@@ -514,12 +582,15 @@ module.exports = {
       if (user.bot) throw new UserError('Les bots ne sont pas comptés dans les statistiques.');
       const member = interaction.options.getMember('membre') ?? interaction.guild.members.cache.get(user.id) ?? null;
       const canSeeServer = isManager(interaction) || Boolean(statsOf(client, interaction.guildId).public);
-      return interaction.reply({ ...renderMember(client, interaction.guild, user, member, { period, canSeeServer }), ephemeral: true });
+      // Requêtes potentiellement longues sur un gros serveur : on acquitte d'abord.
+      await interaction.deferReply({ ephemeral: true });
+      return interaction.editReply(renderMember(client, interaction.guild, user, member, { period, canSeeServer, reader: readerOf(interaction) }));
     }
     assertRead(interaction, client);
     const view = interaction.options.getString('vue') ?? 'serveur';
     if (!VIEWS.some((v) => v.value === view)) throw new UserError('Vue inconnue.');
-    return interaction.reply({ ...render(client, interaction.guild, { view, period, manager: isManager(interaction) }), ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    return interaction.editReply(render(client, interaction.guild, { view, period, manager: isManager(interaction), reader: readerOf(interaction) }));
   },
 
   buttons: {
@@ -529,24 +600,30 @@ module.exports = {
       if (!VIEW_KEYS.has(view)) throw new UserError('Vue inconnue.');
       if (MANAGER_VIEWS.has(view)) requirePermission(interaction, 'ManageGuild');
       else assertRead(interaction, client);
-      await interaction.update(render(client, interaction.guild, { view, period: periodOfMessage(interaction.message), manager: isManager(interaction) }));
+      assertViewCooldown(interaction, client);
+      // Calcul potentiellement long (gros serveur, cache expiré) : on acquitte d'abord.
+      await interaction.deferUpdate();
+      await interaction.editReply(render(client, interaction.guild, { view, period: periodOfMessage(interaction.message), manager: isManager(interaction), reader: readerOf(interaction) }));
     },
-    /** cmd:statistiques:go:<vue>:<période>[:r] */
-    async go(interaction, client, [view, period]) {
+    /** cmd:statistiques:go:<vue>:<période>[:r] — « r » : actualiser (recalcul pour un gestionnaire). */
+    async go(interaction, client, [view, period, flag]) {
       if (!VIEW_KEYS.has(view)) throw new UserError('Vue inconnue.');
       if (MANAGER_VIEWS.has(view)) requirePermission(interaction, 'ManageGuild');
       else assertRead(interaction, client);
-      await interaction.update(render(client, interaction.guild, { view, period: parsePeriod(period), manager: isManager(interaction) }));
+      assertViewCooldown(interaction, client);
+      await interaction.deferUpdate();
+      await interaction.editReply(render(client, interaction.guild, { view, period: parsePeriod(period), manager: isManager(interaction), reader: readerOf(interaction, { refresh: flag === 'r' }) }));
     },
     /** cmd:statistiques:member:<userId>:<période>[:r] */
-    async member(interaction, client, [userId, period]) {
+    async member(interaction, client, [userId, period, flag]) {
       if (!SNOWFLAKE.test(userId ?? '')) throw new UserError('Ce bouton est invalide.');
       assertRead(interaction, client, userId);
+      assertViewCooldown(interaction, client);
       // Le membre peut devoir être récupéré (hors cache) : on acquitte d'abord.
       await interaction.deferUpdate();
       const { user, member } = await resolveUser(client, interaction.guild, userId);
       const canSeeServer = isManager(interaction) || Boolean(statsOf(client, interaction.guildId).public);
-      await interaction.editReply(renderMember(client, interaction.guild, user, member, { period: parsePeriod(period), canSeeServer }));
+      await interaction.editReply(renderMember(client, interaction.guild, user, member, { period: parsePeriod(period), canSeeServer, reader: readerOf(interaction, { refresh: flag === 'r' }) }));
     },
     /** Durée de conservation (menu). */
     async retention(interaction, client) {

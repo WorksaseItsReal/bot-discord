@@ -48,4 +48,12 @@ module.exports = [
       activity(client)?.onGuildAvailable(guild);
     },
   },
+  {
+    // Serveur quitté : ses sessions vocales sont closes (sinon créditées indéfiniment).
+    name: 'guildDelete',
+    execute(client, guild) {
+      if (guild?.available === false) return; // panne passagère, pas un départ
+      activity(client)?.onGuildRemoved(guild?.id);
+    },
+  },
 ];

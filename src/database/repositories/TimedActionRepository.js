@@ -31,7 +31,11 @@ class TimedActionRepository {
     );
     this.activeForStmt = db.prepare('SELECT * FROM timed_channel_actions WHERE guild_id = ? AND kind = ? AND channel_id = ? AND active = 1');
     this.byIdStmt = db.prepare('SELECT * FROM timed_channel_actions WHERE id = ?');
-    this.dueStmt = db.prepare('SELECT * FROM timed_channel_actions WHERE active = 1 AND expires_at <= ? ORDER BY expires_at ASC LIMIT 200');
+    this.dueStmt = db.prepare(
+      `SELECT * FROM timed_channel_actions WHERE active = 1 AND expires_at <= @now
+         AND id NOT IN (SELECT value FROM json_each(@exclude))
+       ORDER BY expires_at ASC LIMIT 200`,
+    );
     this.activeByGuildStmt = db.prepare('SELECT * FROM timed_channel_actions WHERE guild_id = ? AND active = 1 ORDER BY expires_at ASC LIMIT 50');
     this.closeStmt = db.prepare('UPDATE timed_channel_actions SET active = 0, ended_at = ?, end_reason = ? WHERE id = ? AND active = 1');
     this.closeForStmt = db.prepare('UPDATE timed_channel_actions SET active = 0, ended_at = ?, end_reason = ? WHERE guild_id = ? AND kind = ? AND channel_id = ? AND active = 1');
@@ -61,9 +65,12 @@ class TimedActionRepository {
     return decode(this.byIdStmt.get(id));
   }
 
-  /** Lignes actives arrivées à échéance (200 au plus par passage). */
-  findDue(now = Date.now()) {
-    return this.dueStmt.all(now).map(decode);
+  /**
+   * Lignes actives arrivées à échéance (200 au plus par passage).
+   * @param {{ exclude?: number[] }} [opts] lignes écartées (en attente d'un nouvel essai)
+   */
+  findDue(now = Date.now(), { exclude = [] } = {}) {
+    return this.dueStmt.all({ now, exclude: JSON.stringify(exclude.map(Number).filter(Number.isInteger)) }).map(decode);
   }
 
   /** Actions temporaires en cours d'un serveur. */

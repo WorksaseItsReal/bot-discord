@@ -46,6 +46,33 @@ const DEFAULT_DM = 'Bonjour {membre} ! Nous ne vous avons pas vu sur **{serveur}
 const SNOWFLAKE = /^\d{17,20}$/;
 /** Pause entre deux MP (anti-spam côté Discord). Réglable pour les tests. */
 const timing = { dmDelayMs: 1_000 };
+/** Liste d'expulsion affichée à la confirmation : valable 15 minutes. */
+const KICK_LIST_TTL_MS = 15 * 60_000;
+/**
+ * Listes d'expulsion confirmables : jeton (dans le customId) → { guildId, actorId, days, ids, at }.
+ * L'expulsion porte EXACTEMENT sur la liste affichée (relue : toujours inactif, toujours expulsable).
+ * @type {Map<string, { guildId: string, actorId: string, days: number, ids: string[], at: number }>}
+ */
+const kickLists = new Map();
+const TOKEN = /^[a-z0-9]{6,16}$/;
+
+/** Mémorise la liste affichée et renvoie son jeton. */
+function rememberKickList(guildId, actorId, days, ids, now = Date.now()) {
+  for (const [token, entry] of kickLists) if (now - entry.at > KICK_LIST_TTL_MS) kickLists.delete(token);
+  let token;
+  do token = Math.random().toString(36).slice(2, 12).padEnd(8, '0'); while (kickLists.has(token));
+  kickLists.set(token, { guildId, actorId, days, ids: [...ids], at: now });
+  return token;
+}
+
+/** Liste confirmée par ce jeton (même serveur, même auteur, même nombre de jours), sinon UserError. */
+function kickListFor(token, { guildId, actorId, days }, now = Date.now()) {
+  const entry = TOKEN.test(token ?? '') ? kickLists.get(token) : null;
+  if (!entry || now - entry.at > KICK_LIST_TTL_MS || entry.guildId !== guildId || entry.actorId !== actorId || entry.days !== days) {
+    throw new UserError('Cette confirmation a expiré : relancez « Expulser » depuis la liste des inactifs. Aucun membre n\'a été expulsé.');
+  }
+  return entry;
+}
 
 const ACTIONS = {
   give: { label: 'Donner un rôle', emoji: ICONS.role, verb: 'a donné un rôle à', done: 'Rôle donné', permission: 'ManageRoles' },
@@ -110,6 +137,12 @@ function blockedReason(client, guildId, days, now = Date.now()) {
   if (now - since < days * DAY_MS) {
     return `La collecte tourne depuis **${activity.collectedDays(guildId, now)} jour(s)** seulement : avant elle, tout le monde paraît inactif. Actions disponibles ${discordTimestamp(since + days * DAY_MS, 'R')} (ou choisissez moins de jours).`;
   }
+  // Trou de collecte (bot hors ligne plus de 6 h) dans la fenêtre : l'activité de cette période
+  // n'a pas été comptée, des membres actifs paraîtraient inactifs.
+  const gap = activity.gapWithin?.(guildId, days, now);
+  if (gap) {
+    return `La collecte a été **interrompue** du ${discordTimestamp(gap.start, 'f')} au ${discordTimestamp(gap.end, 'f')} (bot hors ligne) : l'activité de cette période n'a pas été comptée. Actions disponibles ${discordTimestamp(gap.end + days * DAY_MS, 'R')} (ou choisissez moins de jours).`;
+  }
   return null;
 }
 
@@ -172,7 +205,7 @@ async function plan(client, interaction, days, action, roleId) {
     else if (action === 'kick' && !canKick(member, interaction.user.id, guild.ownerId, actorIsOwner, actorTop)) skipped.protected += 1;
     else eligible.push(member);
   }
-  return { targets: eligible.slice(0, LIMITS[action]), total: list.length, eligible: eligible.length, skipped, partial };
+  return { targets: eligible.slice(0, LIMITS[action]), total: list.length, eligible: eligible.length, eligibleMembers: eligible, skipped, partial };
 }
 
 /** Expulsable : ni le propriétaire, ni l'auteur, sous le bot (kickable) et sous l'auteur (sauf propriétaire). */
@@ -278,7 +311,7 @@ function roleView(client, guild, days, action) {
 }
 
 /** Résumé avant exécution. */
-function confirmView(days, action, planned, { role, template, guild, sample } = {}) {
+function confirmView(days, action, planned, { role, template, guild, sample, kickToken = null } = {}) {
   const { targets, eligible, skipped } = planned;
   const over = Math.max(0, eligible - targets.length);
   const names = fitList(targets.map((m) => `${m}`), 900);
@@ -305,7 +338,7 @@ function confirmView(days, action, planned, { role, template, guild, sample } = 
   // Aperçu du MP, rendu pour l'auteur de l'action.
   if (action === 'dm') embeds.push(dmCard(guild, sample, template, days));
   const confirm = action === 'kick'
-    ? actionButton({ command: 'activite', action: 'kickform', args: [days], label: 'Expulser…', emoji: ICONS.kick, style: ButtonStyle.Danger, disabled: !targets.length })
+    ? actionButton({ command: 'activite', action: 'kickform', args: [days, kickToken ?? 'x'], label: 'Expulser…', emoji: ICONS.kick, style: ButtonStyle.Danger, disabled: !targets.length || !kickToken })
     : actionButton({ command: 'activite', action: 'run', args: action === 'dm' ? [days, action] : [days, action, role.id], label: 'Confirmer', emoji: ICONS.success, style: ButtonStyle.Danger, disabled: !targets.length });
   return {
     embeds,
@@ -318,7 +351,7 @@ function confirmView(days, action, planned, { role, template, guild, sample } = 
 }
 
 function resultView(days, action, outcome, role) {
-  const { done, failed, skipped, total, stopped } = outcome;
+  const { done, failed, skipped, total, stopped, revoked } = outcome;
   return {
     embeds: [
       card({
@@ -329,6 +362,7 @@ function resultView(days, action, outcome, role) {
         description: [
           `**${done}** membre(s) traité(s) sur ${total}.${role ? ` Rôle : ${role}.` : ''}`,
           stopped ? `${ICONS.warning} Interrompu : le bot s'arrête.` : null,
+          revoked ? `${ICONS.warning} Interrompu : vous n'avez plus la permission **Expulser des membres** (AntiRaid ?).` : null,
           failed ? subtext('Échecs : MP fermés, membre parti entre-temps ou permission refusée par Discord.') : null,
         ],
         fields: [
@@ -363,9 +397,9 @@ function dmModal(days, template) {
     );
 }
 
-function kickModal(days) {
+function kickModal(days, token) {
   return new ModalBuilder()
-    .setCustomId(`cmd:activite:kick:${days}`)
+    .setCustomId(`cmd:activite:kick:${days}:${token}`)
     .setTitle('Expulser les membres inactifs')
     .addComponents(
       row(new TextInputBuilder().setCustomId('confirmation').setLabel(`Tapez ${KICK_WORD} pour confirmer`).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20).setPlaceholder(KICK_WORD)),
@@ -387,7 +421,7 @@ function textField(interaction, id) {
  * Action groupée : relit la liste, applique membre par membre (interrompue à l'arrêt du bot),
  * puis affiche le bilan et le journalise.
  */
-async function runBulk(interaction, client, { days, action, roleId = null, reason = null }) {
+async function runBulk(interaction, client, { days, action, roleId = null, reason = null, onlyIds = null, onStart = null }) {
   assertActionPermissions(interaction, action);
   assertReady(client, interaction.guildId, days);
   const guild = interaction.guild;
@@ -395,15 +429,26 @@ async function runBulk(interaction, client, { days, action, roleId = null, reaso
   const role = roleId ? checkRole(interaction, roleId, action) : null;
   if (activity.running.has(guild.id)) throw new UserError('Une action groupée est déjà en cours sur ce serveur : attendez qu\'elle se termine.');
   activity.running.add(guild.id);
+  onStart?.();
   try {
     // Acquitte tout de suite : l'action peut durer (une requête par membre).
     await interaction.update({ embeds: [status.wait(`${ACTIONS[action].label} : traitement en cours…`)], components: [] });
     const planned = await plan(client, interaction, days, action, roleId);
+    if (onlyIds) {
+      // Liste affichée à la confirmation, relue : seuls ceux qui sont TOUJOURS inactifs et
+      // expulsables (éligibles à l'instant) sont traités, dans l'ordre affiché.
+      const eligible = new Map(planned.eligibleMembers.map((m) => [m.id, m]));
+      planned.targets = onlyIds.map((id) => eligible.get(id)).filter(Boolean);
+      planned.skipped.done += onlyIds.length - planned.targets.length;
+      planned.eligible = planned.targets.length;
+    }
     const template = inactivityOf(client, guild.id).dmMessage;
     const auditReason = truncate(reason || `Inactif depuis plus de ${days} jours (/activite par ${interaction.user.username})`, 400);
+    const sanctionReason = truncate(reason ? `Inactivité (${days} jours) : ${reason}` : `Inactivité (${days} jours)`, 500);
     const affected = [];
     let failed = 0;
     let stopped = false;
+    let revoked = false;
     for (const [i, member] of planned.targets.entries()) {
       if (activity.stopped) {
         stopped = true;
@@ -419,7 +464,19 @@ async function runBulk(interaction, client, { days, action, roleId = null, reaso
           if (i > 0 && timing.dmDelayMs) await sleep(timing.dmDelayMs);
           await member.send({ embeds: [dmCard(guild, member, template, days)] });
         } else if (action === 'kick') {
+          // L'AntiRaid a pu retirer ses droits à l'auteur (expulsions en masse) : relu sur l'API
+          // (le cache n'est mis à jour qu'à l'événement de la passerelle), on s'arrête alors.
+          if (interaction.user.id !== guild.ownerId) {
+            const actor = await guild.members.fetch({ user: interaction.user.id, force: true }).catch(() => null);
+            if (!actor?.permissions?.has?.(PermissionFlagsBits.KickMembers)) {
+              revoked = true;
+              break;
+            }
+          }
+          const joinedAt = member.joinedTimestamp ?? null;
           await member.kick(auditReason);
+          // Historique des sanctions (kick) et AntiRaid (expulsions en masse), au nom de l'auteur.
+          await client.services.moderation?.recordBulkKick?.(guild, member.user, interaction.user, sanctionReason, { targetJoinedAt: joinedAt }).catch((err) => logger.debug(`Sanction de ${member.id} non enregistrée :`, err?.message));
         }
         affected.push(member.id);
       } catch (err) {
@@ -428,7 +485,7 @@ async function runBulk(interaction, client, { days, action, roleId = null, reaso
       }
     }
     const skipped = planned.skipped.done + planned.skipped.recent + planned.skipped.protected + Math.max(0, planned.eligible - planned.targets.length);
-    const outcome = { done: affected.length, failed, skipped, total: planned.total, stopped };
+    const outcome = { done: affected.length, failed, skipped, total: planned.total, stopped, revoked };
     await interaction.editReply(resultView(days, action, outcome, role)).catch(() => {});
     if (affected.length || failed) {
       await client.services.logging.send(guild.id, 'moderation', logCard({
@@ -458,6 +515,7 @@ module.exports = {
   category: 'moderation',
   cooldown: 3_000,
   timing,
+  kickLists,
   renderDm,
   blockedReason,
   LIMITS,
@@ -502,7 +560,9 @@ module.exports = {
       if (action === 'dm') return interaction.showModal(dmModal(days, inactivityOf(client, interaction.guildId).dmMessage));
       if (action === 'give' || action === 'take') return interaction.update(roleView(client, interaction.guild, days, action));
       await interaction.deferUpdate();
-      return interaction.editReply(confirmView(days, 'kick', await plan(client, interaction, days, 'kick')));
+      const planned = await plan(client, interaction, days, 'kick');
+      const kickToken = planned.targets.length ? rememberKickList(interaction.guildId, interaction.user.id, days, planned.targets.map((m) => m.id)) : null;
+      return interaction.editReply(confirmView(days, 'kick', planned, { kickToken }));
     },
     /** cmd:activite:role:<jours>:<give|take> — rôle choisi : résumé avant confirmation. */
     async role(interaction, client, [rawDays, rawAction]) {
@@ -527,21 +587,24 @@ module.exports = {
       await interaction.deferUpdate();
       await interaction.editReply(confirmView(days, 'dm', await plan(client, interaction, days, 'dm'), { template: message, guild: interaction.guild, sample: interaction.member }));
     },
-    /** cmd:activite:kickform:<jours> — confirmation forte (formulaire). */
-    async kickform(interaction, client, [rawDays]) {
+    /** cmd:activite:kickform:<jours>:<jeton> — confirmation forte (formulaire). */
+    async kickform(interaction, client, [rawDays, token]) {
       assertActionPermissions(interaction, 'kick');
       const days = parseDays(client, interaction.guildId, rawDays);
       assertReady(client, interaction.guildId, days);
-      await interaction.showModal(kickModal(days));
+      kickListFor(token, { guildId: interaction.guildId, actorId: interaction.user.id, days });
+      await interaction.showModal(kickModal(days, token));
     },
-    /** cmd:activite:kick:<jours> — formulaire soumis. */
-    async kick(interaction, client, [rawDays]) {
+    /** cmd:activite:kick:<jours>:<jeton> — formulaire soumis : expulse la liste affichée (relue). */
+    async kick(interaction, client, [rawDays, token]) {
       assertActionPermissions(interaction, 'kick');
       const days = parseDays(client, interaction.guildId, rawDays);
       if ((textField(interaction, 'confirmation') ?? '').toUpperCase() !== KICK_WORD) {
         throw new UserError(`Confirmation incorrecte : tapez exactement \`${KICK_WORD}\`. Aucun membre n'a été expulsé.`);
       }
-      await runBulk(interaction, client, { days, action: 'kick', reason: textField(interaction, 'raison') ?? null });
+      const entry = kickListFor(token, { guildId: interaction.guildId, actorId: interaction.user.id, days });
+      // Jeton consommé au démarrage : une seule exécution par confirmation.
+      await runBulk(interaction, client, { days, action: 'kick', reason: textField(interaction, 'raison') ?? null, onlyIds: entry.ids, onStart: () => kickLists.delete(token) });
     },
     /** cmd:activite:run:<jours>:<give|take|dm>[:<roleId>] — après confirmation. */
     async run(interaction, client, [rawDays, rawAction, roleId]) {

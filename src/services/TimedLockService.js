@@ -92,7 +92,12 @@ class TimedLockService {
    * @param {{ isStopping?: () => boolean, now?: number }} [opts]
    */
   async processDue({ isStopping = () => false, now = Date.now() } = {}) {
-    for (const row of this.repo.findDue(now)) {
+    // Réessais d'une ligne close entre-temps (/unlock, nouveau mode lent…) : oubliés.
+    for (const id of this.retries.keys()) if (!this.repo.byId(id)?.active) this.retries.delete(id);
+    // Lignes en attente d'un nouvel essai écartées de la requête : elles ne monopolisent
+    // jamais les 200 places d'un passage (les autres levées échues passent quand même).
+    const waiting = [...this.retries].filter(([, r]) => r.at > Date.now()).map(([id]) => id);
+    for (const row of this.repo.findDue(now, { exclude: waiting })) {
       if (isStopping()) return;
       if ((this.retries.get(row.id)?.at ?? 0) > Date.now()) continue;
       try {
@@ -144,7 +149,10 @@ class TimedLockService {
 
   async #expireLock(guild, channel, row) {
     const lockdown = this.lockdown;
-    const saved = lockdown?.locks?.get(guild.id, channel.id);
+    if (!lockdown) return;
+    // Verrouillage ou levée globale en cours : l'état des salons bouge, prochain passage.
+    if (lockdown.isBusy?.(guild.id)) return;
+    const saved = lockdown.locks?.get(guild.id, channel.id);
     // Déjà déverrouillé (à la main, hors du bot…) : rien à restaurer.
     if (!saved) {
       this.repo.close(row.id, 'changed');
@@ -159,12 +167,19 @@ class TimedLockService {
       return;
     }
     if (!this.#stillDue(row)) return;
+    let unlocked;
     try {
-      await lockdown.unlockChannel(channel, 'Fin du verrouillage temporaire', { timerReason: 'expired' });
+      // Conditions relues APRÈS les opérations en cours sur ce salon (/lock, /unlock simultanés) :
+      // un verrouillage posé entre-temps a remplacé la levée programmée, il n'est pas levé.
+      unlocked = await lockdown.unlockChannel(channel, 'Fin du verrouillage temporaire', {
+        timerReason: 'expired',
+        onlyIf: () => Boolean(this.#stillDue(row)) && !lockdown.isBusy?.(guild.id) && Boolean(lockdown.locks.get(guild.id, channel.id)) && lockdown.status(guild) === 0,
+      });
     } catch (e) {
       await this.#failed(guild, row, channel, e);
       return;
     }
+    if (unlocked === false) return; // relu : remplacé, levé ou lockdown en cours (prochain passage)
     this.repo.close(row.id, 'expired');
     logger.info(`Verrouillage temporaire #${row.id} levé : guild=${guild.id} salon=${channel.id}`);
     await this.#log(guild, row, channel, `${channel} est déverrouillé : la durée du verrouillage est écoulée.`);
@@ -194,6 +209,7 @@ class TimedLockService {
   async #expireLockdown(guild, row) {
     const lockdown = this.lockdown;
     if (!lockdown) return;
+    if (lockdown.isBusy?.(guild.id)) return; // verrouillage ou levée en cours : prochain passage
     // Déjà levé (à la main, /unlockall…) : rien à faire.
     if (lockdown.status(guild) === 0) {
       this.repo.close(row.id, 'changed');

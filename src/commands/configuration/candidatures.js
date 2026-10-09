@@ -240,6 +240,7 @@ function formView(client, guild, id, notice) {
           form.open ? '🟢 Candidatures **ouvertes**.' : '🔴 Candidatures **fermées** : le bouton « Postuler » est désactivé.',
           form.description ? subtext(truncate(form.description.replace(/\n+/g, ' '), 300)) : null,
           problem ? `\n${ICONS.warning} Pas de réception possible : ${problem}.` : null,
+          !problem && service.reviewWarning(guild, form) ? `\n${ICONS.warning} ${service.reviewWarning(guild, form)}` : null,
           !panelUrl ? subtext('Choisissez le salon du panneau puis cliquez sur « Publier ».') : null,
         ],
         fields: [
@@ -431,7 +432,10 @@ module.exports = {
       const form = service.form(interaction.guildId, id);
       const ch = pickChannel(interaction);
       service.updateForm(interaction.guildId, form.id, { reviewChannelId: ch?.id ?? null });
-      const notice = ch ? sendWarning(interaction.guild, ch) ?? `${ICONS.success} Les candidatures arriveront dans ${ch}.` : `${ICONS.warning} Salon de réception retiré : aucune candidature ne peut plus être reçue.`;
+      const publicWarning = ch ? service.reviewWarning(interaction.guild, { review_channel_id: ch.id }) : null;
+      const notice = ch
+        ? sendWarning(interaction.guild, ch) ?? (publicWarning ? `${ICONS.warning} ${publicWarning}` : `${ICONS.success} Les candidatures arriveront dans ${ch}.`)
+        : `${ICONS.warning} Salon de réception retiré : aucune candidature ne peut plus être reçue.`;
       await interaction.update(formView(client, interaction.guild, form.id, notice));
     },
     /** cmd:candidatures:roles:<id> — rôles donnés à l'acceptation (vérifiés). */
@@ -525,6 +529,7 @@ module.exports = {
       const guild = interaction.guild;
       const app = service.application(guild.id, id);
       service.assertPending(app);
+      service.assertNotApplicant(app, interaction.user.id);
       const roleIds = service.rolesToGrant(guild, app, interaction.member);
       const decided = service.decide(guild, app, { status: 'accepted', reviewer: interaction.user });
       await interaction.deferUpdate();
@@ -544,6 +549,7 @@ module.exports = {
       const service = svc(client);
       const app = service.application(interaction.guildId, id);
       service.assertPending(app);
+      service.assertNotApplicant(app, interaction.user.id);
       await interaction.showModal(rejectModal(app.id));
     },
     /** cmd:candidatures:rejectsubmit:<id> — refus (motif facultatif) + MP ; une seule décision. */
@@ -552,6 +558,7 @@ module.exports = {
       const service = svc(client);
       const guild = interaction.guild;
       const app = service.application(guild.id, id);
+      service.assertNotApplicant(app, interaction.user.id);
       const reason = textField(interaction, 'motif') ?? null;
       if (reason && reason.length > MAX_REASON) throw new UserError(`Motif trop long (${MAX_REASON} caractères maximum).`);
       const decided = service.decide(guild, app, { status: 'rejected', reviewer: interaction.user, reason });
@@ -574,6 +581,7 @@ module.exports = {
       const guild = interaction.guild;
       const app = service.application(guild.id, id);
       service.assertPending(app);
+      service.assertNotApplicant(app, interaction.user.id);
       await interaction.deferReply({ ephemeral: true });
       const { app: updated, channel, kind } = await service.openInterview(guild, app, interaction.member);
       const url = channel.url ?? `https://discord.com/channels/${guild.id}/${channel.id}`;

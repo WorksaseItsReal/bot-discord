@@ -3,7 +3,8 @@
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { field, ICONS, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { parseDuration, discordTimestamp } = require('../../utils/time');
-const { channelCard, channelForButton, channelForCommand } = require('../../services/LockdownService');
+const { channelCard, channelForButton, channelForCommand, normalizeLock, SCOPES } = require('../../services/LockdownService');
+const { UserError } = require('../../core/errors');
 const { timedDuration } = require('../../services/TimedLockService');
 const { requirePermission } = require('../../services/ModerationService');
 
@@ -24,18 +25,32 @@ function render(channel, moderator, ownerId, until = null) {
 }
 
 /**
- * Verrouille puis programme (duree) ou annule (sans duree) la levée automatique :
+ * Verrouille puis programme (duree) ou annule (sans duree) la levée automatique, dans la
+ * même section que le verrouillage (une levée automatique simultanée ne peut pas s'intercaler) :
  * un verrouillage sans durée est permanent, même si une levée était prévue.
- * @returns {number|null} échéance de la levée automatique
+ * @returns {Promise<number|null>} échéance de la levée automatique
  */
 async function lockFor(client, channel, member, tag, durationMs = null) {
-  await client.services.lockdown.lockChannel(channel, member, `Lock par ${tag}`);
+  return client.services.lockdown.lockChannel(channel, member, `Lock par ${tag}`, {
+    timer: durationMs ? { durationMs, moderatorId: member?.id ?? null } : null,
+  });
+}
+
+/**
+ * Le salon est-il déjà verrouillé SANS échéance (/lock permanent, lockdown manuel ou AntiRaid) ?
+ * Un /lock duree le rouvrirait à l'échéance : refusé. Un verrou mémorisé mais rouvert hors du
+ * bot (plus de refus d'écrire) ne compte pas.
+ */
+function lockedWithoutExpiry(client, channel) {
+  const guildId = channel.guildId ?? channel.guild?.id;
+  const saved = client.services.lockdown.locks.get(guildId, channel.id);
+  if (!saved) return false;
+  const everyone = channel.permissionOverwrites?.cache?.get(channel.guild?.roles?.everyone?.id ?? guildId);
+  if (!everyone?.deny?.has?.(PermissionFlagsBits.SendMessages)) return false;
   const timed = client.services.timedLocks;
-  if (!durationMs) {
-    timed?.cancel(channel.guildId ?? channel.guild?.id, 'lock', channel.id, 'replaced');
-    return null;
-  }
-  return timed.schedule({ guildId: channel.guildId ?? channel.guild?.id, channelId: channel.id, kind: 'lock', durationMs, moderatorId: member?.id ?? null });
+  if (timed?.activeFor(guildId, 'lock', channel.id)) return false;
+  const scope = normalizeLock(saved.data).scope ?? SCOPES.lockdown;
+  return !(scope === SCOPES.lockdown && timed?.activeFor(guildId, 'lockdown', guildId));
 }
 
 module.exports = {
@@ -52,6 +67,9 @@ module.exports = {
     const channel = channelForCommand(interaction, 'salon', { overwrites: true });
     const raw = interaction.options.getString('duree');
     const durationMs = raw ? timedDuration(raw, parseDuration) : null;
+    if (durationMs && lockedWithoutExpiry(client, channel)) {
+      throw new UserError(`${channel} est déjà verrouillé **sans échéance** (AntiRaid, lockdown ou /lock) : \`/unlock\` d'abord, ou relancez sans durée.`);
+    }
     const until = await lockFor(client, channel, interaction.member, interaction.user.tag, durationMs);
     await interaction.reply(render(channel, interaction.user, interaction.user.id, until));
   },

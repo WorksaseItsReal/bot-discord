@@ -426,7 +426,7 @@ test('/statistiques membre : messages par jour, salons favoris, rang, vocal', ()
   const { repo, client, guild } = setup();
   seed(repo);
   const user = { id: U.a, username: 'alice', toString: () => `<@${U.a}>`, displayAvatarURL: () => null };
-  const { text, ids } = checkPayload(statistiques.renderMember(client, guild, user, null, { period: 30, now: NOON, canSeeServer: true }), 'membre');
+  const { text, ids } = checkPayload(statistiques.renderMember(client, guild, user, null, { period: 30, now: NOON, canSeeServer: true, manager: true }), 'membre');
   assert.match(text, /Messages par jour/);
   assert.match(text, /Salons favoris/);
   assert.match(text, /2 h 00 min/);
