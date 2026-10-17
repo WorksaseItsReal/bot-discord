@@ -516,3 +516,45 @@ test('R81 /niveaux : « Gérer le serveur » ne fait pas s\'attribuer une récom
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R88 : /invitations voir
+
+test('R88 /invitations voir : les codes d\'un autre membre ne sont jamais affichés publiquement', async () => {
+  const h = await createHarness({ ready: false });
+  const DAY = 86_400_000;
+  const invites = [
+    { type: 0, code: 'StaffSecret42', guild: { id: IDS.guild, name: 'Serveur de test' }, channel: { id: IDS.channels.staff, name: 'staff', type: 0 }, inviter: h.fake.users.get(IDS.users.admin), uses: 3, max_uses: 0, max_age: 0, temporary: false, created_at: new Date(Date.now() - DAY).toISOString() },
+    { type: 0, code: 'MonCodeAMoi', guild: { id: IDS.guild, name: 'Serveur de test' }, channel: { id: IDS.channels.general, name: 'général', type: 0 }, inviter: h.fake.users.get(IDS.users.member), uses: 1, max_uses: 0, max_age: 0, temporary: false, created_at: new Date(Date.now() - DAY).toISOString() },
+  ];
+  h.fake.routes.unshift({ method: 'GET', re: /^\/guilds\/(\d+)\/invites$/, keys: ['guild'], handler: () => JSON.parse(JSON.stringify(invites)) });
+  h.configureAll();
+  try {
+    await h.emitReady();
+    const activeField = (rec) => h.messagesOf(rec)[0].embeds[0].fields.find((f) => f.name.includes('Invitations actives'));
+    const ephemeral = (rec) => Boolean(h.messagesOf(rec)[0].flags & 64);
+
+    // Membre ordinaire qui regarde l'admin : carte publique, sans code.
+    const other = await h.slash('invitations', sub('voir', [opt('membre', 6, IDS.users.admin)]), { as: 'member' });
+    assert.ok(!/StaffSecret42/.test(activeField(other).value), `code d'un autre membre affiché : ${activeField(other).value}`);
+    assert.match(activeField(other).name, /\(1\)/, 'nombre d\'invitations actives perdu');
+
+    // Soi-même : codes visibles, en éphémère.
+    const mine = await h.slash('invitations', sub('voir'), { as: 'member' });
+    assert.match(activeField(mine).value, /MonCodeAMoi/);
+    assert.ok(ephemeral(mine), 'ses propres codes affichés publiquement');
+
+    // « Gérer le serveur » : codes d'un autre membre, en éphémère.
+    const staff = await h.slash('invitations', sub('voir', [opt('membre', 6, IDS.users.member)]), { as: 'admin' });
+    assert.match(activeField(staff).value, /MonCodeAMoi/);
+    assert.ok(ephemeral(staff));
+
+    // Bouton « Mes invitations » sur le classement public : codes masqués (message public).
+    const board = await h.slash('invitations', sub('classement'), { as: 'target' });
+    const click = await h.click(h.messagesOf(board)[0], `cmd:invitations:member:${IDS.users.target}`, { as: 'member' });
+    const updated = h.message(click.componentMessageId) ?? h.messagesOf(click)[0];
+    assert.ok(!/MonCodeAMoi/.test(JSON.stringify(updated.embeds)), 'codes affichés dans le classement public');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
