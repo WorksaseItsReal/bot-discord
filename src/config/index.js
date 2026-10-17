@@ -34,6 +34,11 @@ const config = {
   clientId: process.env.CLIENT_ID || '',
   devGuildId: process.env.DEV_GUILD_ID || '',
   ownerIds: parseList(process.env.OWNER_IDS),
+  /**
+   * Secur : les propriétaires du bot (OWNER_IDS) ont le niveau « propriétaire-bot » (exemptés,
+   * gestion des owners de sécurité) seulement si SECUR_TRUST_BOT_OWNERS=on. Coupé par défaut.
+   */
+  securTrustBotOwners: /^(on|true|1|oui|yes)$/i.test(String(process.env.SECUR_TRUST_BOT_OWNERS ?? '').trim()),
   databasePath: process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'gadget.sqlite'),
   logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
   /** `json` : une ligne JSON par entrée (agrégateurs de logs) ; sinon texte coloré. */

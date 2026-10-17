@@ -110,7 +110,9 @@ test('R30 : catégorie Sécurité mise en pause dans /logs → la vague d\'arriv
     const mark = h.fake.messageLog.length;
     for (let i = 0; i < 3; i += 1) await h.memberJoin(h.addUser(`Vague${i}`));
     await h.settle();
-    assert.equal(botMessages(h, mark, titled(/Vague d'arrivées/)).filter((m) => !h.fake.dms.has(m.channel_id)).length, 0, 'pause ignorée');
+    // SEC1 : une alerte n'est pas un log — publiée hors filtres dans le salon d'alerte (une fois),
+    // et le propriétaire est prévenu en MP puisque les logs Sécurité sont en pause.
+    assert.equal(botMessages(h, mark, titled(/Vague d'arrivées/)).filter((m) => !h.fake.dms.has(m.channel_id)).length, 1, 'alerte de vague filtrée par la pause des logs');
     const dms = dmsTo(h, mark, IDS.users.owner);
     assert.equal(dms.length, 1, 'alerte de vague coupée par la pause des logs');
     assert.match(dms[0].embeds[0].title, /Vague d'arrivées/);

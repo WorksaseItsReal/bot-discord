@@ -948,6 +948,55 @@ const migrations = [
       ALTER TABLE stats_guilds ADD COLUMN gap_end INTEGER;
     `,
   },
+  {
+    id: 28,
+    name: 'secur_incidents_and_grants',
+    up: `
+      -- Secur (anti-nuke) : UNE ligne par incident (auteur + fenêtre de 60 s), quelle que soit la
+      -- quantité d'actions. removed_roles : rôles retirés par le derank (JSON), rendus par
+      -- « Rendre les rôles » (verrou : restored_at IS NULL). Purgés après 90 jours.
+      CREATE TABLE IF NOT EXISTS security_incidents (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id          TEXT    NOT NULL,
+        executor_id       TEXT    NOT NULL,
+        modules           TEXT    NOT NULL,
+        actions           INTEGER NOT NULL DEFAULT 1,
+        punishment        TEXT    NOT NULL,
+        outcome           TEXT    NOT NULL,
+        removed_roles     TEXT,
+        undone            INTEGER NOT NULL DEFAULT 0,
+        undo_failed       INTEGER NOT NULL DEFAULT 0,
+        alert_channel_id  TEXT,
+        alert_message_id  TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        restored_by       TEXT,
+        restored_at       INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_security_incidents_guild ON security_incidents (guild_id, created_at DESC);
+      -- Accès de whitelist en attente d'approbation (kind : role = rôle whitelisté donné à un membre,
+      -- user = membre ajouté à whitelist.users, wlrole = rôle ajouté à whitelist.roles). Tant qu'il
+      -- n'est ni approuvé ni révoqué (24 h au plus), l'accès n'exempte pas. Purgés après 30 jours.
+      -- (Pas de contrainte CHECK sur kind : validée par SecurityGrantRepository.)
+      CREATE TABLE IF NOT EXISTS security_grants (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id         TEXT    NOT NULL,
+        kind             TEXT    NOT NULL,
+        subject_id       TEXT    NOT NULL,
+        role_id          TEXT,
+        granted_by       TEXT    NOT NULL,
+        granted_at       INTEGER NOT NULL,
+        approved_by      TEXT,
+        approved_at      INTEGER,
+        revoked_by       TEXT,
+        revoked_at       INTEGER,
+        card_channel_id  TEXT,
+        card_message_id  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_security_grants_subject ON security_grants (guild_id, subject_id);
+      CREATE INDEX IF NOT EXISTS idx_security_grants_granted ON security_grants (guild_id, granted_at);
+    `,
+  },
 ];
 
 module.exports = { migrations };

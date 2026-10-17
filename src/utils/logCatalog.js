@@ -62,8 +62,20 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '🛡️',
     label: 'Sécurité',
     channel: 'sécurité',
-    description: 'Alertes AntiRaid, verrouillages du serveur et levées automatiques.',
-    events: { antiraid: 'Alertes AntiRaid', lockdown: 'Verrouillages / déverrouillages', timedLift: 'Levées automatiques (lock, mode lent)' },
+    description: 'Alertes AntiRaid et Secur (anti-nuke), réglages critiques, accès de whitelist, verrouillages du serveur et levées automatiques.',
+    // Une ligne par événement (catégorie possédée par Secur ; les événements de la vague 2 sont pré-déclarés).
+    events: {
+      antiraid: 'Alertes AntiRaid',
+      lockdown: 'Verrouillages / déverrouillages',
+      timedLift: 'Levées automatiques (lock, mode lent)',
+      secur: 'Secur : incidents et tentatives bloquées',
+      securConfig: 'Secur : réglages de sécurité modifiés',
+      securGrant: 'Secur : accès de whitelist en attente',
+      blacklist: 'Liste noire (ajouts, retraits, refus)',
+      incident: 'Mesures d\'incident (invitations, MP)',
+      permissions: 'Permissions déléguées modifiées',
+      permissionUse: 'Utilisations de permissions déléguées',
+    },
   },
   automod: {
     emoji: '🤖',

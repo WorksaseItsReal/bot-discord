@@ -48,6 +48,8 @@ const { TicketRatingRepository } = require('../database/repositories/TicketRatin
 const { FeedRepository } = require('../database/repositories/FeedRepository');
 const { AutoThreadCounterRepository } = require('../database/repositories/AutoThreadCounterRepository');
 const { GuildPurgeRepository } = require('../database/repositories/GuildPurgeRepository');
+const { SecurityIncidentRepository } = require('../database/repositories/SecurityIncidentRepository');
+const { SecurityGrantRepository } = require('../database/repositories/SecurityGrantRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -55,6 +57,7 @@ const { ModerationService } = require('../services/ModerationService');
 const { SchedulerService } = require('../services/SchedulerService');
 const { AutoModService } = require('../services/AutoModService');
 const { AntiRaidService } = require('../services/AntiRaidService');
+const { SecurService } = require('../services/SecurService');
 const { LockdownService } = require('../services/LockdownService');
 const { TicketService } = require('../services/TicketService');
 const { GiveawayService } = require('../services/GiveawayService');
@@ -169,6 +172,9 @@ class GadgetClient extends Client {
       autoThreadCounters: new AutoThreadCounterRepository(db),
       // Purge des serveurs quittés (scheduler) : toutes les tables à guild_id et leurs filles.
       guildPurge: new GuildPurgeRepository(db),
+      // Secur (anti-nuke) : incidents et accès de whitelist en attente.
+      securityIncidents: new SecurityIncidentRepository(db),
+      securityGrants: new SecurityGrantRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -176,7 +182,9 @@ class GadgetClient extends Client {
     // L'AntiRaid est injecté dans la modération : les bans faits via le bot alimentent
     // la détection des bannissements en masse (l'audit log les attribue au bot).
     const antiraid = new AntiRaidService({ client: this, config: configService, logging });
-    const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging, antiraid });
+    // Secur (anti-nuke, /secur) : moteur commun des modules, créé juste après l'AntiRaid.
+    const secur = new SecurService({ client: this, config: configService, logging, antiraid, incidents: this.repositories.securityIncidents, grants: this.repositories.securityGrants });
+    const moderation = new ModerationService({ sanctions: this.repositories.sanctions, config: configService, logging, antiraid, secur });
     const strikes = new StrikeService(this.repositories.strikes, configService);
     // Notation des tickets : prévenue par TicketService à chaque fermeture.
     const ticketRatings = new TicketRatingService({ client: this, ratings: this.repositories.ticketRatings, config: configService, logging });
@@ -189,6 +197,7 @@ class GadgetClient extends Client {
       scheduler: new SchedulerService({ client: this, sanctions: this.repositories.sanctions, reminders: this.repositories.reminders }),
       automod: new AutoModService({ config: configService, logging, moderation, strikes, events: this.repositories.automodEvents, quarantines: this.repositories.automodQuarantines }),
       antiraid,
+      secur,
       lockdown: new LockdownService({ locks: this.repositories.locks, logging, timed: this.repositories.timedActions }),
       tickets,
       ticketRatings,
@@ -348,6 +357,8 @@ class GadgetClient extends Client {
       ['Arrêt du suivi des niveaux', () => s.levels?.stop()],
       ['Arrêt des compteurs de statistiques', () => s.counters?.stop()],
       ['Arrêt des récapitulatifs AntiRaid', () => s.antiraid?.stop?.()],
+      // Secur : files d'annulation arrêtées (tâche en cours attendue 2 s au plus).
+      ['Arrêt de Secur', () => s.secur?.stop?.()],
       ['Arrêt des réponses automatiques', () => s.autoResponses?.stop()],
       ['Arrêt des messages épinglés', () => s.sticky?.stop()],
       ['Arrêt du starboard', () => s.starboard?.stop()],

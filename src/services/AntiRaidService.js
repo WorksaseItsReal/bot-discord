@@ -1,9 +1,10 @@
 'use strict';
 
-const { PermissionFlagsBits, escapeMarkdown } = require('discord.js');
+const { PermissionFlagsBits, escapeMarkdown, ButtonBuilder } = require('discord.js');
 const { SlidingWindow } = require('../utils/rate');
 const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, fitEmbeds } = require('../utils/ui');
 const { createLogger } = require('../core/logger');
+const { SecurNotifier } = require('./secur/notify');
 
 const logger = createLogger('antiraid');
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -64,9 +65,19 @@ const DANGEROUS_PERMISSIONS = Object.freeze([
 ]);
 
 const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements', kick: 'Expulsions' };
+/** Bot auteur arrivé depuis moins de 7 jours : expulsé au lieu du retrait des rôles (secur.botExecutor). */
+const RECENT_BOT_MS = 7 * DAY_MS;
+const BOT_EXECUTOR_POLICIES = new Set(['recent', 'always', 'never']);
+/** Hook de vague (services.raidResponse.onWave, SEC3) : attendu 2 s au plus. */
+const ON_WAVE_TIMEOUT_MS = 2_000;
 /** Sanctions de membres : expulser ou bannir un arrivant récent (raider) n'est pas compté. */
 const MEMBER_SANCTIONS = new Set(['ban', 'kick']);
-const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', none: 'Aucune' };
+const EXECUTOR_LABELS = { strip: 'Rôles retirés', ban: 'Banni', kick: 'Expulsé', none: 'Aucune' };
+
+/** Bouton « Expulser ce bot » d'une alerte (src/components/secur.js, permission « Expulser »). */
+function kickBotButton(botId) {
+  return new ButtonBuilder().setCustomId(`secur:kickbot:${botId}`).setLabel('Expulser ce bot').setEmoji(ICONS.kick).setStyle(ButtonStyle.Danger);
+}
 
 /** Bouton « Réessayer le lockdown » joint aux alertes dont le lockdown automatique a échoué. */
 function retryLockdownButton() {
@@ -328,12 +339,19 @@ class AntiRaidService {
   /**
    * Utilisateur ou rôle whitelisté. Un rôle géré (Booster, rôle de bot) n'immunise jamais :
    * il s'obtient sans contrôle du serveur (refusé par /whitelist et le tableau de bord).
+   * `excludePending` (actions destructrices, pré-contrôle) : un accès de whitelist donné par un
+   * non-owner et pas encore approuvé (Secur, 24 h au plus) n'exempte pas. Les vagues d'arrivées
+   * gardent l'exemption immédiate.
    */
-  isWhitelisted(guildId, userId, roleIds = []) {
+  isWhitelisted(guildId, userId, roleIds = [], { excludePending = false } = {}) {
     const wl = this.config.get(guildId).whitelist || { users: [], roles: [] };
-    if (wl.users?.includes(userId)) return true;
     const roles = this.client.guilds?.cache?.get?.(guildId)?.roles?.cache;
-    return roleIds.some((r) => wl.roles?.includes(r) && !roles?.get?.(r)?.managed);
+    const byUser = Boolean(wl.users?.includes(userId));
+    const byRoles = roleIds.filter((r) => wl.roles?.includes(r) && !roles?.get?.(r)?.managed);
+    if (!byUser && !byRoles.length) return false;
+    const pending = excludePending ? this.client.services?.secur?.pendingExemptions?.(guildId, userId) : null;
+    if (!pending) return true;
+    return (byUser && !pending.user) || byRoles.some((r) => !pending.roles.has(r));
   }
 
   /** Enregistre une arrivée et renvoie les arrivants encore dans la fenêtre (le plus ancien d'abord). */
@@ -346,6 +364,29 @@ class AntiRaidService {
     w.entries = w.entries.filter((e) => e.at > now - ms && e.id !== memberId);
     w.entries.push({ id: memberId, at: now });
     return w.entries;
+  }
+
+  /** Hook de vague (services.raidResponse.onWave) : son `{ text }` devient le champ « Invitations ». */
+  async #onWave(guild, count) {
+    const raidResponse = this.client.services?.raidResponse;
+    if (typeof raidResponse?.onWave !== 'function') return null;
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve(raidResponse.onWave(guild, { count })).catch((e) => {
+          logger.debug('onWave', e?.message);
+          return null;
+        }),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(null), ON_WAVE_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   #window(map, key, ms) {
@@ -384,9 +425,11 @@ class AntiRaidService {
       for (const e of waveEntries) this.#rememberJoin(guild.id, e.id, waveAt);
     }
 
-    // Anti-bot (bot ajouté hors whitelist) et âge de compte minimal.
+    // Anti-bot (bot ajouté hors whitelist) et âge de compte minimal. Module Secur `bot` actif :
+    // l'ajout du bot est traité par le module (audit BotAdd, auteur de l'invitation compris).
+    const secur = this.client.services?.secur;
     let reason = null;
-    if (cfg.antiBot && member.user.bot) reason = 'AntiRaid: bot non autorisé';
+    if (cfg.antiBot && member.user.bot && !secur?.covers?.(guild.id, 'bot')) reason = 'AntiRaid: bot non autorisé';
     else if (cfg.minAccountAgeDays > 0) {
       const ageDays = (Date.now() - member.user.createdTimestamp) / DAY_MS;
       if (ageDays < cfg.minAccountAgeDays) reason = `AntiRaid: compte trop récent (${ageDays.toFixed(1)}j)`;
@@ -395,6 +438,7 @@ class AntiRaidService {
     if (reason) {
       const res = await this.#punishNewMember(member, reason, cfg);
       punished = res.ok;
+      if (res.ok && member.user.bot) secur?.noteBotRemoved?.(guild, member.id);
       if (res.ok) entry.done = true; // déjà sanctionné : la vague ne le sanctionne pas une 2e fois
       await this.#reportNewMember(member, reason, res, { inWave: Boolean(waveEntries) });
     }
@@ -404,6 +448,8 @@ class AntiRaidService {
     // déclenchement (le raid continue pendant le cooldown) ; seules l'alerte et
     // le lockdown sont limités à un par cooldown.
     const joinerIds = waveEntries.filter((e) => !e.done).map((e) => e.id);
+    // Riposte de vague (services.raidResponse, SEC3) : attendue 2 s au plus, avant les sanctions.
+    const response = await this.#onWave(guild, count);
     const wave = cfg.action === 'kick' || cfg.action === 'ban' ? await this.#punishWave(guild, joinerIds, cfg.action) : null;
     const now = Date.now();
     const cooling = now - (this.joinAlertAt.get(guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS;
@@ -425,9 +471,11 @@ class AntiRaidService {
           wave
             ? field(cfg.action === 'ban' ? ICONS.ban : ICONS.kick, cfg.action === 'ban' ? 'Bannis' : 'Expulsés', waveSummary(wave))
             : field(ICONS.lock, 'Lockdown', lockdownText(lock)),
+          response?.text ? wide(ICONS.link, 'Invitations', String(response.text).slice(0, 1_000)) : null,
           ...(counts ? digestFields(counts) : []),
         ],
         buttons: lock && !lock.count ? [retryLockdownButton()] : locked ? [liftLockdownButton()] : [],
+        ping: true, // raid ping (secur.raidPingRoleId) dans le salon d'alerte, une fois par minute au plus
         fallback: true,
       });
     } else if (wave?.punished.length) {
@@ -533,48 +581,83 @@ class AntiRaidService {
     return { punished, skipped, capped };
   }
 
-  /**
-   * Action destructrice détectée via audit log (suppression salon/rôle, ban…).
-   * Alimentée par l'événement `guildAuditLogEntryCreate` (une entrée = une action,
-   * pas de double comptage ni de fetch des audit logs par événement).
-   * Aussi appelée par ModerationService après un ban ou un kick fait via le bot
-   * (l'audit log l'attribue au bot) avec l'identifiant du modérateur.
-   * @param {import('discord.js').Guild} guild
-   * @param {string} executorId
-   * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
-   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban/kick (exemption des arrivants
-   *   récents) ou salon supprimé (exemption des salons créés par le même auteur)
-   */
-  async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null } = {}) {
-    const cfg = this.config.get(guild.id).antiraid;
-    if (!cfg?.enabled || !executorId) return;
-    if (executorId === this.client.user?.id) return;
-    if (executorId === guild.ownerId) return;
-    // Supprimer un salon que l'on a soi-même créé (ticket ou vocal temporaire d'un bot tiers) non plus.
-    if (type === 'channelDelete' && this.#ownChannel(guild.id, targetId, executorId)) return;
-    // Bannir ou expulser un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
-    if (MEMBER_SANCTIONS.has(type) && targetId) {
-      const joinedAt = targetJoinedAt ?? guild.members?.cache?.get?.(targetId)?.joinedTimestamp ?? null;
-      if (this.isRecentJoiner(guild.id, targetId, joinedAt)) return;
-    }
-    const executor = await guild.members.fetch(executorId).catch(() => null);
-    if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [])) return;
-
+  /** Seuil historique d'un type d'action destructrice (0 : désactivé). */
+  static #threshold(cfg, type) {
     const thresholds = {
       channelDelete: cfg.channelDeleteThreshold,
       roleDelete: cfg.roleDeleteThreshold,
       ban: cfg.banThreshold,
       kick: cfg.kickThreshold, // 0 / absent (anciennes configs) : désactivé
     };
-    const limit = thresholds[type];
+    return Number(thresholds[type]) || 0;
+  }
+
+  /** Ban ou kick d'un arrivant récent (raider) : jamais destructeur. */
+  #raiderTarget(guild, type, targetId, targetJoinedAt) {
+    if (!MEMBER_SANCTIONS.has(type) || !targetId) return false;
+    const joinedAt = targetJoinedAt ?? guild.members?.cache?.get?.(targetId)?.joinedTimestamp ?? null;
+    return this.isRecentJoiner(guild.id, targetId, joinedAt);
+  }
+
+  /**
+   * Pré-contrôle (Secur.assertAllowed, chemin historique) : `count` actions de plus, ajoutées à la
+   * fenêtre courante, atteindraient-elles le seuil ? La whitelist est vérifiée par l'appelant.
+   * @returns {number} le seuil atteint, ou 0
+   */
+  wouldTrigger(guild, userId, type, count = 1, { targetId = null, targetJoinedAt = null } = {}) {
+    const cfg = this.config.get(guild.id).antiraid;
+    if (!cfg?.enabled || !userId || userId === this.client.user?.id || userId === guild.ownerId) return 0;
+    if (this.client.services?.secur?.covers?.(guild.id, type)) return 0;
+    if (this.#raiderTarget(guild, type, targetId, targetJoinedAt)) return 0;
+    const limit = AntiRaidService.#threshold(cfg, type);
+    if (!limit) return 0;
+    const w = this.destructiveWindows.get(`${guild.id}:${userId}:${type}`);
+    const current = w && w.windowMs === cfg.destructiveWindowSeconds * 1000 ? w.count() : 0;
+    return current + Math.max(1, count) >= limit ? limit : 0;
+  }
+
+  /**
+   * Action destructrice détectée via audit log (suppression salon/rôle, ban…).
+   * Alimentée par l'événement `guildAuditLogEntryCreate` (une entrée = une action,
+   * pas de double comptage ni de fetch des audit logs par événement).
+   * Aussi appelée par ModerationService après un ban ou un kick fait via le bot
+   * (l'audit log l'attribue au bot) avec l'identifiant du modérateur.
+   * La fenêtre est calculée sur `at` : l'HORODATAGE de l'entrée d'audit (snowflake), jamais
+   * l'instant de réception (des entrées rejouées en retard ne s'additionnent pas). Un prune
+   * (audit 21) compte `count` expulsions. Un module Secur actif sur ce type prend le relais.
+   * @param {import('discord.js').Guild} guild
+   * @param {string} executorId
+   * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
+   * @param {{ targetId?: string|null, targetJoinedAt?: number|null, at?: number, count?: number }} [opts] cible du ban/kick
+   *   (exemption des arrivants récents) ou salon supprimé (exemption des salons créés par le même auteur)
+   */
+  async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null, at = Date.now(), count = 1 } = {}) {
+    const cfg = this.config.get(guild.id).antiraid;
+    if (!cfg?.enabled || !executorId) return;
+    if (executorId === this.client.user?.id) return;
+    if (executorId === guild.ownerId) return;
+    if (this.client.services?.secur?.covers?.(guild.id, type)) return;
+    // Supprimer un salon que l'on a soi-même créé (ticket ou vocal temporaire d'un bot tiers) non plus.
+    if (type === 'channelDelete' && this.#ownChannel(guild.id, targetId, executorId)) return;
+    // Bannir ou expulser un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
+    if (this.#raiderTarget(guild, type, targetId, targetJoinedAt)) return;
+    const executor = await guild.members.fetch(executorId).catch(() => null);
+    // Accès de whitelist en attente (donné par un non-owner, pas encore approuvé) : n'exempte pas.
+    if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [], { excludePending: true })) return;
+
+    const limit = AntiRaidService.#threshold(cfg, type);
     if (!limit) return;
 
     const now = Date.now();
     if (now - this.lastWindowPrune > WINDOW_PRUNE_INTERVAL_MS) this.pruneWindows(now);
     const key = `${guild.id}:${executorId}:${type}`;
     const w = this.#window(this.destructiveWindows, key, cfg.destructiveWindowSeconds * 1000);
-    const count = w.hit();
-    if (count < limit) return;
+    const n = Math.max(1, Math.floor(Number(count)) || 1);
+    const stamp = Number.isFinite(at) ? Math.min(at, now) : now;
+    for (let i = 0; i < Math.min(n, limit); i += 1) w.times.push(stamp);
+    const inWindow = burstCount(w.times, stamp, w.windowMs);
+    if (inWindow < limit) return;
+    const total = inWindow + Math.max(0, n - limit);
 
     w.reset();
     const outcome = await this.#punishExecutor(guild, executorId, cfg, type);
@@ -582,15 +665,47 @@ class AntiRaidService {
       tone: 'danger',
       icon: '🚨',
       title: 'Activité destructrice anormale',
-      description: `<@${executorId}> a effectué **${count}** actions destructrices en **${cfg.destructiveWindowSeconds} s**.`,
+      description: `<@${executorId}> a effectué **${total}** actions destructrices en **${cfg.destructiveWindowSeconds} s**.`,
       thumbnail: executor?.user?.displayAvatarURL?.(),
       fields: [
         field(ICONS.user, 'Auteur', executor ? userLine(executor.user) : `<@${executorId}>`),
-        field('💣', 'Type', `${DESTRUCTIVE_LABELS[type] ?? type} ×**${count}**`),
-        field(ICONS.shield, 'Sanction', outcome.ok ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)'),
+        field('💣', 'Type', `${DESTRUCTIVE_LABELS[type] ?? type} ×**${total}**`),
+        field(ICONS.shield, 'Sanction', outcome.label ?? (outcome.ok ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)')),
         outcome.note ? wide(ICONS.warning, 'Attention', outcome.note) : null,
       ],
       footer: `ID : ${executorId}`,
+      buttons: outcome.buttons ?? [],
+      ping: true,
+      fallback: true,
+    });
+  }
+
+  /**
+   * Tentatives répétées bloquées par le pré-contrôle (Secur.assertAllowed, 3 en 10 min) : l'auteur
+   * insiste sur le seuil via le bot. Aucune action n'a eu lieu, mais il est sanctionné et l'alerte
+   * part, comme s'il avait atteint le seuil.
+   */
+  async handleBlockedAttempts(guild, executorId, type, attempts) {
+    const cfg = this.config.get(guild.id).antiraid;
+    if (!cfg?.enabled || !executorId || executorId === this.client.user?.id || executorId === guild.ownerId) return;
+    const executor = await guild.members.fetch(executorId).catch(() => null);
+    if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [], { excludePending: true })) return;
+    const outcome = await this.#punishExecutor(guild, executorId, cfg, type);
+    await this.alert(guild, {
+      tone: 'danger',
+      icon: '🚨',
+      title: 'Tentatives destructrices répétées',
+      description: `<@${executorId}> a tenté **${attempts}** fois de dépasser le seuil via le bot en 10 minutes : chaque action a été refusée.`,
+      thumbnail: executor?.user?.displayAvatarURL?.(),
+      fields: [
+        field(ICONS.user, 'Auteur', executor ? userLine(executor.user) : `<@${executorId}>`),
+        field('💣', 'Type', `${DESTRUCTIVE_LABELS[type] ?? type} (refusées ×**${attempts}**)`),
+        field(ICONS.shield, 'Sanction', outcome.label ?? (outcome.ok ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)')),
+        outcome.note ? wide(ICONS.warning, 'Attention', outcome.note) : null,
+      ],
+      footer: `ID : ${executorId}`,
+      buttons: outcome.buttons ?? [],
+      ping: true,
       fallback: true,
     });
   }
@@ -618,10 +733,86 @@ class AntiRaidService {
   }
 
   /**
+   * Retire les rôles d'un membre en UN SEUL PATCH (exception volontaire à applyRoles : un nukeur ne
+   * doit pas garder ses permissions le temps de N requêtes). Rôles gérés ou au-dessus du bot
+   * conservés. Partagé avec Secur (derank).
+   * @param {import('discord.js').GuildMember} member
+   * @param {string} reason
+   * @param {{ dangerous?: bigint[], guild?: import('discord.js').Guild }} [opts] permissions qui ne doivent plus subsister
+   * @returns {Promise<{ ok: boolean, removed: string[], dangerousLeft: boolean, note?: string }>}
+   *   ok : au moins un rôle retiré ET plus aucune permission dangereuse (rôles restants, @everyone,
+   *   surcharges de salon propres au membre)
+   */
+  async stripMember(member, reason, { dangerous = DANGEROUS_PERMISSIONS, guild = member.guild } = {}) {
+    const roles = member.roles.cache.filter((r) => r.id !== guild.id);
+    const removable = roles.filter((r) => r.editable && !r.managed);
+    const remaining = [...roles.filter((r) => !removable.has(r.id)).values()];
+    const everyone = guild.roles?.everyone ?? guild.roles?.cache?.get?.(guild.id);
+    if (everyone) remaining.push(everyone);
+    const residual = () => {
+      const viaRoles = remaining.filter((r) => r.permissions?.any?.(dangerous));
+      // Surcharges de salon propres au membre : le retrait des rôles ne les touche pas.
+      const overwrites = [...(guild.channels?.cache?.values?.() ?? [])]
+        .filter((c) => c.permissionOverwrites?.cache?.get?.(member.id)?.allow?.any?.(dangerous));
+      return [
+        ...viaRoles.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)),
+        ...overwrites.slice(0, 5).map((c) => `la surcharge de ${c}`),
+        overwrites.length > 5 ? `${overwrites.length - 5} autre(s) salon(s)` : null,
+      ].filter(Boolean);
+    };
+    if (!removable.size) {
+      const via = residual();
+      return { ok: false, removed: [], dangerousLeft: via.length > 0, note: 'Aucun rôle n\'a pu être retiré (rôles trop élevés ou gérés).' };
+    }
+    try {
+      await member.roles.remove(removable, reason);
+    } catch (e) {
+      logger.debug('stripMember', e?.message);
+      return { ok: false, removed: [], dangerousLeft: true, note: 'Le retrait des rôles a échoué (permission ou hiérarchie).' };
+    }
+    const via = residual();
+    if (via.length) return { ok: false, removed: [...removable.keys()], dangerousLeft: true, note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${via.join(', ')}.` };
+    return { ok: true, removed: [...removable.keys()], dangerousLeft: false };
+  }
+
+  /**
+   * Exécuteur BOT avec la sanction « retrait des rôles » : son rôle géré ne peut pas être retiré,
+   * d'où secur.botExecutor (actif même Secur coupé) : always → expulsion ; recent (défaut) →
+   * expulsion s'il est arrivé il y a moins de 7 jours, sinon retrait des rôles possibles puis
+   * carte avec bouton « Expulser ce bot » et ping ; never → carte seule. Le bannissement reste
+   * inchangé (il neutralise un bot). @returns {Promise<object|null>} null : traitement ordinaire
+   */
+  async #punishBotExecutor(guild, member, cfg, reason) {
+    if (cfg.punishExecutor !== 'strip') return null;
+    const secur = this.config.get(guild.id).secur ?? {};
+    const policy = BOT_EXECUTOR_POLICIES.has(secur.botExecutor) ? secur.botExecutor : 'recent';
+    const recent = Number.isFinite(member.joinedTimestamp) && Date.now() - member.joinedTimestamp < RECENT_BOT_MS;
+    if (policy === 'always' || (policy === 'recent' && recent)) {
+      try {
+        this.client.services?.welcome?.silence?.(guild.id, member.id);
+        await member.kick(reason);
+        return { ok: true, label: 'Bot expulsé', note: recent ? 'Bot arrivé il y a moins de 7 jours : expulsé (le retrait des rôles ne neutralise pas un rôle géré).' : null };
+      } catch (e) {
+        this.client.services?.welcome?.unsilence?.(guild.id, member.id);
+        logger.debug('punishBotExecutor', e?.message);
+        return { ok: false, label: 'Bot non neutralisé automatiquement', note: `L'expulsion du bot a échoué (${String(e?.message ?? e).slice(0, 120)}).`, buttons: [kickBotButton(member.id)] };
+      }
+    }
+    const res = await this.stripMember(member, reason, { guild });
+    if (res.ok) return { ok: true };
+    return {
+      ok: false,
+      label: 'Bot non neutralisé automatiquement',
+      note: `${policy === 'never' ? 'Bot auteur jamais expulsé automatiquement (réglage « bot auteur »).' : 'Bot arrivé il y a plus de 7 jours : non expulsé automatiquement.'} ${res.removed.length ? res.note : 'Son rôle géré lui laisse ses permissions.'} Vérifiez-le et expulsez-le si besoin.`,
+      buttons: [kickBotButton(member.id)],
+    };
+  }
+
+  /**
    * Sanctionne l'auteur d'actions destructrices.
    * « strip » n'est un succès que si au moins un rôle a été retiré ET qu'aucun rôle
    * restant (non modifiable par le bot, ou @everyone) ne confère de permission dangereuse.
-   * @returns {Promise<{ ok: boolean, note?: string }>}
+   * @returns {Promise<{ ok: boolean, note?: string, label?: string, buttons?: object[] }>}
    */
   async #punishExecutor(guild, executorId, cfg, type) {
     const member = await guild.members.fetch(executorId).catch(() => null);
@@ -640,6 +831,10 @@ class AntiRaidService {
         return { ok: false, note: 'L\'auteur a quitté le serveur et son bannissement par identifiant a échoué : il peut revenir.' };
       }
     }
+    if (member.user?.bot) {
+      const bot = await this.#punishBotExecutor(guild, member, cfg, reason);
+      if (bot) return bot;
+    }
     if (cfg.punishExecutor === 'ban') {
       try {
         this.#markBan(guild.id, member.id);
@@ -652,31 +847,8 @@ class AntiRaidService {
       }
     }
     if (cfg.punishExecutor === 'strip') {
-      const roles = member.roles.cache.filter((r) => r.id !== guild.id);
-      const removable = roles.filter((r) => r.editable);
-      const remaining = [...roles.filter((r) => !r.editable).values()];
-      const everyone = guild.roles?.everyone ?? guild.roles?.cache?.get?.(guild.id);
-      if (everyone) remaining.push(everyone);
-      if (!removable.size) return { ok: false, note: 'Aucun rôle n\'a pu être retiré (rôles trop élevés ou gérés).' };
-      try {
-        await member.roles.remove(removable, reason);
-      } catch (e) {
-        logger.debug('punishExecutor', e?.message);
-        return { ok: false, note: 'Le retrait des rôles a échoué (permission ou hiérarchie).' };
-      }
-      const dangerous = remaining.filter((r) => r.permissions?.any?.(DANGEROUS_PERMISSIONS));
-      // Surcharges de salon propres à l'auteur : le retrait des rôles ne les touche pas.
-      const overwrites = [...(guild.channels?.cache?.values?.() ?? [])]
-        .filter((c) => c.permissionOverwrites?.cache?.get?.(member.id)?.allow?.any?.(DANGEROUS_PERMISSIONS));
-      if (dangerous.length || overwrites.length) {
-        const via = [
-          ...dangerous.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)),
-          ...overwrites.slice(0, 5).map((c) => `la surcharge de ${c}`),
-          overwrites.length > 5 ? `${overwrites.length - 5} autre(s) salon(s)` : null,
-        ].filter(Boolean);
-        return { ok: false, note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${via.join(', ')}.` };
-      }
-      return { ok: true };
+      const res = await this.stripMember(member, reason, { guild });
+      return res.ok ? { ok: true } : { ok: false, note: res.note };
     }
     return { ok: false };
   }
@@ -719,8 +891,6 @@ class AntiRaidService {
     const a = typeof alert === 'string' ? { description: alert } : alert;
     // Carte récapitulative : pas un nouveau déclenchement (le tableau de bord garde la vague).
     if (a.trigger !== false) this.lastTrigger.set(guild.id, { at: Date.now(), title: a.title ?? 'Alerte AntiRaid', description: a.description });
-    const guildCfg = this.config.get(guild.id);
-    const alertChannelId = guildCfg.antiraid?.alertChannel;
     const embed = card({
       tone: a.tone ?? 'danger',
       section: 'security',
@@ -732,17 +902,24 @@ class AntiRaidService {
       footer: a.footer,
     });
     const components = buttonRows(...(a.buttons ?? []));
-    let delivered = false;
-    // Salon d'alertes dédié uniquement s'il diffère du salon de logs sécurité,
-    // sinon l'alerte serait postée deux fois au même endroit.
-    if (alertChannelId && alertChannelId !== guildCfg.logChannels?.security) {
-      const channel = guild.channels?.cache?.get?.(alertChannelId) ?? (await this.client.channels?.fetch?.(alertChannelId).catch(() => null));
-      if (typeof channel?.send === 'function') delivered = await channel.send({ embeds: [embed], components }).then(() => true, () => false);
-    }
-    const logged = await this.logging.send(guild.id, 'security', embed, components, { event: 'antiraid' });
-    delivered = delivered || logged === true;
-    if (!delivered && a.fallback) delivered = await this.#fallback(guild, embed);
-    return delivered;
+    // Remise hors filtres des logs (une alerte n'est pas un log) : salon d'alerte, sinon logs
+    // sécurité ; log normal en plus ; MP / salon système pour une alerte critique perdue.
+    const res = await this.#notifier().deliver(guild, { embed, components }, {
+      fallback: Boolean(a.fallback),
+      critical: Boolean(a.critical),
+      ping: Boolean(a.ping),
+      event: 'antiraid',
+      label: 'Alerte AntiRaid',
+    });
+    return res.delivered;
+  }
+
+  /** Remise des alertes : celle de Secur (état partagé : MP plafonnés, pings), sinon une propre. */
+  #notifier() {
+    const shared = this.client.services?.secur?.notifier;
+    if (shared) return shared;
+    if (!this.ownNotifier) this.ownNotifier = new SecurNotifier({ client: this.client, config: this.config, logging: this.logging });
+    return this.ownNotifier;
   }
 
   /**
@@ -777,22 +954,21 @@ class AntiRaidService {
     }
     return logged === true;
   }
+}
 
-  /** Repli d'une alerte critique perdue : MP au propriétaire, sinon salon système (sans boutons). */
-  async #fallback(guild, embed) {
-    const payload = {
-      content: `${ICONS.warning} **Alerte AntiRaid** sur **${escapeMarkdown(String(guild.name ?? guild.id)).slice(0, 100)}** : ni le salon d'alerte ni les logs sécurité n'ont pu la recevoir (salon supprimé, logs coupés ou permissions). Vérifiez /antiraid et /logs.`,
-      embeds: fitEmbeds([embed]),
-      allowedMentions: { parse: [] },
-    };
-    const owner = guild.ownerId ? await this.client.users?.fetch?.(guild.ownerId).catch(() => null) : null;
-    if (owner && (await owner.send(payload).then(() => true, () => false))) return true;
-    const system = guild.systemChannel;
-    const me = guild.members?.me;
-    if (typeof system?.send !== 'function') return false;
-    if (me && typeof system.permissionsFor === 'function' && !system.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) return false;
-    return system.send(payload).then(() => true, () => false);
+/**
+ * Plus grand nombre d'actions tenant dans une fenêtre de `windowMs` qui contient l'instant `at`
+ * (horodatages des entrées d'audit, éventuellement reçues dans le désordre). Pur.
+ */
+function burstCount(times, at, windowMs) {
+  const near = times.filter((t) => t > at - windowMs && t < at + windowMs).sort((a, b) => a - b);
+  let best = 0;
+  for (const start of near) {
+    if (start > at) break;
+    const n = near.filter((t) => t >= start && t < start + windowMs).length;
+    if (n > best) best = n;
   }
+  return best;
 }
 
 /** Résumé d'une sanction de vague pour l'alerte. Pur. */
@@ -813,4 +989,4 @@ function digestFields({ banned = 0, kicked = 0, failed = 0, wave = 0, lastError 
   ].filter(Boolean);
 }
 
-module.exports = { AntiRaidService, newAccountAction, waveSummary, digestFields, MAX_WAVE_PUNISH, RECENT_JOIN_MS, DANGEROUS_PERMISSIONS };
+module.exports = { AntiRaidService, newAccountAction, waveSummary, digestFields, burstCount, kickBotButton, MAX_WAVE_PUNISH, RECENT_JOIN_MS, RECENT_BOT_MS, DANGEROUS_PERMISSIONS };

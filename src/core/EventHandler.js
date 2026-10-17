@@ -7,8 +7,10 @@ const { createLogger } = require('./logger');
 const logger = createLogger('events');
 
 /**
- * Charge les modules d'événements depuis src/events et les branche sur le client.
- * Chaque module exporte : { name, once?, execute(client, ...args) }.
+ * Charge les modules d'événements depuis src/events (ordre alphabétique, stable) et les branche
+ * sur le client. Chaque module exporte : { name, once?, prepend?, execute(client, ...args) }.
+ * `prepend: true` place l'écouteur AVANT les autres (client.prependListener) : un instantané pris
+ * avant les nettoyages des autres écouteurs (SEC4) ne dépend pas de l'ordre des fichiers.
  */
 class EventHandler {
   /** @param {import('discord.js').Client} client */
@@ -21,7 +23,7 @@ class EventHandler {
 
   loadAll(dir) {
     if (!fs.existsSync(dir)) return 0;
-    for (const entry of fs.readdirSync(dir)) {
+    for (const entry of fs.readdirSync(dir).sort()) {
       if (!entry.endsWith('.js')) continue;
       let mod;
       try {
@@ -49,8 +51,8 @@ class EventHandler {
             return Promise.resolve();
           }
         };
-        if (event.once) this.client.once(event.name, bound);
-        else this.client.on(event.name, bound);
+        if (event.once) (event.prepend ? this.client.prependOnceListener : this.client.once).call(this.client, event.name, bound);
+        else (event.prepend ? this.client.prependListener : this.client.on).call(this.client, event.name, bound);
         this.count += 1;
       }
     }

@@ -107,12 +107,21 @@ test('AntiRaid : expulsions massives (via le bot et à la main) → alerte et sa
     let mark = h.fake.messageLog.length;
     await h.slash('kick', [opt('membre', 6, IDS.users.target)], { as: 'mod' });
     assert.equal(botMessages(h, mark, (m) => /Activité destructrice/.test(embedText(m))).length, 0, 'alerte dès le premier kick d\'un membre ancien');
-    // Deuxième membre ancien expulsé par le même modérateur : seuil atteint.
-    await h.slash('kick', [opt('membre', 6, IDS.users.member)], { as: 'mod' });
-    const alerts = botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && /Activité destructrice/.test(embedText(m)));
-    assert.equal(alerts.length, 1, 'expulsions massives non détectées');
-    assert.match(embedText(alerts[0]), /Expulsions ×\*\*2\*\*/);
+    // Deuxième membre ancien expulsé par le même modérateur : le seuil serait atteint → refusé
+    // d'emblée par le pré-contrôle (Secur.assertAllowed, SEC1), le membre reste.
+    const refused = await h.slash('kick', [opt('membre', 6, IDS.users.member)], { as: 'mod' });
+    assert.ok(h.isError(refused), 'kick au seuil non refusé');
+    assert.match(h.replyText(refused), /Action bloquée par la sécurité \(Expulsions\)/);
+    assert.ok(h.fake.members.has(IDS.users.member), 'kick exécuté malgré le pré-contrôle');
+    assert.equal(botMessages(h, mark, (m) => /Activité destructrice/.test(embedText(m))).length, 0);
+    // Il insiste : 3e tentative bloquée en 10 min → alerte et sanction, toujours sans expulsion.
+    for (let i = 0; i < 2; i += 1) await h.slash('kick', [opt('membre', 6, IDS.users.member)], { as: 'mod' });
+    await h.settle();
+    const alerts = botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && /Tentatives destructrices répétées/.test(embedText(m)));
+    assert.equal(alerts.length, 1, 'tentatives répétées non détectées');
+    assert.match(embedText(alerts[0]), /Expulsions \(refusées ×\*\*3\*\*\)/);
     assert.ok(!h.fake.members.get(IDS.users.mod).roles.includes(IDS.roles.mod), 'auteur non sanctionné (rôles)');
+    assert.ok(h.fake.members.has(IDS.users.member), 'kick exécuté malgré le pré-contrôle');
 
     // Expulsions manuelles lues dans le journal d'audit (MemberKick, action 20).
     mark = h.fake.messageLog.length;
