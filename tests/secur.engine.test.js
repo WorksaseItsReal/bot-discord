@@ -244,7 +244,8 @@ test('registre : clé inconnue, type d\'un autre module ou module en double refu
   assert.throws(() => r.register(testModule('roleAdd')), /chargé deux fois/);
   const registry = new SecurRegistry().load(path.join(__dirname, '..', 'src', 'services', 'secur', 'modules'));
   assert.deepEqual(registry.failures, []);
-  assert.equal(registry.modules.size, 0, 'registre livré vide (SEC4 / SEC5)');
+  // Modules livrés par SEC4 / SEC5 : tous déclarés dans SECUR_MODULES.
+  assert.ok(registry.keys().every((k) => S.MODULE_KEYS.includes(k)), 'module chargé hors SECUR_MODULES');
 });
 
 test('covers : faux pour un module déclaré mais non chargé (même en « on »), vrai pour un module chargé actif', () => {

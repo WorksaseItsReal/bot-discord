@@ -347,6 +347,12 @@ class StructureStore {
     if (st && childId && parentId) StructureStore.#put(st.orphans, childId, { parentId, at: this.now() }, this.maxBuffered);
   }
 
+  /** Ancienne catégorie d'un salon sorti de sa catégorie il y a moins de 30 s, ou null. */
+  orphanParentOf(guildId, childId) {
+    const st = this.#state(guildId, false);
+    return st ? this.#fresh(st.orphans, childId, this.bufferTtlMs)?.parentId ?? null : null;
+  }
+
   orphansOf(guildId, parentId) {
     const st = this.#state(guildId, false);
     if (!st) return [];

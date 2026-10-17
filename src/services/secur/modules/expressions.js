@@ -57,8 +57,9 @@ const expressions = {
       summarize(ctx, false, 'il me manque « Gérer les expressions »');
       return { ok: false };
     }
-    if (snap.kind === 'emoji' && snap.name && guild.emojis?.cache?.some?.((e) => e.name === snap.name)) return { ok: true }; // déjà remis
-    if (snap.kind === 'sticker' && snap.name && guild.stickers?.cache?.some?.((s) => s.name === snap.name)) return { ok: true };
+    // Déjà remis (même nom, AUTRE identifiant : l'objet supprimé peut encore être dans le cache).
+    const twin = (x) => x.name === snap.name && x.id !== snap.id;
+    if (snap.name && (snap.kind === 'emoji' ? guild.emojis?.cache : guild.stickers?.cache)?.some?.(twin)) return { ok: true };
     if (!snap.url || !snap.name) {
       summarize(ctx, false, snap.kind === 'sticker' && snap.format === 3 ? 'autocollant animé Lottie' : 'aucun instantané de l\'image');
       return { ok: false };

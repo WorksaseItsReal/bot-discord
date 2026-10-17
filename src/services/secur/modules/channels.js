@@ -72,14 +72,16 @@ async function recreate(guild, snap, ctx, store, executorId) {
   if (me?.permissions && !me.permissions.has(PermissionFlagsBits.ManageChannels)) return { ok: false, note: `Salon ${label} non recréé : il me manque « Gérer les salons ».` };
   if (!St.takeBudget(ctx, 'channels', St.MAX_CHANNEL_RECREATIONS)) return { ok: false, note: `Plafond de ${St.MAX_CHANNEL_RECREATIONS} recréations de salons atteint pour cet incident : restaurez le reste avec /backup.` };
 
+  // Catégorie : celle de l'instantané, ou celle qu'il venait de perdre (catégorie supprimée juste avant).
+  const parentRef = snap.type === 4 ? null : snap.parentId ?? store.orphanParentOf(guild.id, snap.id);
   let parentId = null;
-  if (snap.type !== 4 && snap.parentId) {
-    parentId = St.resolveChannelId(guild, ctx, store, snap.parentId);
+  if (parentRef) {
+    parentId = St.resolveChannelId(guild, ctx, store, parentRef);
     if (!parentId) {
-      const parent = store.get(guild.id, 'channel', snap.parentId);
-      if (parent && parent.type === 4 && executorId && store.deletedBy(guild.id, snap.parentId) === executorId) {
+      const parent = store.get(guild.id, 'channel', parentRef);
+      if (parent && parent.type === 4 && executorId && store.deletedBy(guild.id, parentRef) === executorId) {
         const res = await recreate(guild, parent, ctx, store, executorId);
-        if (res.ok) parentId = St.resolveChannelId(guild, ctx, store, snap.parentId);
+        if (res.ok) parentId = St.resolveChannelId(guild, ctx, store, parentRef);
       }
     }
   }
