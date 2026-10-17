@@ -33,11 +33,19 @@ const {
   panelCard,
 } = require('../../services/WelcomeService');
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
+const {
+  parseDelay,
+  clampDelay,
+  MAX_CHANNELS: GHOST_MAX_CHANNELS,
+  MAX_MENTIONS: GHOST_MAX_MENTIONS,
+  MIN_DELETE_S,
+  MAX_DELETE_S,
+} = require('../../services/GhostPingService');
 const { UserError } = require('../../core/errors');
 
 /**
  * /bienvenue : tableau de bord unique (éphémère) de l'accueil des membres.
- * Vues : home · join · leave · roles · verify · preview
+ * Vues : home · join · leave · roles · verify · ghostping · preview
  * Bouton public persistant du panneau : cmd:bienvenue:verify (sans permission requise).
  */
 
@@ -72,6 +80,7 @@ const NAV = [
   { value: 'leave', label: 'Message de départ', emoji: '🚪', description: 'Salon et texte du départ' },
   { value: 'roles', label: 'Rôles automatiques', emoji: ICONS.role, description: 'Rôles donnés aux humains et aux bots' },
   { value: 'verify', label: 'Vérification', emoji: ICONS.shield, description: 'Bouton anti-robot, rôle, âge minimal' },
+  { value: 'ghostping', label: 'Ghostping', emoji: '👻', description: 'Mentionner les arrivants puis effacer la mention' },
   { value: 'preview', label: 'Aperçu et test', emoji: '🧪', description: 'Voir le rendu, envoyer un test' },
 ];
 
@@ -79,6 +88,7 @@ const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
 /** Serveurs dont le panneau de vérification est en cours de publication (anti double clic). */
 const publishing = new Set();
 const cfgOf = (client, guildId) => client.services.config.get(guildId).welcome;
+const gpOf = (client, guildId) => client.services.config.get(guildId).ghostPing ?? {};
 const onOff = (on) => (on ? '🟢 Activé' : '🔴 Désactivé');
 /** Panneau de vérification publié et son salon toujours là (cache). */
 const panelPublished = (guild, v) => Boolean(v.panelMessageId && v.panelChannelId && (!guild.channels?.cache || guild.channels.cache.has(v.panelChannelId)));
@@ -138,7 +148,9 @@ function homeView(client, guild, notice) {
     [...cfg.autoRoles.humans, ...cfg.autoRoles.bots].some((id) => roleIssue(guild.roles?.cache?.get(id), guild)) ? `${ICONS.role} Certains rôles automatiques ne peuvent pas être attribués.` : null,
     v.enabled && !panelPublished(guild, v) ? `${ICONS.shield} Vérification active, mais le panneau n'est pas publié.` : null,
   ].filter(Boolean);
-  const on = [cfg.join.enabled, cfg.leave.enabled, v.enabled].filter(Boolean).length;
+  const gp = gpOf(client, guild.id);
+  if (gp.enabled && !(gp.channels ?? []).length) problems.push('👻 Ghostping actif, mais aucun salon choisi.');
+  const on = [cfg.join.enabled, cfg.leave.enabled, v.enabled, gp.enabled].filter(Boolean).length;
   return {
     embeds: [
       card({
@@ -154,6 +166,7 @@ function homeView(client, guild, notice) {
           `${cfg.leave.enabled ? '🟢' : '🔴'} 🚪 **Message de départ** · ${cfg.leave.channelId ? `<#${cfg.leave.channelId}>` : '*Aucun salon*'}`,
           `${cfg.autoRoles.humans.length + cfg.autoRoles.bots.length ? '🟢' : '⚪'} ${ICONS.role} **Rôles automatiques** · ${cfg.autoRoles.humans.length} humain(s) · ${cfg.autoRoles.bots.length} bot(s)`,
           `${v.enabled ? '🟢' : '🔴'} ${ICONS.shield} **Vérification** · ${v.roleId ? `<@&${v.roleId}>` : '*Aucun rôle*'}${v.captcha ? ' · question anti-robot' : ''}`,
+          `${gp.enabled ? '🟢' : '🔴'} 👻 **Ghostping** · ${(gp.channels ?? []).length} salon(s)`,
           problems.length ? `\n${ICONS.warning} **À corriger**\n${problems.join('\n')}` : null,
         ],
         footer: 'Choisissez une section dans le menu',
@@ -305,6 +318,74 @@ function verifyView(client, guild, notice) {
   };
 }
 
+/** Problèmes d'un salon de ghostping (null si tout va bien). */
+function ghostIssue(guild, channelId) {
+  const channel = guild.channels?.cache?.get(channelId);
+  if (!channel) return 'salon introuvable';
+  const me = guild.members?.me;
+  const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
+  if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) return 'je ne peux pas y écrire (**Voir le salon**, **Envoyer des messages**)';
+  const everyone = typeof channel.permissionsFor === 'function' ? channel.permissionsFor(guild.roles?.everyone ?? guild.id) : null;
+  if (everyone && !everyone.has(PermissionFlagsBits.ViewChannel)) return 'caché à @everyone : seuls les membres qui le voient sont mentionnés';
+  return null;
+}
+
+function ghostView(client, guild, notice) {
+  const gp = gpOf(client, guild.id);
+  const v = cfgOf(client, guild.id).verification;
+  const channels = (gp.channels ?? []).filter((id) => !guild.channels?.cache || TEXT_TYPES.includes(guild.channels.cache.get(id)?.type)).slice(0, GHOST_MAX_CHANNELS);
+  const issues = channels.map((id) => [id, ghostIssue(guild, id)]).filter(([, issue]) => issue);
+  const afterVerif = gp.afterVerification !== false;
+  const waits = afterVerif && v.enabled && v.roleId;
+  const delay = clampDelay(gp.deleteAfterSeconds);
+  const menu = new ChannelSelectMenuBuilder()
+    .setCustomId('cmd:bienvenue:gpchannels')
+    .setPlaceholder('Salons du ghostping (aucun)')
+    .setChannelTypes(...TEXT_TYPES)
+    .setMinValues(0)
+    .setMaxValues(GHOST_MAX_CHANNELS);
+  if (channels.length) menu.setDefaultChannels(...channels);
+  return {
+    embeds: [
+      card({
+        tone: gp.enabled ? (issues.length || !channels.length ? 'warning' : 'success') : 'neutral',
+        section: { emoji: '👋', label: 'Bienvenue' },
+        icon: '👻',
+        title: 'Ghostping',
+        description: [
+          notice ? `${notice}\n` : null,
+          `Chaque nouveau membre est **mentionné** dans les salons choisis (jusqu'à ${GHOST_MAX_CHANNELS}), puis la mention est **supprimée** ${delay.toLocaleString('fr-FR')} s plus tard : il voit une pastille qui l'invite à les lire.`,
+          waits
+            ? `${ICONS.shield} La vérification est active : le ping a lieu **après la vérification réussie**.`
+            : afterVerif ? `${ICONS.info} Le ping a lieu à l'arrivée (et attendra la vérification dès qu'elle sera active).` : `${ICONS.info} Le ping a lieu à l'arrivée, même si la vérification est active.`,
+          subtext(`Jamais pour un bot ni pendant une vague d'arrivées (AntiRaid déclenché, lockdown). Arrivées regroupées sur 2 s : un message par salon, ${GHOST_MAX_MENTIONS} mentions au plus. Un salon n'est retenu que si le membre peut le voir. Aucun log.`),
+          issues.length ? `\n${ICONS.warning} ${issues.map(([id, issue]) => `<#${id}> : ${issue}`).join('\n')}` : null,
+          gp.enabled && !channels.length ? `\n${ICONS.warning} Choisissez au moins un **salon** ci-dessous.` : null,
+        ],
+        fields: [
+          field(ICONS.status, 'État', onOff(gp.enabled)),
+          field(ICONS.duration, 'Suppression après', `${delay.toLocaleString('fr-FR')} s`),
+          field(ICONS.shield, 'Après la vérification', afterVerif ? '✅ Oui' : '❌ Non'),
+          wide(ICONS.channel, `Salons (${channels.length}/${GHOST_MAX_CHANNELS})`, channels.length ? channels.map((id) => `<#${id}>`).join(' ') : '*Aucun*'),
+        ],
+        footer: 'Le menu remplace la sélection actuelle',
+      }),
+    ],
+    components: [
+      navRow('ghostping'),
+      new ActionRowBuilder().addComponents(menu),
+      ...buttonRows(
+        gp.enabled
+          ? actionButton({ command: 'bienvenue', action: 'gptoggle', args: ['off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'bienvenue', action: 'gptoggle', args: ['on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+        actionButton({ command: 'bienvenue', action: 'gpverify', args: [afterVerif ? 'off' : 'on'], label: afterVerif ? 'Après vérification ✅' : 'Après vérification ❌', emoji: ICONS.shield }),
+        actionButton({ command: 'bienvenue', action: 'gpdelay', label: 'Délai', emoji: ICONS.duration, style: ButtonStyle.Primary }),
+        homeButton(),
+      ),
+    ],
+  };
+}
+
 function previewView(client, guild, notice) {
   const cfg = cfgOf(client, guild.id);
   const sample = { ...SAMPLE_VARS, server: guild.name ?? SAMPLE_VARS.server };
@@ -352,6 +433,8 @@ function render(client, guild, view = 'home', notice) {
       return rolesView(client, guild, notice);
     case 'verify':
       return verifyView(client, guild, notice);
+    case 'ghostping':
+      return ghostView(client, guild, notice);
     case 'preview':
       return previewView(client, guild, notice);
     default:
@@ -388,6 +471,13 @@ function ageModal(v) {
     .setCustomId('cmd:bienvenue:vagesubmit')
     .setTitle('Âge minimal du compte')
     .addComponents(input('days', 'Âge minimal du compte (jours, 0 à 365)', { value: v.minAccountAgeDays ?? 0, max: 3, required: true, placeholder: '0 = aucun minimum' }));
+}
+
+function ghostDelayModal(gp) {
+  return new ModalBuilder()
+    .setCustomId('cmd:bienvenue:gpdelaysubmit')
+    .setTitle('Ghostping : délai')
+    .addComponents(input('seconds', `Suppression après (secondes, ${MIN_DELETE_S} à ${MAX_DELETE_S})`, { value: String(clampDelay(gp.deleteAfterSeconds)).replace('.', ','), max: 5, required: true, placeholder: '1,5' }));
 }
 
 function captchaModal(label) {
@@ -744,6 +834,52 @@ module.exports = {
         v.enabled ? null : `${ICONS.warning} La vérification est **désactivée** : activez-la pour que le bouton fonctionne.`,
       ].filter(Boolean).join('\n');
       await interaction.editReply(verifyView(client, guild, notice));
+    },
+
+    // ------------------------------------------------------------ ghostping
+
+    /** cmd:bienvenue:gptoggle:<on|off> */
+    async gptoggle(interaction, client, [state]) {
+      guard(interaction);
+      if (state !== 'on' && state !== 'off') throw new UserError('Réglage inconnu.');
+      const enabled = state === 'on';
+      if (enabled && !(gpOf(client, interaction.guildId).channels ?? []).length) throw new UserError('Choisissez d\'abord au moins un salon.');
+      client.services.config.update(interaction.guildId, { ghostPing: { enabled } });
+      await interaction.update(ghostView(client, interaction.guild, `${ICONS.success} Ghostping **${enabled ? 'activé' : 'désactivé'}**.`));
+    },
+    /** cmd:bienvenue:gpverify:<on|off> — attendre la vérification réussie. */
+    async gpverify(interaction, client, [state]) {
+      guard(interaction);
+      if (state !== 'on' && state !== 'off') throw new UserError('Réglage inconnu.');
+      const afterVerification = state === 'on';
+      client.services.config.update(interaction.guildId, { ghostPing: { afterVerification } });
+      await interaction.update(ghostView(client, interaction.guild, `${ICONS.success} Ping ${afterVerification ? '**après la vérification** (si elle est active)' : '**à l\'arrivée**'}.`));
+    },
+    /** Salons du ghostping (remplace la sélection). */
+    async gpchannels(interaction, client) {
+      guard(interaction);
+      const guild = interaction.guild;
+      const before = new Set(gpOf(client, guild.id).channels ?? []);
+      const ids = [...new Set(interaction.values ?? [])].filter((id) => /^\d{17,20}$/.test(id) && TEXT_TYPES.includes(guild.channels.cache.get(id)?.type)).slice(0, GHOST_MAX_CHANNELS);
+      // Salon nouvellement choisi : l'auteur doit lui-même pouvoir y écrire (comme les messages d'accueil).
+      for (const id of ids) if (!before.has(id)) assertAuthorCanPost(interaction, guild.channels.cache.get(id));
+      const patch = { channels: ids };
+      if (!ids.length) patch.enabled = false;
+      client.services.config.update(guild.id, { ghostPing: patch });
+      const notice = ids.length ? `${ICONS.success} **${ids.length}** salon(s) pour le ghostping.` : `${ICONS.success} Aucun salon : le ghostping est désactivé.`;
+      await interaction.update(ghostView(client, guild, notice));
+    },
+    /** Ouvre le formulaire du délai de suppression. */
+    async gpdelay(interaction, client) {
+      guard(interaction);
+      await interaction.showModal(ghostDelayModal(gpOf(client, interaction.guildId)));
+    },
+    async gpdelaysubmit(interaction, client) {
+      guard(interaction);
+      const seconds = parseDelay(interaction.fields.getTextInputValue('seconds'));
+      if (seconds == null) throw new UserError(`Délai : entrez un nombre de secondes entre ${MIN_DELETE_S} et ${MAX_DELETE_S} (ex : \`1,5\`).`);
+      client.services.config.update(interaction.guildId, { ghostPing: { deleteAfterSeconds: seconds } });
+      await interaction.update(ghostView(client, interaction.guild, `${ICONS.success} Mention supprimée après **${seconds.toLocaleString('fr-FR')} s**.`));
     },
 
     // ------------------------------------------------------------ public

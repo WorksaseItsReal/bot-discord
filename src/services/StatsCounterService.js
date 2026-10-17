@@ -52,9 +52,15 @@ function settleWithin(promise, ms) {
   return Promise.race([promise.then((value) => ({ value }), (error) => ({ error: error ?? new Error('échec') })), timeout]).finally(() => clearTimeout(timer));
 }
 
-/** L'intent GuildPresences est-il activé (src/config/intents.js) ? */
+/**
+ * Les présences des membres sont-elles lisibles ? Il faut l'intent GuildPresences (src/config/intents.js)
+ * ET leur cache : avec PRESENCE_INTENT=on, le bot garde le cache des présences vide
+ * (`client.presenceCacheDisabled`, GadgetClient) et `member.presence` est toujours vide — le
+ * compteur « En ligne » afficherait 0 en permanence : il n'est donc pas proposé.
+ */
 function hasPresenceIntent(client) {
   try {
+    if (client?.presenceCacheDisabled) return false;
     return Boolean(client?.options?.intents?.has?.(GatewayIntentBits.GuildPresences));
   } catch {
     return false;

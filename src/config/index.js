@@ -68,6 +68,12 @@ const config = {
   /** Présence du bot (statuts tournants, réglage global) : voir src/utils/presence.js. */
   presenceStatuses: process.env.PRESENCE_STATUSES || '',
   presenceIntervalMinutes: parseNumberEnv(process.env.PRESENCE_INTERVAL_MINUTES, { min: 1, max: 1440, integer: false }),
+  /**
+   * Intent GuildPresences (PRIVILÉGIÉ, désactivé par défaut) : PRESENCE_INTENT=on l'active pour le
+   * rôle soutien par statut personnalisé. Le cache des présences reste vide (mémoire) : le compteur
+   * « En ligne » de /compteurs n'est donc toujours pas proposé.
+   */
+  presenceIntent: /^(on|true|1|oui|yes)$/i.test(String(process.env.PRESENCE_INTENT ?? '').trim()),
   env: process.env.NODE_ENV || 'development',
   version: require('../../package.json').version,
   colors: {

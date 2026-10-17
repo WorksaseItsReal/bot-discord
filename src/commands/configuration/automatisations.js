@@ -38,13 +38,15 @@ const {
   MAX_BOOST_MESSAGE,
   CROSSPOST_LIMIT,
 } = require('../../services/AutomationService');
+const { SOURCES: SUPPORT_SOURCES, parseStatusText, MIN_TEXT, MAX_TEXT, RESYNC_COOLDOWN_MS } = require('../../services/SupportRoleService');
+const { discordTimestamp } = require('../../utils/time');
 const { UserError } = require('../../core/errors');
 
 /**
  * /automatisations : tableau de bord (éphémère, « Gérer le serveur ») de la publication
- * automatique, des fils automatiques, du rôle vocal, du remerciement de boost et de la
- * présence du bot (réglage global, en lecture seule). Les flux RSS ont leur commande (/flux).
- * Vues : home · crosspost · threads · voice · vrchan:<salon> · boost · presence
+ * automatique, des fils automatiques, du rôle vocal, du remerciement de boost, du rôle soutien
+ * et de la présence du bot (réglage global, en lecture seule). Les flux RSS ont leur commande (/flux).
+ * Vues : home · crosspost · threads · voice · vrchan:<salon> · boost · support · presence
  */
 
 const SECTION = { emoji: '⚡', label: 'Automatisations' };
@@ -62,6 +64,8 @@ const TOGGLE_NOTICES = Object.freeze({
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
 const settings = (client, guildId) => client.services.config.get(guildId).automations ?? {};
 const save = (client, guildId, patch) => client.services.config.update(guildId, { automations: patch });
+const supportOf = (client, guildId) => client.services.config.get(guildId).support ?? {};
+const saveSupport = (client, guildId, patch) => client.services.config.update(guildId, { support: patch });
 const row = (component) => new ActionRowBuilder().addComponents(component);
 const dot = (on) => (on ? '🟢' : '🔴');
 const mentions = (ids, prefix = '#') => fitList(ids.map((id) => `<${prefix}${id}>`), 1000);
@@ -73,6 +77,7 @@ const NAV = [
   { value: 'threads', label: 'Fils automatiques', emoji: '🧵', description: 'Un fil sous chaque message' },
   { value: 'voice', label: 'Rôle vocal', emoji: '🔊', description: 'Rôle porté tant qu\'on est en vocal' },
   { value: 'boost', label: 'Remerciement de boost', emoji: '💎', description: 'Message et rôle pour les boosters' },
+  { value: 'support', label: 'Rôle soutien', emoji: '💜', description: 'Rôle pour le tag du serveur ou un statut' },
   { value: 'presence', label: 'Présence du bot', emoji: '🤖', description: 'Statuts tournants (réglage global)' },
 ];
 
@@ -178,6 +183,7 @@ function homeView(client, guild, notice) {
   const th = cfg.autoThreads ?? {};
   const vr = cfg.voiceRole ?? {};
   const bo = cfg.boost ?? {};
+  const su = supportOf(client, guild.id);
   const feeds = client.repositories.feeds;
   const presence = presenceSettings(client.config);
   const anyOn = cp.enabled || th.enabled || vr.enabled || bo.enabled;
@@ -201,6 +207,7 @@ function homeView(client, guild, notice) {
           `${dot(th.enabled)} **Fils automatiques** ${th.enabled ? 'actifs' : 'désactivés'}${th.enabled && !(th.channels ?? []).length ? ` · ${ICONS.warning} *aucun salon*` : ''}`,
           `${dot(vr.enabled)} **Rôle vocal** ${vr.enabled ? 'actif' : 'désactivé'}${vr.enabled && !managedVoiceRoles(vr).length ? ` · ${ICONS.warning} *aucun rôle*` : ''}`,
           `${dot(bo.enabled)} **Remerciement de boost** ${bo.enabled ? 'actif' : 'désactivé'}`,
+          `${dot(su.enabled)} **Rôle soutien** ${su.enabled ? `actif · ${SUPPORT_SOURCES[su.source] ?? SUPPORT_SOURCES.tag}` : 'désactivé'}${su.enabled && su.source === 'statut' && !client.services.supportRole?.presenceIntent?.() ? ` · ${ICONS.warning} *indisponible : intent non activé*` : ''}`,
           '',
           subtext('Flux RSS et YouTube : /flux. Logs des boosts : /logs → Membres.'),
         ],
@@ -211,6 +218,7 @@ function homeView(client, guild, notice) {
           field(ICONS.boost, 'Boosts', bo.channelId ? `<#${bo.channelId}>` : '*Aucun salon*'),
           field('📰', 'Flux RSS', feeds ? `${feeds.countEnabled(guild.id)} actif(s) / ${feeds.count(guild.id)}` : '—'),
           field(ICONS.bot, 'Présence', `${presence.statuses.length} statut(s) · ${Math.round(presence.intervalMs / 60_000)} min`),
+          field('💜', 'Rôle soutien', su.roleId ? `<@&${su.roleId}>` : '*Aucun rôle*'),
         ],
         footer: 'Choisissez une section dans le menu',
       }),
@@ -490,8 +498,82 @@ function boostView(client, guild, notice, user) {
   };
 }
 
+function supportView(client, guild, notice) {
+  const su = supportOf(client, guild.id);
+  const svc = client.services.supportRole;
+  const intent = Boolean(svc?.presenceIntent?.());
+  const source = su.source === 'statut' ? 'statut' : 'tag';
+  const unavailable = source === 'statut' && !intent;
+  const role = su.roleId ? guild.roles.cache.get(su.roleId) : null;
+  const issue = su.roleId ? (role ? svc?.roleIssue?.(guild, role) ?? null : 'Ce rôle n\'existe plus.') : null;
+  const stats = svc?.stats?.(guild.id) ?? { pending: 0, dropped: 0, resyncAt: 0 };
+  const retryAt = stats.resyncAt ? stats.resyncAt + RESYNC_COOLDOWN_MS : 0;
+  const cooling = retryAt > Date.now();
+  const roleMenu = new RoleSelectMenuBuilder()
+    .setCustomId('cmd:automatisations:surole')
+    .setPlaceholder('Rôle soutien (dédié)…')
+    .setMinValues(0)
+    .setMaxValues(1);
+  if (role) roleMenu.setDefaultRoles(role.id);
+  const sourceMenu = new StringSelectMenuBuilder()
+    .setCustomId('cmd:automatisations:susource')
+    .setPlaceholder('Condition')
+    .addOptions(
+      { value: 'tag', label: 'Tag du serveur affiché', emoji: '🏷️', description: 'Recommandé : aucun intent privilégié', default: source === 'tag' },
+      { value: 'statut', label: 'Texte dans le statut personnalisé', emoji: '💬', description: intent ? 'Intent des présences actif' : 'Exige PRESENCE_INTENT=on (intent privilégié)', default: source === 'statut' },
+    );
+  return {
+    embeds: [
+      card({
+        tone: su.enabled ? (issue || unavailable ? 'warning' : 'success') : 'neutral',
+        section: SECTION,
+        icon: '💜',
+        title: 'Rôle soutien',
+        description: [
+          notice ? `${notice}\n` : null,
+          unavailable ? `${ICONS.warning} **Indisponible : intent non activé.** La source « statut » exige l'intent GuildPresences : \`PRESENCE_INTENT=on\` dans le fichier .env (et dans le Developer Portal), puis redémarrage du bot. En attendant, rien n'est attribué.\n` : null,
+          'Un rôle **dédié** est donné aux membres qui soutiennent le serveur, et retiré quand ils cessent :',
+          source === 'tag'
+            ? '🏷️ **Tag du serveur** : le membre affiche le tag de ce serveur à côté de son pseudo (Discord › Profil › Tag de serveur).'
+            : `💬 **Statut personnalisé** : en ligne, inactif ou ne pas déranger avec un statut qui contient ${su.text ? code(truncate(su.text, 64)) : '*(texte à choisir)*'} ; retiré quand le membre est **en ligne** sans ce texte. Hors ligne : rien ne change.`,
+          subtext('Le rôle doit être dédié : il est retiré à tous ceux qui ne remplissent plus la condition, et à tous ses porteurs à la désactivation. Ni rôle géré, ni rôle sensible, ni rôle déjà utilisé par une autre attribution automatique. Bots exclus ; au plus un changement par membre et par minute.'),
+          issue ? `\n${ICONS.warning} ${issue}` : null,
+          su.enabled && !su.roleId ? `\n${ICONS.warning} Choisissez un **rôle** ci-dessous.` : null,
+        ],
+        fields: [
+          field(ICONS.status, 'Statut', su.enabled ? (unavailable ? '🟠 Indisponible' : '🟢 Actif') : '🔴 Désactivé'),
+          field(ICONS.role, 'Rôle', su.roleId ? `<@&${su.roleId}>` : '*Aucun*'),
+          field(ICONS.members, 'Porteurs', role ? `${role.members.size}` : '—'),
+          field(ICONS.search, 'Condition', SUPPORT_SOURCES[source]),
+          source === 'statut' ? field('💬', 'Texte', su.text ? code(truncate(su.text, 64)) : '*Aucun*') : field(ICONS.refresh, 'Resynchronisation', stats.resyncAt ? discordTimestamp(stats.resyncAt, 'R') : 'Jamais'),
+          field(ICONS.loading, 'En attente', `${stats.pending}${stats.dropped ? ` · ${stats.dropped} ignorée(s)` : ''}`),
+        ],
+        footer: source === 'tag' ? '« Resynchroniser » relit tous les membres (10 min entre deux)' : 'Le statut est lu à chaque changement de présence d\'un membre',
+      }),
+    ],
+    components: [
+      navRow('support'),
+      row(roleMenu),
+      row(sourceMenu),
+      ...buttonRows(
+        su.enabled
+          ? actionButton({ command: 'automatisations', action: 'sutoggle', args: ['off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'automatisations', action: 'sutoggle', args: ['on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+        source === 'statut'
+          ? actionButton({ command: 'automatisations', action: 'sutext', label: 'Texte du statut', emoji: '💬', style: ButtonStyle.Primary })
+          : actionButton({ command: 'automatisations', action: 'susync', label: cooling ? 'Resynchroniser (10 min)' : 'Resynchroniser', emoji: ICONS.refresh, disabled: !su.enabled || cooling }),
+        homeButton(),
+      ),
+    ],
+  };
+}
+
 function presenceView(client, notice) {
-  const presence = presenceSettings(client.config);
+  // Statuts imposés par le propriétaire du bot (/bot) prioritaires, s'ils existent.
+  const imposed = client.services.botProfile?.presenceSource?.() === 'bot';
+  const effective = imposed ? client.services.botProfile?.presenceSettings?.() : null;
+  const usable = Array.isArray(effective?.statuses) && effective.statuses.length && effective.statuses.every((st) => typeof st?.text === 'string');
+  const presence = usable ? { ...presenceSettings(client.config), ...effective } : presenceSettings(client.config);
   const values = counts(client);
   const current = client.user?.presence?.activities?.[0]?.name;
   const lines = presence.statuses.map((s, i) => `\`${i + 1}.\` **${TYPE_LABELS[s.type] ?? 'Regarde'}** ${truncate(renderStatus(s, values).name, 128).replace(/[*_`~|]/g, '')}`);
@@ -511,7 +593,7 @@ function presenceView(client, notice) {
         ],
         fields: [
           field(ICONS.refresh, 'Rotation', `Toutes les ${Math.round(presence.intervalMs / 60_000)} min`),
-          field(ICONS.settings, 'Source', presence.source === 'env' ? 'Fichier .env' : 'Statuts par défaut'),
+          field(ICONS.settings, 'Source', imposed ? '/bot' : presence.source === 'env' ? 'Fichier .env' : 'Statuts par défaut'),
           field(ICONS.status, 'En ce moment', current ? truncate(current, 100).replace(/[*_`~|]/g, '') : '—'),
           wide(ICONS.info, 'Modifier', `Variables d'environnement, puis redémarrage du bot :\n${code('PRESENCE_STATUSES="regarde:/help • {serveurs} serveurs | joue:/projet | écoute:{membres} membres"')}\n${code('PRESENCE_INTERVAL_MINUTES=1')} (1 min au minimum)`),
         ],
@@ -539,6 +621,8 @@ function render(client, guild, view = 'home', notice, user = null) {
       return voiceChannelView(client, guild, arg, notice);
     case 'boost':
       return boostView(client, guild, notice, user);
+    case 'support':
+      return supportView(client, guild, notice);
     case 'presence':
       return presenceView(client, notice);
     default:
@@ -554,7 +638,7 @@ module.exports = {
   render,
   data: new SlashCommandBuilder()
     .setName('automatisations')
-    .setDescription('Tableau de bord : publication auto, fils automatiques, rôle vocal, boosts, présence du bot.')
+    .setDescription('Tableau de bord : publication auto, fils, rôle vocal, boosts, rôle soutien, présence du bot.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction, client) {
@@ -771,6 +855,121 @@ module.exports = {
       if (unknown.length) throw new UserError(`Variable(s) inconnue(s) : ${unknown.map((v) => `\`{${v}}\``).join(', ')}. Disponibles : \`{membre}\`, \`{serveur}\`, \`{boosts}\`.`);
       save(client, interaction.guildId, { boost: { message: message === DEFAULT_BOOST_MESSAGE ? null : message } });
       await interaction.update(boostView(client, interaction.guild, `${ICONS.success} Message ${message ? 'enregistré' : 'par défaut rétabli'} : aperçu ci-dessous.`, interaction.user));
+    },
+
+    // ------------------------------------------------------------ rôle soutien
+
+    /** cmd:automatisations:sutoggle:<on|off> */
+    async sutoggle(interaction, client, [state]) {
+      guard(interaction);
+      const enabled = target(state);
+      const { guild } = interaction;
+      const su = supportOf(client, guild.id);
+      const svc = client.services.supportRole;
+      if (enabled) {
+        if (!su.roleId) throw new UserError('Choisissez d\'abord le rôle soutien.');
+        const role = guild.roles.cache.get(su.roleId);
+        const issue = role ? svc.roleIssue(guild, role, interaction.member) : 'Ce rôle n\'existe plus.';
+        if (issue) throw new UserError(issue);
+        if (su.source === 'statut') {
+          if (!svc.presenceIntent()) throw new UserError('Indisponible : intent non activé. La source « statut » exige `PRESENCE_INTENT=on` (et l\'intent dans le Developer Portal). Choisissez plutôt « Tag du serveur ».');
+          if (!su.text) throw new UserError('Choisissez d\'abord le texte à chercher dans le statut.');
+        }
+      }
+      saveSupport(client, guild.id, { enabled });
+      let notice = `${ICONS.success} Rôle soutien **${enabled ? 'activé' : 'désactivé'}**.`;
+      if (!enabled && su.enabled) {
+        svc.release(guild, su.roleId);
+        notice += ' Le rôle est retiré à ses porteurs en arrière-plan.';
+      } else if (enabled && su.source !== 'statut') {
+        svc.resync(guild, { force: true });
+        notice += ' Les membres qui affichent le tag le reçoivent en arrière-plan.';
+      }
+      await interaction.update(supportView(client, guild, notice));
+    },
+    /** Rôle soutien (vide : retiré, fonction désactivée). */
+    async surole(interaction, client) {
+      guard(interaction);
+      const { guild } = interaction;
+      const id = interaction.values?.[0] ?? null;
+      const su = supportOf(client, guild.id);
+      const svc = client.services.supportRole;
+      if (id) {
+        if (!SNOWFLAKE.test(id)) throw new UserError('Rôle invalide.');
+        const role = guild.roles.cache.get(id);
+        const issue = role ? svc.roleIssue(guild, role, interaction.member) : 'Ce rôle n\'existe plus.';
+        if (issue) throw new UserError(issue);
+        if (id !== su.roleId) {
+          const holders = [...role.members.values()].filter((m) => !m.user?.bot).length;
+          if (holders) throw new UserError(`**${holders}** membre(s) ont déjà le rôle ${role} : il leur serait retiré. Créez un rôle dédié (ex : « Soutien »).`);
+        }
+      }
+      if (id === su.roleId) {
+        await interaction.update(supportView(client, guild, `${ICONS.info} Rôle inchangé.`));
+        return;
+      }
+      saveSupport(client, guild.id, id ? { roleId: id } : { roleId: null, enabled: false });
+      if (su.enabled && su.roleId) svc.release(guild, su.roleId);
+      if (id && su.enabled && su.source !== 'statut') svc.resync(guild, { force: true });
+      await interaction.update(supportView(client, guild, id ? `${ICONS.success} Rôle soutien : <@&${id}>.` : `${ICONS.success} Rôle retiré : le rôle soutien est désactivé.`));
+    },
+    /** Condition : tag du serveur ou statut personnalisé. */
+    async susource(interaction, client) {
+      guard(interaction);
+      const { guild } = interaction;
+      const source = interaction.values?.[0];
+      if (!Object.hasOwn(SUPPORT_SOURCES, source ?? '')) throw new UserError('Choix inconnu.');
+      const su = supportOf(client, guild.id);
+      const svc = client.services.supportRole;
+      if (source === su.source) {
+        await interaction.update(supportView(client, guild));
+        return;
+      }
+      saveSupport(client, guild.id, { source });
+      let notice = `${ICONS.success} Condition : **${SUPPORT_SOURCES[source]}**.`;
+      if (su.enabled && su.roleId) {
+        if (source === 'tag') {
+          svc.resync(guild, { force: true });
+          notice += ' Les rôles sont remis à jour d\'après le tag, en arrière-plan.';
+        } else {
+          // Aucune présence en cache : impossible de savoir qui a le texte ; le rôle sera rendu au prochain changement de statut.
+          svc.release(guild, su.roleId);
+          notice += ' Le rôle est retiré à ses porteurs ; il sera rendu au prochain changement de statut.';
+        }
+      }
+      if (source === 'statut' && !svc.presenceIntent()) notice += `\n${ICONS.warning} Indisponible : intent non activé.`;
+      await interaction.update(supportView(client, guild, notice));
+    },
+    /** Formulaire du texte cherché dans le statut. */
+    async sutext(interaction, client) {
+      guard(interaction);
+      const su = supportOf(client, interaction.guildId);
+      const input = new TextInputBuilder()
+        .setCustomId('text')
+        .setLabel('Texte à chercher dans le statut')
+        .setStyle(TextInputStyle.Short)
+        .setMinLength(MIN_TEXT)
+        .setMaxLength(MAX_TEXT)
+        .setRequired(true)
+        .setPlaceholder('ex : discord.gg/monserveur');
+      if (su.text) input.setValue(truncate(su.text, MAX_TEXT));
+      await interaction.showModal(new ModalBuilder().setCustomId('cmd:automatisations:sutextsubmit').setTitle('Rôle soutien : statut').addComponents(row(input)));
+    },
+    async sutextsubmit(interaction, client) {
+      guard(interaction);
+      const text = parseStatusText(textField(interaction, 'text'));
+      if (!text) throw new UserError(`Texte du statut : de ${MIN_TEXT} à ${MAX_TEXT} caractères (lettres ou chiffres).`);
+      saveSupport(client, interaction.guildId, { text });
+      await interaction.update(supportView(client, interaction.guild, `${ICONS.success} Texte cherché : ${code(truncate(text, 64))} (majuscules et accents ignorés).`));
+    },
+    /** « Resynchroniser » (source tag) : 10 minutes entre deux. */
+    async susync(interaction, client) {
+      guard(interaction);
+      const su = supportOf(client, interaction.guildId);
+      if (!su.enabled || su.source === 'statut') throw new UserError('Activez d\'abord le rôle soutien par tag du serveur.');
+      const res = client.services.supportRole.resync(interaction.guild);
+      if (!res.started) throw new UserError(res.retryAt ? `Resynchronisation déjà faite récemment : réessayez ${discordTimestamp(res.retryAt, 'R')}.` : 'Resynchronisation impossible pour l\'instant.');
+      await interaction.update(supportView(client, interaction.guild, `${ICONS.success} Resynchronisation lancée : le rôle est donné à ceux qui affichent le tag, retiré aux autres.`));
     },
   },
 };

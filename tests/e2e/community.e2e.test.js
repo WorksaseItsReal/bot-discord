@@ -73,7 +73,7 @@ test('/communaute : chaque vue, bouton, menu et formulaire ; refus sans permissi
     const add = await h.click(h.messagesOf(auto)[0], 'cmd:communaute:aradd');
     const created = await h.submitModal(add, { pattern: 'salut', response: 'Coucou {membre} !', reaction: '', cooldown: '0' });
     assert.match(h.replyText(created), /Déclencheur ajouté/);
-    const detail = await explore(h, created, { budget: 80, skip: (a) => a.customId.startsWith('cmd:communaute:ardelete') });
+    const detail = await explore(h, created, { budget: 80, skip: (a) => a.customId.startsWith('cmd:communaute:ardelete') || a.customId === 'cmd:communaute:go:auto' });
     for (const key of ['armode', 'archan', 'arexcl', 'artoggle', 'aredit']) assert.ok(detail.keys.has(`cmd:communaute:${key}`), `${key} jamais utilisé`);
 
     // Membre sans « Gérer le serveur » : commande et composants refusés, rien ne change.

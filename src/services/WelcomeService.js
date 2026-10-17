@@ -565,6 +565,9 @@ class WelcomeService {
         /* MP fermés : ignoré */
       }
     }
+    // Ghostping d'arrivée (/bienvenue › Ghostping) : seulement après un accueil (arrivée non
+    // sanctionnée, écran d'adhésion accepté) ; ignoré s'il attend la vérification.
+    this.client?.services?.ghostPing?.queue?.(member, { source: 'join' });
     return result;
   }
 
@@ -703,6 +706,8 @@ class WelcomeService {
     await this.logging?.send(guild.id, 'members', embed, undefined, { event: 'memberVerify' }).catch(() => {});
     // Membre qui revient : ses rôles de récompense de niveau, retenus jusqu'à la vérification.
     await this.client?.services?.levels?.restoreRewards?.(member, { verified: true })?.catch?.(() => {});
+    // Ghostping « après la vérification » (option du ghostping, vérification active).
+    this.client?.services?.ghostPing?.queue?.(member, { source: 'verify' });
     return { added: add, removed: remove };
   }
 }

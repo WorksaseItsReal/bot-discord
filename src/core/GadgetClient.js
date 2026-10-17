@@ -1,8 +1,8 @@
 'use strict';
 
 const path = require('node:path');
-const { Client, Collection } = require('discord.js');
-const { intents, partials } = require('../config/intents');
+const { Client, Collection, Options } = require('discord.js');
+const { buildIntents, partials } = require('../config/intents');
 const { config } = require('../config');
 const { createLogger } = require('./logger');
 const { CommandHandler } = require('./CommandHandler');
@@ -76,6 +76,8 @@ const { ReportService } = require('../services/ReportService');
 const { StarboardService } = require('../services/StarboardService');
 const { StickyService } = require('../services/StickyService');
 const { AutoResponderService } = require('../services/AutoResponderService');
+const { GhostPingService } = require('../services/GhostPingService');
+const { SupportRoleService } = require('../services/SupportRoleService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
@@ -110,7 +112,17 @@ class GadgetClient extends Client {
   constructor() {
     // Défense en profondeur : sans autorisation explicite, aucun message du bot ne peut
     // notifier @everyone/@here ou un rôle (les envois qui doivent pinguer passent allowedMentions).
-    super({ intents, partials, allowedMentions: { parse: ['users'], repliedUser: false } });
+    // GuildPresences (PRESENCE_INTENT=on, rôle soutien par statut) : présences reçues par
+    // l'événement presenceUpdate mais JAMAIS gardées en cache (mémoire des gros serveurs).
+    const presenceIntent = Boolean(config.presenceIntent);
+    super({
+      intents: buildIntents(config),
+      partials,
+      allowedMentions: { parse: ['users'], repliedUser: false },
+      ...(presenceIntent ? { makeCache: Options.cacheWithLimits({ ...Options.DefaultMakeCacheSettings, PresenceManager: 0 }) } : {}),
+    });
+    /** Cache des présences désactivé : `member.presence` est toujours vide (voir StatsCounterService). */
+    this.presenceCacheDisabled = presenceIntent;
 
     this.config = config;
     this.logger = logger;
@@ -222,6 +234,9 @@ class GadgetClient extends Client {
       starboard: new StarboardService({ client: this, starboard: this.repositories.starboard, config: configService }),
       sticky: new StickyService({ client: this, sticky: this.repositories.sticky }),
       autoResponses: new AutoResponderService({ client: this, config: configService }),
+      // Ghostping d'arrivée (/bienvenue) et rôle soutien (/automatisations) : minuteurs unref, arrêtés dans shutdown.
+      ghostPing: new GhostPingService({ client: this, config: configService }),
+      supportRole: new SupportRoleService({ client: this, config: configService }),
       // Tâches planifiées : chacune est une étape isolée du SchedulerService.
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
@@ -385,6 +400,9 @@ class GadgetClient extends Client {
       // Automatisations (file de publication, rôle vocal) et lectures de flux en cours.
       ['Arrêt des automatisations', () => s.automations?.stop()],
       ['Arrêt des flux RSS', () => s.feeds?.stop()],
+      // Ghostping : les mentions encore affichées sont supprimées tout de suite (borné).
+      ['Arrêt du ghostping', () => s.ghostPing?.stop()],
+      ['Arrêt du rôle soutien', () => s.supportRole?.stop()],
       ['Vidage des tickets', () => s.tickets?.flush?.()],
       ['Vidage des giveaways', () => s.giveaways?.flush?.()],
       ['Vidage des projets', () => s.projects?.flush?.()],

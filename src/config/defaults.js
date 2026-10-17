@@ -241,6 +241,14 @@ const defaultGuildConfig = Object.freeze({
       panelMessageId: null,
     },
   },
+  // Ghostping d'arrivée (/bienvenue › Ghostping) : mention du nouveau membre dans quelques
+  // salons, supprimée aussitôt. Jamais pendant une vague d'arrivées ni un lockdown.
+  ghostPing: {
+    enabled: false,
+    channels: [],             // 5 salons au plus (retenus seulement si le membre peut les voir)
+    afterVerification: true,  // vérification active : le ping attend la vérification réussie
+    deleteAfterSeconds: 1.5,  // suppression après 1 à 10 s
+  },
   autobackup: {
     enabled: false,
     intervalHours: 24,
@@ -307,6 +315,14 @@ const defaultGuildConfig = Object.freeze({
       //    cooldownSeconds, channels: [], excludedChannels: [], enabled }]
       triggers: [],
     },
+  },
+  // Réactions automatiques par salon (/communaute › Réactions automatiques) : seconde passe
+  // d'AutoResponderService (même délai, mêmes marques de suppression, même arrêt).
+  autoReact: {
+    enabled: false,
+    // [{ channelId, emojis: [1 à 3, Unicode ou personnalisés du serveur], mode: all|media|text, threads }]
+    // 10 salons au plus ; forum : réaction au message d'ouverture de chaque post.
+    channels: [],
   },
   // Anniversaires (/anniversaire config). Variables du message : {membre} {pseudo} {serveur} {age}
   // (la ligne contenant {age} n'est affichée que si le membre a accepté de montrer son âge).
@@ -380,6 +396,15 @@ const defaultGuildConfig = Object.freeze({
       message: null,                        // null = message par défaut ; {membre} {serveur} {boosts}
       roleId: null,                         // rôle donné au booster (retiré à la fin du boost)
     },
+  },
+  // Rôle soutien (/automatisations › Rôle soutien) : rôle DÉDIÉ, géré entièrement par le bot.
+  // source tag : tag du serveur affiché (primary guild, sans intent privilégié) ; statut : texte
+  // dans le statut personnalisé (exige PRESENCE_INTENT=on).
+  support: {
+    enabled: false,
+    roleId: null,
+    source: 'tag',            // tag | statut
+    text: null,               // texte cherché dans le statut personnalisé (source statut)
   },
 });
 
