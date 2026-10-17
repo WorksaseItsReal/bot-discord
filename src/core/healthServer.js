@@ -27,7 +27,11 @@ function dbStatus(client) {
 
 function isReady(client) {
   try {
-    return typeof client.isReady === 'function' ? Boolean(client.isReady()) : false;
+    if (typeof client.isReady !== 'function' || !client.isReady()) return false;
+    // isReady() reste vrai après une fermeture définitive d'une shard (4004, 4014…) : on exige
+    // aussi que chaque shard soit connectée (Status.Ready = 0), comme ActivityService.
+    const shards = client.ws?.shards;
+    return !shards?.size || [...shards.values()].every((shard) => shard.status === 0);
   } catch {
     return false;
   }

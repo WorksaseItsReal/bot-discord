@@ -187,12 +187,10 @@ class TempRoleService {
 
   async #expire(row) {
     const guild = this.client.guilds.cache.get(row.guild_id);
-    if (!guild) {
-      // Client prêt et serveur absent : le bot l'a quitté, le rôle ne pourra jamais être retiré.
-      if (this.client.isReady?.()) this.repo.close(row.id, 'guild_left');
-      return;
-    }
-    if (!guild.available) {
+    // Serveur absent (bot retiré, peut-être temporairement) ou indisponible : la ligne reste
+    // active et le rôle est retiré au retour du bot (la purge des serveurs quittés la supprime
+    // après 30 jours). La clore ici laissait le rôle à vie après une réinvitation.
+    if (!guild || !guild.available) {
       this.#retryLater(row);
       return;
     }

@@ -47,6 +47,7 @@ const { ApplicationRepository } = require('../database/repositories/ApplicationR
 const { TicketRatingRepository } = require('../database/repositories/TicketRatingRepository');
 const { FeedRepository } = require('../database/repositories/FeedRepository');
 const { AutoThreadCounterRepository } = require('../database/repositories/AutoThreadCounterRepository');
+const { GuildPurgeRepository } = require('../database/repositories/GuildPurgeRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -166,6 +167,8 @@ class GadgetClient extends Client {
       ticketRatings: new TicketRatingRepository(db),
       feeds: new FeedRepository(db),
       autoThreadCounters: new AutoThreadCounterRepository(db),
+      // Purge des serveurs quittés (scheduler) : toutes les tables à guild_id et leurs filles.
+      guildPurge: new GuildPurgeRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -329,12 +332,6 @@ class GadgetClient extends Client {
     } catch (err) {
       logger.warn('Fermeture du serveur de supervision :', err?.message);
     }
-    try {
-      // Attendre une éventuelle sauvegarde en cours avant de fermer la base.
-      await this.autoBackup?.stop();
-    } catch (err) {
-      logger.warn('Arrêt de la sauvegarde automatique :', err?.message);
-    }
     // Un SEUL passage parallèle, borné globalement (SHUTDOWN_DEADLINE_MS) : arrêt des boucles
     // (scheduler et niveaux attendent leur tick en cours, qui écrit en base), des compteurs et
     // de la communauté (minuteurs d'anti-rebond, écritures en cours), et vidage du travail
@@ -343,6 +340,10 @@ class GadgetClient extends Client {
     // le garde-fou de 10 s pouvait tuer le processus avant la fermeture de la base.
     const s = this.services ?? {};
     const tasks = [
+      // Sauvegarde automatique en cours attendue DANS le passage borné : un disque lent ne doit
+      // pas laisser le garde-fou de 10 s tuer le processus avant les vidages et la fermeture de
+      // la base (une copie interrompue laisse un .partial, nettoyé au démarrage suivant).
+      ['Arrêt de la sauvegarde automatique', () => this.autoBackup?.stop()],
       ['Arrêt du scheduler', () => s.scheduler?.stop()],
       ['Arrêt du suivi des niveaux', () => s.levels?.stop()],
       ['Arrêt des compteurs de statistiques', () => s.counters?.stop()],

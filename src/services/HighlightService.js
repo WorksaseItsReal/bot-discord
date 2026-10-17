@@ -199,6 +199,11 @@ class HighlightService {
     return true;
   }
 
+  /** Serveur purgé (quitté depuis 30 jours) : index des mots-clés oublié. */
+  forgetGuild(guildId) {
+    this.indexes.delete(guildId);
+  }
+
   /** Statistiques du serveur (tableau de bord). */
   stats(guildId) {
     const entries = this.repo.listByGuild(guildId).filter((e) => e.words.length);

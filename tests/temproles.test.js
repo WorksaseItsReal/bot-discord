@@ -83,7 +83,7 @@ test('processDue : rôle retiré à l\'échéance, ligne close et log', async ()
   assert.match(client.logs[0].embed.title, /expiré/);
 });
 
-test('processDue : membre parti, rôle supprimé, serveur quitté → ligne close sans appel inutile', async () => {
+test('processDue : membre parti, rôle supprimé → ligne close ; serveur quitté → gardée (retour du bot), sans appel inutile', async () => {
   const { guild, client, repo, service } = setup();
   const past = Date.now() - 1000;
   const left = repo.upsert({ guildId: GUILD, userId: USER.b, roleId: ROLE.safe, expiresAt: past }).id;
@@ -92,7 +92,9 @@ test('processDue : membre parti, rôle supprimé, serveur quitté → ligne clos
   await service.processDue();
   assert.equal(repo.get(GUILD, left).end_reason, 'left');
   assert.equal(repo.get(GUILD, deleted).end_reason, 'role_deleted');
-  assert.equal(repo.byId(gone).end_reason, 'guild_left');
+  // Revue n° 6 (R97) : bot peut-être retiré temporairement → rôle retiré à son retour (purge après 30 jours).
+  assert.equal(repo.byId(gone).active, 1);
+  assert.ok(repo.byId(gone).next_attempt_at > Date.now());
   assert.equal(client.logs.length, 0);
 });
 

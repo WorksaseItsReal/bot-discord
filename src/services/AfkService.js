@@ -235,6 +235,11 @@ class AfkService {
     return Boolean(this.#take(guildId, userId));
   }
 
+  /** Serveur purgé (quitté depuis 30 jours) : cache des membres absents oublié. */
+  forgetGuild(guildId) {
+    this.users.delete(guildId);
+  }
+
   /** Nombre de membres absents (tableau de bord). */
   count(guildId) {
     return this.repo.count(guildId);

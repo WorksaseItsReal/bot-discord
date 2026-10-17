@@ -19,6 +19,8 @@ const GONE_CODES = new Set([10003, 50001]);
 /** Attente avant un nouvel essai après un échec : 1 minute, doublée à chaque échec, 1 heure au plus. */
 const RETRY_BASE_MS = 60_000;
 const RETRY_MAX_MS = 3_600_000;
+/** Serveur absent (bot retiré) : nouvel essai après 5 minutes (aucun appel Discord). */
+const ABSENT_GUILD_RETRY_MS = 5 * 60_000;
 
 /** Libellés des sortes d'actions temporaires. */
 const KIND_LABELS = { lock: 'Verrouillage', slowmode: 'Mode lent', lockdown: 'Lockdown' };
@@ -118,8 +120,10 @@ class TimedLockService {
   async #expire(row) {
     const guild = this.client.guilds.cache.get(row.guild_id);
     if (!guild) {
-      // Client prêt et serveur absent : le bot l'a quitté, plus rien à lever.
-      if (this.client.isReady?.()) this.repo.close(row.id, 'gone');
+      // Serveur absent (bot retiré, peut-être temporairement) : la levée reste programmée et
+      // est faite au retour du bot (la purge des serveurs quittés la supprime après 30 jours).
+      // Écartée quelques minutes : elle ne monopolise pas les places d'un passage.
+      this.retries.set(row.id, { at: Date.now() + ABSENT_GUILD_RETRY_MS, attempts: 0 });
       return;
     }
     if (!guild.available) return;

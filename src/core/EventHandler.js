@@ -38,9 +38,17 @@ class EventHandler {
           logger.warn(`Événement ignoré (structure invalide) : ${entry}`);
           continue;
         }
-        const bound = (...args) => Promise.resolve(event.execute(this.client, ...args)).catch((err) =>
-          logger.error(`Erreur dans l'événement ${event.name} :`, err),
-        );
+        const fail = (err) => logger.error(`Erreur dans l'événement ${event.name} :`, err);
+        // try/catch : une exception SYNCHRONE d'un écouteur non async (erreur SQLite…) sortirait
+        // du .catch, interromprait l'emit et les écouteurs suivants (AutoMod) ne seraient jamais appelés.
+        const bound = (...args) => {
+          try {
+            return Promise.resolve(event.execute(this.client, ...args)).catch(fail);
+          } catch (err) {
+            fail(err);
+            return Promise.resolve();
+          }
+        };
         if (event.once) this.client.once(event.name, bound);
         else this.client.on(event.name, bound);
         this.count += 1;

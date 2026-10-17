@@ -918,6 +918,24 @@ const migrations = [
     `,
   },
   {
+    id: 26,
+    name: 'foreign_key_and_guild_purge_indexes',
+    up: `
+      -- Clés étrangères vers sanctions : les index existants commencent par guild_id, inutilisables
+      -- pour la vérification des clés : chaque sanction supprimée (/sanctions clear, purge d'un
+      -- serveur quitté) parcourait toute la table fille.
+      CREATE INDEX IF NOT EXISTS idx_mod_notes_sanction_id ON mod_notes (sanction_id);
+      CREATE INDEX IF NOT EXISTS idx_sanction_edits_sanction_id ON sanction_edits (sanction_id);
+      -- Purge d'un serveur quitté (DELETE … WHERE guild_id = ?) et rattrapage des départs
+      -- hors ligne (serveurs connus en base) : guild_id indexé sur les tables qui ne l'avaient pas.
+      CREATE INDEX IF NOT EXISTS idx_giveaways_guild ON giveaways (guild_id);
+      CREATE INDEX IF NOT EXISTS idx_modmail_threads_guild ON modmail_threads (guild_id);
+      CREATE INDEX IF NOT EXISTS idx_reminders_guild ON reminders (guild_id);
+      CREATE INDEX IF NOT EXISTS idx_role_menus_guild ON role_menus (guild_id);
+      CREATE INDEX IF NOT EXISTS idx_temp_voice_guild ON temp_voice (guild_id);
+    `,
+  },
+  {
     id: 27,
     name: 'stats_collection_heartbeat',
     up: `

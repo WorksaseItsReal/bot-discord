@@ -96,19 +96,20 @@ test('levées programmées : les lignes en attente de réessai ne monopolisent p
   const now = Date.now();
   const ids = [];
   for (let i = 0; i < 201; i += 1) ids.push(timed.schedule({ guildId: `9000000000000${String(i).padStart(5, '0')}`, channelId: `8${i}`, kind: 'lock', expiresAt: now - 10_000 + i, now: now - 20_000 }));
-  // Serveurs absents (client prêt) : une ligne traitée est close « gone ».
+  // Serveurs absents (client prêt) : une ligne traitée reste active (levée au retour du bot,
+  // revue n° 6 R97) et attend quelques minutes, écartée des passages suivants.
   const client = { guilds: { cache: new Map() }, isReady: () => true };
   const service = new TimedLockService({ client, timed });
   for (const id of ids.slice(0, 200)) service.retries.set(id, { at: Date.now() + 3_600_000, attempts: 3 });
   assert.equal(timed.findDue(now, { exclude: ids.slice(0, 200) }).length, 1);
   await service.processDue();
-  assert.equal(timed.byId(ids[200]).active, 0, 'la 201e ligne échue n\'a pas été traitée');
-  assert.equal(timed.byId(ids[200]).end_reason, 'gone');
+  assert.ok(service.retries.get(ids[200])?.at > Date.now(), 'la 201e ligne échue n\'a pas été traitée');
+  assert.equal(timed.byId(ids[200]).active, 1);
   // Une ligne en attente annulée entre-temps (/unlock) : son réessai est oublié.
   timed.close(ids[0], 'cancelled');
   await service.processDue();
   assert.equal(service.retries.has(ids[0]), false, 'réessai d\'une ligne close conservé');
-  assert.equal(service.retries.size, 199);
+  assert.equal(service.retries.size, 200);
 });
 
 // ---------------------------------------------------------------- statistiques

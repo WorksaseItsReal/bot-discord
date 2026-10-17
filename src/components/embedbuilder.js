@@ -35,11 +35,13 @@ module.exports = {
     embed.setColor(parseColor(color) ?? TONES.brand);
     if (image) embed.setImage(image);
 
+    // Acquittement AVANT la publication : un envoi retardé (limite de débit du salon) ne doit
+    // pas faire expirer le formulaire (« Cette interaction a échoué » → renvoi → doublon).
+    await interaction.deferReply({ ephemeral: true });
     const sent = await channel.send({ embeds: [embed] });
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [status.ok(`Votre embed a été publié dans ${channel}.`, 'Embed envoyé')],
       components: sent?.url ? buttonRows(linkButton('Voir le message', sent.url, ICONS.link)) : [],
-      ephemeral: true,
     });
   },
 };
