@@ -477,3 +477,55 @@ for (const c of S22_CASES) {
     }
   });
 }
+
+/* -------------------------------------------------------------------- */
+/* S23 : références en base d'un rôle recréé                               */
+/* -------------------------------------------------------------------- */
+
+test('S23 : rôle recréé par Secur → base rebranchée (rôle temporaire retiré à l\'échéance, anniversaire retiré, giveaway interdit, menu signalé)', async () => {
+  const { unmetConditions } = require('../../src/services/GiveawayService');
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const g = h.guild;
+    const db = h.client.database.db ?? h.client.database.raw;
+    const OLD = IDS.roles.notif;
+    const now = Date.now();
+    await h.client.services.tempRoles.grant({ guild: g, member: g.members.cache.get(IDS.users.target), role: g.roles.cache.get(OLD), durationMs: 3_600_000, moderator: g.members.cache.get(IDS.users.admin).user });
+    await h.settle();
+    await h.asHuman('owner').addRole('member', OLD);
+    db.prepare('INSERT INTO birthdays (guild_id, user_id, day, month, role_id, role_until, created_at, updated_at) VALUES (?, ?, 1, 1, ?, ?, ?, ?)').run(g.id, IDS.users.member, OLD, now + 3_600_000, now, now);
+    db.prepare('INSERT INTO giveaways (guild_id, channel_id, prize, winners, host_id, forbidden_role, ends_at, created_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)').run(g.id, IDS.channels.general, 'Nitro', IDS.users.admin, OLD, now + 86_400_000, now);
+    db.prepare('INSERT INTO role_menus (guild_id, channel_id, data, created_at) VALUES (?, ?, ?, ?)').run(g.id, IDS.channels.general, JSON.stringify({ title: 'Rôles', roles: [{ roleId: OLD, label: 'Notifications' }] }), now);
+
+    h.configure({ secur: { modules: { roleDelete: { mode: 'on' } } } });
+    await h.asHuman('admin').deleteRole(OLD);
+    await settleUndo(h, 3);
+    const recreated = [...h.fake.roles.values()].find((r) => r.name === 'Notifications');
+    assert.ok(recreated && recreated.id !== OLD, 'précondition : rôle recréé');
+    const NEW = recreated.id;
+    assert.ok(rolesOf(h, IDS.users.target).includes(NEW), 'précondition : rôle rendu au porteur du rôle temporaire');
+
+    // (1) Échéance du rôle temporaire : le rôle recréé est retiré.
+    const tr = db.prepare('SELECT id, role_id FROM temp_roles WHERE guild_id = ?').get(g.id);
+    assert.equal(tr.role_id, NEW);
+    db.prepare('UPDATE temp_roles SET expires_at = ? WHERE id = ?').run(Date.now() - 1_000, tr.id);
+    await h.client.services.tempRoles.processDue();
+    await h.settle();
+    assert.equal(rolesOf(h, IDS.users.target).includes(NEW), false, 'rôle temporaire devenu permanent');
+    // (2) Fin de l'anniversaire : le rôle recréé est retiré.
+    db.prepare('UPDATE birthdays SET role_until = ? WHERE guild_id = ? AND user_id = ?').run(Date.now() - 1_000, g.id, IDS.users.member);
+    await h.client.services.birthdays.processDue();
+    await h.settle();
+    assert.equal(rolesOf(h, IDS.users.member).includes(NEW), false, 'rôle d\'anniversaire jamais retiré');
+    // (3) Giveaway : le rôle recréé reste interdit.
+    const gw = db.prepare('SELECT forbidden_role FROM giveaways WHERE guild_id = ?').get(g.id);
+    assert.equal(gw.forbidden_role, NEW);
+    await h.asHuman('owner').addRole('target', NEW);
+    assert.ok(unmetConditions({ forbidden_role: gw.forbidden_role }, { member: g.members.cache.get(IDS.users.target) }).length > 0, 'forbidden_role contourné');
+    // (4) Menu de rôles publié : signalé dans l'incident (le message garde l'ancien identifiant).
+    assert.match(incidents(h)[0].outcome ?? '', /menu\(s\) de rôles à republier/);
+  } finally {
+    await h.close();
+  }
+});

@@ -120,3 +120,31 @@ test('S22 : roleRemove ignore la cible d\'un incident ouvert ; incident expiré 
   open.clear();
   assert.ok(roleRemove.classify(entry, guild, ctx));
 });
+
+// ---------------------------------------------------------------- S23
+
+test('S23 : chaque colonne de rôle de la base est classée (roleRemap) ; report carry/json limité au serveur, menus comptés', () => {
+  const { memoryDb } = require('./db.helper');
+  const { COLUMNS, remapRole } = require('../src/utils/roleRemap');
+  const { db } = memoryDb();
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
+  for (const t of tables) {
+    for (const c of db.prepare(`PRAGMA table_info("${t}")`).all()) {
+      if (/role/i.test(c.name)) assert.ok(COLUMNS[`${t}.${c.name}`], `colonne ${t}.${c.name} non classée dans roleRemap`);
+    }
+  }
+  const G = '300000000000000050';
+  const OTHER = '300000000000000051';
+  const OLD = '300000000000000052';
+  const NEW = '300000000000000053';
+  const now = Date.now();
+  for (const g of [G, OTHER]) {
+    db.prepare('INSERT INTO giveaways (guild_id, channel_id, prize, winners, host_id, required_role, ends_at, created_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)').run(g, '1', 'x', '2', OLD, now, now);
+    db.prepare('INSERT INTO role_menus (guild_id, channel_id, data, created_at) VALUES (?, ?, ?, ?)').run(g, '1', JSON.stringify({ roles: [{ roleId: OLD }] }), now);
+  }
+  const res = remapRole(db, G, OLD, NEW);
+  assert.equal(res.carried, 1);
+  assert.equal(res.lostMenus, 1);
+  assert.equal(db.prepare('SELECT required_role FROM giveaways WHERE guild_id = ?').get(G).required_role, NEW);
+  assert.equal(db.prepare('SELECT required_role FROM giveaways WHERE guild_id = ?').get(OTHER).required_role, OLD, 'autre serveur touché');
+});

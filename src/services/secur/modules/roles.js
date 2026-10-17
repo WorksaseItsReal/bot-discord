@@ -3,6 +3,7 @@
 const { PermissionFlagsBits, Routes } = require('discord.js');
 const { applyRoles } = require('../../../utils/memberRoles');
 const channelRemap = require('../../../utils/channelRemap');
+const { remapRole } = require('../../../utils/roleRemap');
 const S = require('../../../utils/secur');
 const St = require('../structure');
 
@@ -147,6 +148,13 @@ async function recreate(guild, snap, ctx, store) {
   } catch {
     /* au mieux */
   }
+  // Références en base (rôles temporaires, anniversaires, boutique, giveaways, « Rendre les rôles »…).
+  let base = { carried: 0, lostMenus: 0 };
+  try {
+    base = remapRole(St.dbOf(ctx.client), guild.id, snap.id, role.id);
+  } catch {
+    /* au mieux */
+  }
   St.noteSummary(ctx, 'roles', (d) => {
     d.count = (d.count ?? 0) + 1;
     d.members = (d.members ?? 0) + members;
@@ -155,7 +163,9 @@ async function recreate(guild, snap, ctx, store) {
     d.refs = (d.refs ?? 0) + configRefs;
     d.lost = (d.lost ?? 0) + (!twin && !botAdmin && St.toBig(snap.permissions) !== options.permissions ? 1 : 0);
     d.withheld = (d.withheld ?? 0) + withheld;
-  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs})${d.withheld ? ` — ${d.withheld} attribution(s) retenue(s) pour l'auteur sanctionné` : ''}${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
+    d.base = (d.base ?? 0) + base.carried;
+    d.menus = (d.menus ?? 0) + base.lostMenus;
+  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs} ; en base : ${d.base})${d.menus ? ` — ${d.menus} menu(s) de rôles à republier (ils proposent l'ancien rôle)` : ''}${d.withheld ? ` — ${d.withheld} attribution(s) retenue(s) pour l'auteur sanctionné` : ''}${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
   return { ok: true };
 }
 
