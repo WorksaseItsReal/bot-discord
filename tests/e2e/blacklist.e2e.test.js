@@ -123,7 +123,7 @@ test('blacklisté débanni hors ligne : banni à son arrivée, sans accueil, san
     await h.settle();
     assert.ok(h.fake.bans.has(away.id), 'débanni hors ligne non rebanni');
     assert.equal(calls(h, callMark2, 'GET', /\/bans\/\d+$/).length, 2, 'un GET par ligne due');
-    assert.equal(calls(h, callMark2, 'PUT', /\/bans\//).length, 1, 'toujours banni : rebanni quand même');
+    assert.equal(calls(h, callMark2, 'PUT', /\/bans\//).length, 1, 'un seul rebannissement (la ligne encore bannie n\'est pas rebannie)');
     assert.ok(repo.get(h.guild.id, still.id, 'ban').next_check_at > Date.now() + 5 * 3_600_000);
     assert.equal(logged(h, mark2, /Bannissement rétabli/).length, 1);
     assert.equal(h.problemCount(), 0, h.formatProblems());

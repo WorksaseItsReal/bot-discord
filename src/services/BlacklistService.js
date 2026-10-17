@@ -395,7 +395,7 @@ class BlacklistService {
     this.rankRemovals.set(key, list);
     while (this.rankRemovals.size > MAX_TRACKED) this.rankRemovals.delete(this.rankRemovals.keys().next().value);
     const res = await applyRoles(newMember, { remove: gained.map((r) => r.id) }, 'Blrank : ce membre ne peut recevoir aucun rôle');
-    const executor = await fetchExecutor(guild, AuditLogEvent.MemberRoleUpdate, newMember.id).catch(() => null);
+    const executor = await this.#roleGranter(guild, newMember.id, gained.map((r) => r.id));
     await this.#log(guild, {
       tone: res.failed.length ? 'warning' : 'caution', icon: ICONS.role, title: 'Rôle retiré (blrank)',
       description: `<@${newMember.id}> est dans le blrank : ${res.removed.length ? `${res.removed.map((id) => `<@&${id}>`).join(' ')} lui ${res.removed.length > 1 ? 'ont été retirés' : 'a été retiré'}.` : 'aucun rôle n\'a pu lui être retiré.'}`,
@@ -405,6 +405,25 @@ class BlacklistService {
         res.failed.length ? field(ICONS.warning, 'Échecs', res.failed.map((id) => `<@&${id}>`).join(' ')) : null,
       ],
     }, newMember.id);
+  }
+
+  /**
+   * Auteur de l'ajout d'un rôle (journal d'audit, moins de 10 s) : l'entrée « $add » d'un des
+   * rôles gagnés, sinon la plus récente pour ce membre qui ne vient pas du bot (notre propre
+   * retrait est aussi une entrée 25). null si illisible.
+   */
+  async #roleGranter(guild, memberId, roleIds) {
+    if (guild.members?.me?.permissions && !guild.members.me.permissions.has(PermissionFlagsBits.ViewAuditLog)) return null;
+    try {
+      const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 25 });
+      const now = Date.now();
+      const recent = [...logs.entries.values()].filter((e) => (e.targetId ?? e.target?.id) === memberId && now - e.createdTimestamp < 10_000);
+      const byAdd = recent.find((e) => (e.changes ?? []).some((c) => c.key === '$add' && (c.new ?? []).some((r) => roleIds.includes(r?.id))));
+      const entry = byAdd ?? recent.find((e) => (e.executorId ?? e.executor?.id) !== this.client.user?.id);
+      return entry?.executorId ?? entry?.executor?.id ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /* ------------------------------------------------------------------ */
