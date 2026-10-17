@@ -46,6 +46,7 @@ const MAX_IGNORED = 25;
 const FRESH_CHANNEL_MS = 10 * 60_000;
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
+const full = (client, guildId) => client.services.config.get(guildId);
 
 /**
  * Création, réparation, rôle staff : le bot crée des salons et pose des permissions en son nom.
@@ -110,7 +111,6 @@ function assertStaffRole(interaction, client, id) {
     throw new UserError('Vous ne voyez pas les salons de logs actuels : vous ne pouvez pas en ouvrir la lecture à un rôle. Demandez à un administrateur.');
   }
 }
-const full = (client, guildId) => client.services.config.get(guildId);
 
 /** État d'une catégorie : pause > salon. */
 function categoryState(client, guild, key) {
