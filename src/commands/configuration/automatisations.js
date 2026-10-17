@@ -572,7 +572,8 @@ function presenceView(client, notice) {
   // Statuts imposés par le propriétaire du bot (/bot) prioritaires, s'ils existent.
   const imposed = client.services.botProfile?.presenceSource?.() === 'bot';
   const effective = imposed ? client.services.botProfile?.presenceSettings?.() : null;
-  const presence = Array.isArray(effective?.statuses) && effective.statuses.length ? { ...presenceSettings(client.config), ...effective } : presenceSettings(client.config);
+  const usable = Array.isArray(effective?.statuses) && effective.statuses.length && effective.statuses.every((st) => typeof st?.text === 'string');
+  const presence = usable ? { ...presenceSettings(client.config), ...effective } : presenceSettings(client.config);
   const values = counts(client);
   const current = client.user?.presence?.activities?.[0]?.name;
   const lines = presence.statuses.map((s, i) => `\`${i + 1}.\` **${TYPE_LABELS[s.type] ?? 'Regarde'}** ${truncate(renderStatus(s, values).name, 128).replace(/[*_`~|]/g, '')}`);
