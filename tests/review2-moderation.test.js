@@ -437,10 +437,13 @@ function auditEnv() {
   return { ...env, guild, client };
 }
 
-test('7 audit log : rôle Muted retiré par un tiers → mute désactivé ; par le bot → inchangé', async () => {
+test('7 audit log : rôle Muted retiré par un tiers → mute désactivé ; par le bot via /unmute → inchangé', async () => {
   const env = auditEnv();
   const id = env.repo.create({ guildId: 'g1', userId: UID, moderatorId: MOD, type: 'mute' });
   const entry = (executorId) => ({ action: AuditLogEvent.MemberRoleUpdate, targetId: UID, executorId, changes: [{ key: '$remove', new: [{ id: 'muted' }] }] });
+  // /unmute marque son retrait : c'est lui qui clôt la ligne (auteur, raison). Revue 6 : un retrait
+  // par le bot NON marqué (/role remove, /massrole) lève le mute (voir review6-moderation).
+  env.moderation.markBotAction('unmute', 'g1', UID);
   await auditLogs.execute(env.client, entry('bot'), env.guild);
   assert.equal(env.repo.get('g1', id).active, 1);
   await auditLogs.execute(env.client, entry('human'), env.guild);

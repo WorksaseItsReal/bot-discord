@@ -538,7 +538,9 @@ class ModerationService {
       await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
       return { ok: true, dbOnly: true };
     }
-    await targetMember.roles.remove(role, reason || undefined);
+    // Marqué : le journal d'audit (retrait du rôle Muted par le bot) ne lève pas la ligne à la place
+    // de cette action, qui l'enregistre avec son auteur et sa raison.
+    await this.#asBot('unmute', guild.id, targetMember.id, () => targetMember.roles.remove(role, reason || undefined));
     this.#deactivateActive(guild.id, targetMember.id, 'mute', { by: moderator.id, reason });
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true };
@@ -761,13 +763,16 @@ class ModerationService {
    * Sanction levée HORS du bot (rôle Muted retiré, timeout retiré par un tiers) :
    * la ligne active est désactivée pour ne pas être réappliquée ni levée plus tard.
    * @param {'mute'|'timeout'} type
+   * @param {{ reason?: string, keepDue?: boolean }} [opts] motif enregistré (par défaut « Levé hors
+   *   du bot ») ; keepDue : les sanctions déjà échues sont laissées à la levée automatique
    * @returns {number} lignes désactivées
    */
-  liftedOutside(guildId, userId, type, executorId = null, before = Date.now()) {
+  liftedOutside(guildId, userId, type, executorId = null, before = Date.now(), { reason, keepDue = false } = {}) {
     // Seules les sanctions ANTÉRIEURES à l'action manuelle sont levées : un événement d'audit
     // reçu en retard ne doit pas annuler une sanction posée juste après (ex. remute immédiat).
-    const rows = (this.sanctions.listActive?.(guildId, userId) ?? []).filter((r) => r.type === type && r.created_at <= before);
-    for (const r of rows) this.sanctions.revoke(r.id, { by: executorId, reason: 'Levé hors du bot' });
+    const rows = (this.sanctions.listActive?.(guildId, userId) ?? [])
+      .filter((r) => r.type === type && r.created_at <= before && !(keepDue && r.expires_at && r.expires_at <= before));
+    for (const r of rows) this.sanctions.revoke(r.id, { by: executorId, reason: reason ?? 'Levé hors du bot' });
     return rows.length;
   }
 

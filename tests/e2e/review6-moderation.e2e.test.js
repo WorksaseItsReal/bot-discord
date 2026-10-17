@@ -421,3 +421,31 @@ test('R20 deux /mute simultanés sans rôle Muted : un seul rôle créé, les de
     await h.close();
   }
 });
+
+test('R22 rôle Muted retiré par /role remove ou /massrole remove : le mute est levé en base, pas de réapplication au retour', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const gid = h.guild.id;
+    const sanctions = h.client.repositories.sanctions;
+    await h.slash('mute', [opt('membre', 6, IDS.users.target), opt('raison', 3, 'spam')], { as: 'admin' });
+    await h.slash('mute', [opt('membre', 6, IDS.users.member), opt('raison', 3, 'spam')], { as: 'admin' });
+    const muted = h.client.services.moderation.mutedRole(h.guild);
+    const r = await h.slash('role', sub('remove', [opt('membre', 6, IDS.users.target), opt('role', 8, muted.id)]), { as: 'admin' });
+    assert.ok(!h.isError(r), h.replyText(r));
+    assert.equal(sanctions.activeMute(gid, IDS.users.target), null, 'mute toujours actif après /role remove');
+    const user = h.fake.users.get(IDS.users.target);
+    await h.memberLeave(IDS.users.target);
+    await h.memberJoin(user);
+    assert.ok(!h.fake.members.get(IDS.users.target).roles.includes(muted.id), 'rôle Muted remis au retour');
+
+    const m = await h.slash('massrole', [opt('action', 3, 'remove'), opt('role', 8, muted.id)], { as: 'admin' });
+    assert.ok(!h.isError(m), h.replyText(m));
+    await h.confirm(m);
+    await h.waitFor(() => !h.fake.members.get(IDS.users.member).roles.includes(muted.id), { timeout: 3_000 });
+    assert.equal(sanctions.activeMute(gid, IDS.users.member), null, 'mute toujours actif après /massrole remove');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

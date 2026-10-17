@@ -42,3 +42,30 @@ test('R16 syncMutedRole : refus complets en conférence ; un refus que le bot n\
   await moderation.syncMutedRole(guildPerms(['ManageRoles', 'SendMessages', 'AddReactions', 'Speak']), { id: 'muted' }, [stage]);
   assert.deepEqual(Object.keys(edits[1]).sort(), ['AddReactions', 'SendMessages', 'Speak']);
 });
+
+test('R22 audit log : rôle Muted retiré par le bot hors /unmute → mute levé ; mute échu laissé à la levée automatique', async () => {
+  const { AuditLogEvent } = require('discord.js');
+  const { memoryDb } = require('./db.helper');
+  const { ConfigService } = require('../src/services/ConfigService');
+  const { GuildConfigRepository } = require('../src/database/repositories/GuildConfigRepository');
+  const { SanctionRepository } = require('../src/database/repositories/SanctionRepository');
+  const { ModerationService } = require('../src/services/ModerationService');
+  const auditLogs = require('../src/events/auditLogs');
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  config.update('g1', { moderation: { mutedRoleId: 'muted' } });
+  const repo = new SanctionRepository(db);
+  const moderation = new ModerationService({ sanctions: repo, config, logging: { send: async () => {} } });
+  const guild = { id: 'g1', roles: { cache: new Map([['muted', { id: 'muted' }]]) }, members: { cache: new Map() } };
+  const client = { user: { id: 'bot' }, users: { fetch: async () => null }, services: { moderation, logging: { wouldLog: () => false, send: async () => {} } } };
+  const removal = (userId) => ({ action: AuditLogEvent.MemberRoleUpdate, targetId: userId, executorId: 'bot', createdTimestamp: Date.now() + 1, changes: [{ key: '$remove', new: [{ id: 'muted' }] }] });
+  const live = repo.create({ guildId: 'g1', userId: '111111111111111111', moderatorId: 'm', type: 'mute' });
+  const due = repo.create({ guildId: 'g1', userId: '222222222222222222', moderatorId: 'm', type: 'mute', expiresAt: Date.now() - 1000 });
+  await auditLogs.execute(client, removal('111111111111111111'), guild);
+  await auditLogs.execute(client, removal('222222222222222222'), guild);
+  const row = repo.get('g1', live);
+  assert.equal(row.active, 0);
+  assert.equal(row.revoked_by, 'bot');
+  assert.equal(row.revoke_reason, 'Rôle Muted retiré via le bot');
+  assert.equal(repo.get('g1', due).active, 1, 'levée automatique court-circuitée');
+});
