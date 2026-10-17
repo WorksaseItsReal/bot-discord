@@ -43,6 +43,19 @@ const defaultGuildConfig = Object.freeze({
     confirmDangerous: true,
     mutedRoleId: null,
   },
+  // Niveaux de permissions (/permissions, ADM1) : rôles des niveaux 1 à 3 (10 au plus chacun, nom
+  // de 32 caractères au plus), commandes attribuées (nom → niveau 1..3 ; null = retirée) et mode
+  // strict. Délégation fermée par défaut : seul le palier « courant » (utils/access.js) est
+  // délégué ; une commande qui protège une action sensible n'est jamais déléguée.
+  permissions: {
+    levels: {
+      l1: { name: null, roles: [] },
+      l2: { name: null, roles: [] },
+      l3: { name: null, roles: [] },
+    },
+    commands: {},
+    strict: false,
+  },
   strikes: {
     enabled: true,
     // Décroissance : les strikes de plus de N jours ne comptent plus dans le palier

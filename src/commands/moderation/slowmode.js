@@ -3,12 +3,41 @@
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { parseDuration, formatDuration, discordTimestamp } = require('../../utils/time');
 const { card, field, ICONS, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
-const { channelForButton, channelForCommand } = require('../../services/LockdownService');
 const { timedDuration } = require('../../services/TimedLockService');
 const { requirePermission } = require('../../services/ModerationService');
+const { memberCanIn } = require('../../utils/access');
+const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
 
 const MAX_SECONDS = 21_600; // limite Discord : 6 heures
+
+/**
+ * « Gérer les salons » sur le salon VISÉ (pas seulement celui de la commande) : native, ou
+ * déléguée par /permissions (palier « courant ») à un membre qui voit ce salon (utils/access.js).
+ */
+function assertCanSlow(interaction, channel) {
+  if (!memberCanIn(interaction, channel, [PermissionFlagsBits.ManageChannels])) {
+    throw new UserError(`Il vous faut la permission **Gérer les salons** dans ${channel ?? 'ce salon'}.`);
+  }
+}
+
+/** Salon visé par l'option `salon` (ou le salon actuel), contrôlé par assertCanSlow. */
+function channelForCommand(interaction) {
+  const picked = interaction.options.getChannel('salon');
+  const channel = picked ? interaction.guild.channels.cache.get(picked.id) ?? picked : interaction.channel;
+  assertCanSlow(interaction, channel);
+  return channel;
+}
+
+/** Salon d'un bouton (identifiant validé, salon de CE serveur), contrôlé par assertCanSlow. */
+async function channelForButton(interaction, rawChannelId) {
+  const channelId = snowflake(rawChannelId, 'salon');
+  const channel = interaction.guild.channels.cache.get(channelId)
+    ?? (await interaction.client.channels.fetch(channelId).catch(() => null));
+  if (!channel || channel.guildId !== interaction.guildId) throw new UserError('Ce salon n\'existe plus.');
+  assertCanSlow(interaction, channel);
+  return channel;
+}
 
 /**
  * Applique le mode lent puis programme (pendant) ou annule la levée automatique :
