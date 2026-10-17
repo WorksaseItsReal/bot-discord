@@ -31,7 +31,8 @@ module.exports = (fake, route, helpers) => {
     throw helpers.error(call, 400, 50035, `Invalid Form Body\n${problems.join('\n')}`);
   };
 
-  route('PATCH', '/users/@me', function (p, call) {
+  // discord.js encode parfois « @me » (%40me) dans le chemin : les deux formes sont servies.
+  const userMe = function (p, call) {
     const body = call.body ?? {};
     const problems = problemsOf(body, { user: true });
     if (problems.length) refuse(call, problems);
@@ -40,9 +41,11 @@ module.exports = (fake, route, helpers) => {
     if (body.username != null) user.username = body.username;
     for (const key of ['avatar', 'banner']) if (key in body && body[key] !== undefined) user[key] = body[key] ? hash(body[key]) : null;
     return user;
-  }, { prepend: true });
+  };
+  route('PATCH', '/users/@me', userMe, { prepend: true });
+  route('PATCH', '/users/%40me', userMe, { prepend: true });
 
-  route('PATCH', '/guilds/:guild/members/@me', function (p, call) {
+  const memberMe = function (p, call) {
     const body = call.body ?? {};
     const problems = problemsOf(body);
     if (problems.length) refuse(call, problems);
@@ -55,5 +58,7 @@ module.exports = (fake, route, helpers) => {
     // Pseudo et événement GUILD_MEMBER_UPDATE : route de base.
     const base = this.routes.filter((r) => r.method === 'PATCH' && r.re.test(call.route))[1];
     return base.handler({ ...p, user: '@me' }, call);
-  }, { prepend: true });
+  };
+  route('PATCH', '/guilds/:guild/members/@me', memberMe, { prepend: true });
+  route('PATCH', '/guilds/:guild/members/%40me', memberMe, { prepend: true });
 };
