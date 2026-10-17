@@ -216,8 +216,9 @@ async function undoOverwrite(guild, record, ctx) {
     allow: (now.allow & ~(after.allow & ~before.allow)) | (before.allow & ~after.allow),
     deny: (now.deny & ~(after.deny & ~before.deny)) | (before.deny & ~after.deny),
   };
-  const remove = !record.before && next.allow === 0n && next.deny === 0n;
-  if (remove ? !current : current && next.allow === now.allow && next.deny === now.deny) return { ok: true }; // déjà rétablie
+  const empty = next.allow === 0n && next.deny === 0n;
+  if (current ? next.allow === now.allow && next.deny === now.deny : empty) return { ok: true }; // déjà rétablie
+  const remove = empty && !record.before;
   const route = Routes.channelPermission(channel.id, record.targetId);
   try {
     if (remove) await ctx.client.rest.delete(route, { reason: REASON });
