@@ -343,7 +343,7 @@ class ApplicationService {
     const channel = guild.channels?.cache?.get(form.panel_channel_id) ?? (await guild.channels?.fetch?.(form.panel_channel_id).catch(() => null));
     if (!channel?.send || !TEXT_TYPES.includes(channel.type)) throw new UserError('Le salon du panneau est introuvable : choisissez-en un autre.');
     const payload = this.panelPayload(guild, form);
-    const body = { ...payload, embeds: fitEmbeds(payload.embeds) };
+    const body = { ...payload, embeds: fitEmbeds(payload.embeds, { guildId: guild.id }) };
     let message = null;
     let updated = false;
     if (form.panel_message_id) {
@@ -371,7 +371,7 @@ class ApplicationService {
     const message = await channel?.messages?.fetch?.(form.panel_message_id).catch(() => null);
     if (!message?.edit) return false;
     const payload = this.panelPayload(guild, form);
-    return message.edit({ ...payload, embeds: fitEmbeds(payload.embeds) }).then(() => true, () => false);
+    return message.edit({ ...payload, embeds: fitEmbeds(payload.embeds, { guildId: guild.id }) }).then(() => true, () => false);
   }
 
   // ------------------------------------------------------------ dépôt d'une candidature
@@ -503,7 +503,7 @@ class ApplicationService {
       interview,
       historyButton(app.user_id),
     );
-    return { embeds: fit ? fitEmbeds([embed]) : [embed], components };
+    return { embeds: fit ? fitEmbeds([embed], { guildId: guild.id }) : [embed], components };
   }
 
   /** Réédite la carte publiée d'une candidature. Best effort. */
@@ -592,7 +592,7 @@ class ApplicationService {
       fields: [!accepted && app.reason ? wide(ICONS.reason, 'Motif', truncate(app.reason, 1000)) : null],
       footer: `Candidature #${app.id}`,
     });
-    return { embeds: fitEmbeds([embed]) };
+    return { embeds: fitEmbeds([embed], { guildId: guild.id }) };
   }
 
   // ------------------------------------------------------------ entretien
@@ -639,7 +639,7 @@ class ApplicationService {
       const intro = this.interviewCard(app, reviewer);
       await channel.send({
         content: `<@${app.user_id}> <@${reviewer.id}>`,
-        embeds: fitEmbeds([intro]),
+        embeds: fitEmbeds([intro], { guildId: guild.id }),
         allowedMentions: { parse: [], users: [app.user_id, reviewer.id] },
       }).catch(() => {});
       this.applications.setInterview(guild.id, app.id, channel.id);

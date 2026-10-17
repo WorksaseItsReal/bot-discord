@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 const { ApplicationCommandOptionType: T } = require('discord.js');
-const { CommandHandler, isContextMenu } = require('../src/core/CommandHandler');
+const { CommandHandler, isContextMenu, scopeOf, SCOPES } = require('../src/core/CommandHandler');
 
 /**
  * Valide TOUTES les slash commands contre les limites de l'API Discord,
@@ -109,8 +109,27 @@ test('menus contextuels (clic droit → Applications) : types, noms, limites Dis
   }
   // Discord : au plus 5 menus de chaque type par application.
   assert.ok(perType[2] <= 5 && perType[3] <= 5, `menus : ${perType[2]} utilisateur, ${perType[3]} message (5 max chacun)`);
-  // Commandes slash : au plus 100 par application.
-  assert.ok([...commands.values()].filter((c) => !isContextMenu(c)).length <= 100);
+  // Commandes slash GLOBALES : au plus 100 par application. Les commandes de portée « owner »
+  // (console /bot) sont des commandes de SERVEUR (OWNER_GUILD_ID) : jamais comptées ni déployées ici.
+  const globalSlash = [...commands.values()].filter((c) => !isContextMenu(c) && scopeOf(c) !== 'owner');
+  assert.ok(globalSlash.length <= 100, `${globalSlash.length} commandes slash globales (100 au plus)`);
+  assert.equal(handler.toJSON({ scope: 'global' }).filter((c) => (c.type ?? 1) === 1).length, globalSlash.length);
+  // Serveur propriétaire = serveur de dev possible : commandes globales + owner, 100 au plus aussi.
+  assert.ok(handler.toJSON({ scope: 'all' }).filter((c) => (c.type ?? 1) === 1).length <= 100, 'serveur DEV = OWNER : plus de 100 commandes slash');
+});
+
+test('portée « owner » : jamais globale ; ownerOnly et permission par défaut obligatoires', () => {
+  const owners = [...commands.values()].filter((c) => scopeOf(c) === 'owner');
+  assert.ok(owners.length >= 1, 'console /bot attendue');
+  for (const cmd of commands.values()) assert.ok(SCOPES.includes(scopeOf(cmd)), `/${cmd.data.name} : portée « ${cmd.scope} » inconnue`);
+  const globalNames = new Set(handler.toJSON({ scope: 'global' }).map((c) => c.name));
+  for (const cmd of owners) {
+    const json = cmd.data.toJSON();
+    assert.equal(cmd.ownerOnly, true, `/${json.name} : portée owner sans ownerOnly`);
+    assert.ok(json.default_member_permissions != null, `/${json.name} : portée owner sans permission par défaut`);
+    assert.ok(!globalNames.has(json.name), `/${json.name} : commande owner dans le lot global`);
+    assert.ok(!isContextMenu(cmd), 'menus contextuels : toujours globaux');
+  }
 });
 
 test('chaque catégorie de commande est connue de /help', () => {

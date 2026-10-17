@@ -14,9 +14,12 @@ module.exports = {
     setBrand({ name: client.user.username, iconURL: client.user.displayAvatarURL({ size: 128 }) });
     logger.info(`Connecté en tant que ${client.user.tag} — ${client.guilds.cache.size} serveur(s), ${client.commands.size} commandes.`);
 
-    // Statuts tournants (PRESENCE_STATUSES / PRESENCE_INTERVAL_MINUTES, sinon statuts par défaut).
+    // Statuts tournants : activité imposée par /bot (prioritaire), sinon PRESENCE_STATUSES /
+    // PRESENCE_INTERVAL_MINUTES, sinon statuts par défaut. Un seul minuteur (client.presenceTimer).
     const settings = presenceSettings(client.config);
     if (settings.invalid.length) logger.warn(`PRESENCE_STATUSES : ${settings.invalid.length} statut(s) ignoré(s) (vide, plus de 128 caractères ou plus de 10 statuts).`);
-    startPresenceRotation(client, settings, (err) => logger.debug('Mise à jour du statut impossible :', err?.message));
+    const onError = (err) => logger.debug('Mise à jour du statut impossible :', err?.message);
+    if (client.services?.botProfile) client.services.botProfile.startPresence(onError);
+    else startPresenceRotation(client, settings, onError);
   },
 };

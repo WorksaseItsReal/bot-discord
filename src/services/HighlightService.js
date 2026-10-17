@@ -318,7 +318,7 @@ class HighlightService {
     const guildId = message.guild.id;
     try {
       await member.send({
-        embeds: fitEmbeds([alertCard(message, words)]),
+        embeds: fitEmbeds([alertCard(message, words)], { guildId }),
         components: buttonRows(linkButton('Aller au message', message.url, ICONS.link)),
         allowedMentions: { parse: [] },
       });

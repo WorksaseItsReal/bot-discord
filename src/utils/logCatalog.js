@@ -21,6 +21,7 @@ const LOG_CATEGORIES = Object.freeze({
       application: 'Candidatures (décisions, entretiens, retraits)',
       snipe: 'Consultations de /snipe',
       inactivity: 'Actions groupées sur les membres inactifs',
+      say: 'Messages publiés au nom du bot (/embed texte)',
     },
   },
   messages: {
@@ -88,8 +89,16 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '🏠',
     label: 'Serveur',
     channel: 'serveur',
-    description: 'Paramètres du serveur, emojis, économie, flux RSS et automatisations.',
-    events: { serverUpdate: 'Paramètres du serveur', emojiCreate: 'Emojis ajoutés', emojiDelete: 'Emojis supprimés', economy: 'Économie (soldes, boutique, réglages)', feeds: 'Flux RSS (ajouts, retraits, désactivations)', automations: 'Automatisations (publication, fils, boosts : alertes)' },
+    description: 'Paramètres du serveur, emojis, économie, flux RSS, automatisations et profil du bot.',
+    events: {
+      serverUpdate: 'Paramètres du serveur',
+      emojiCreate: 'Emojis ajoutés',
+      emojiDelete: 'Emojis supprimés',
+      economy: 'Économie (soldes, boutique, réglages)',
+      feeds: 'Flux RSS (ajouts, retraits, désactivations)',
+      automations: 'Automatisations (publication, fils, boosts : alertes)',
+      botProfile: 'Profil et thème du bot sur ce serveur (/settings)',
+    },
   },
 });
 

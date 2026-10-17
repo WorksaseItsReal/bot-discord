@@ -45,7 +45,7 @@ function announcementCard(row) {
 /** Message complet d'une annonce. Pur. */
 function announcementPayload(row) {
   const { content, allowedMentions } = mentionOf(row);
-  return { ...(content ? { content } : {}), embeds: fitEmbeds([announcementCard(row)]), allowedMentions };
+  return { ...(content ? { content } : {}), embeds: fitEmbeds([announcementCard(row)], { guildId: row.guild_id }), allowedMentions };
 }
 
 /**

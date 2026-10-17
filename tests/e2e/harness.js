@@ -38,6 +38,9 @@ delete process.env.HEALTH_PORT;
 delete process.env.DB_BACKUP_INTERVAL_HOURS;
 // Jamais de requête HTTP réelle (flux RSS) : les tests branchent un serveur local au besoin.
 process.env.FEEDS_NETWORK = 'off';
+// Ni téléchargement depuis le CDN de Discord (avatar, bannière, fichier de /embed texte) : un
+// test l'ouvre en injectant un transport (utils/discordCdn.js `transport.http`).
+process.env.CDN_NETWORK = 'off';
 
 const { ClientUser, ClientApplication, WebSocketShard, Status, PermissionsBitField } = require('discord.js');
 const { GadgetClient } = require('../../src/core/GadgetClient');

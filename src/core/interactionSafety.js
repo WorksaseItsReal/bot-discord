@@ -40,7 +40,7 @@ function withEphemeral(flags) {
  * @param {{ allowEphemeral?: boolean }} [opts]
  * @returns {{ options: any, fetch: boolean }}
  */
-function normalizeOptions(options, { allowEphemeral = true } = {}) {
+function normalizeOptions(options, { allowEphemeral = true, guildId = null } = {}) {
   // Règle de design : toute réponse est un embed. Un texte brut est mis en forme.
   if (typeof options === 'string') options = { content: options };
   if (options == null || typeof options !== 'object' || Array.isArray(options) || options instanceof MessagePayload) {
@@ -66,7 +66,8 @@ function normalizeOptions(options, { allowEphemeral = true } = {}) {
     delete out.ephemeral;
     if (ephemeral && allowEphemeral) out.flags = withEphemeral(out.flags);
   }
-  if (Array.isArray(out.embeds)) out.embeds = sanitizeEmbeds(out.embeds);
+  // Thème du serveur (/settings theme) : appliqué aux seules cartes de ton « marque ».
+  if (Array.isArray(out.embeds)) out.embeds = sanitizeEmbeds(out.embeds, { guildId });
   return { options: out, fetch };
 }
 
@@ -105,6 +106,9 @@ function hardenInteraction(interaction) {
 
   const state = { inflight: null, kind: null, ephemeral: false };
   interaction[STATE] = state;
+  // Serveur de l'interaction : thème des cartes « marque » (null en MP : couleurs par défaut).
+  const guildId = interaction.guildId ?? null;
+  const normalize = (raw, opts = {}) => normalizeOptions(raw, { ...opts, guildId });
 
   const acknowledged = () => interaction.deferred || interaction.replied;
   /**
@@ -153,7 +157,7 @@ function hardenInteraction(interaction) {
     ack('reply', isEphemeral(options), () => (fetch ? replyFetched(options) : original.reply(options)));
 
   interaction.reply = async (raw) => {
-    const { options, fetch } = normalizeOptions(raw);
+    const { options, fetch } = normalize(raw);
     if (state.inflight) await settle();
     if (interaction.replied || updateAcked()) return original.followUp(decorate(options, isEphemeral(options), 'followUp'));
     if (interaction.deferred) return original.editReply(stripForEdit(decorate(options, state.ephemeral || Boolean(interaction.ephemeral), 'edit')));
@@ -161,7 +165,7 @@ function hardenInteraction(interaction) {
   };
 
   interaction.deferReply = async (raw) => {
-    const { options, fetch } = normalizeOptions(raw ?? {});
+    const { options, fetch } = normalize(raw ?? {});
     if (state.inflight) await settle();
     if (acknowledged()) return fetch ? original.fetchReply().catch(() => null) : undefined;
     return ack('deferReply', isEphemeral(options), async () => {
@@ -175,10 +179,10 @@ function hardenInteraction(interaction) {
     if (state.inflight) await settle();
     // Sans réponse préalable, l'édition devient une réponse : on garde alors `ephemeral`.
     if (!acknowledged()) {
-      const { options } = normalizeOptions(raw);
+      const { options } = normalize(raw);
       return firstReply(decorate(options, isEphemeral(options), 'reply'), true);
     }
-    let { options } = normalizeOptions(raw, { allowEphemeral: false });
+    let { options } = normalize(raw, { allowEphemeral: false });
     // Une édition ciblant un autre message (option `message`) n'est pas décorée.
     const targetsOther = Boolean(options && typeof options === 'object' && options.message && options.message !== '@original');
     if (!targetsOther && !updateAcked()) options = decorate(options, state.ephemeral || Boolean(interaction.ephemeral), 'edit');
@@ -186,7 +190,7 @@ function hardenInteraction(interaction) {
   };
 
   interaction.followUp = async (raw) => {
-    const { options } = normalizeOptions(raw);
+    const { options } = normalize(raw);
     if (state.inflight) await settle();
     if (!acknowledged()) return firstReply(decorate(options, isEphemeral(options), 'reply'), true);
     return original.followUp(decorate(options, isEphemeral(options), 'followUp'));
@@ -194,7 +198,7 @@ function hardenInteraction(interaction) {
 
   if (original.update) {
     interaction.update = async (raw) => {
-      const { options, fetch } = normalizeOptions(raw, { allowEphemeral: false });
+      const { options, fetch } = normalize(raw, { allowEphemeral: false });
       if (state.inflight) await settle();
       if (acknowledged()) {
         // Déjà acquittée par update/deferUpdate : editReply modifie bien le message du composant.
@@ -212,7 +216,7 @@ function hardenInteraction(interaction) {
 
   if (original.deferUpdate) {
     interaction.deferUpdate = async (raw) => {
-      const { options, fetch } = normalizeOptions(raw ?? {}, { allowEphemeral: false });
+      const { options, fetch } = normalize(raw ?? {}, { allowEphemeral: false });
       if (state.inflight) await settle();
       if (acknowledged()) return fetch ? interaction.message : undefined;
       const response = await ack('deferUpdate', false, () => original.deferUpdate(fetch ? withResponseOption(options) : options));

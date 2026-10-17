@@ -26,6 +26,50 @@ function setBrand({ name, iconURL } = {}) {
   if (iconURL !== undefined) brand.iconURL = iconURL || null;
 }
 
+/**
+ * Thème par serveur (/settings theme) — appliqué par MARQUAGE, jamais par valeur de couleur :
+ * card() (ui.js) pose ce symbole sur les cartes de ton « marque » (brand ou ton absent), et
+ * seules ces cartes reçoivent la couleur du serveur lors de l'assainissement. Une couleur
+ * explicite (card({ tone: 0x5865F2 }) de /couleur, couleur d'un rôle), un EmbedBuilder brut
+ * (/embed, constructeur d'embeds) ou un ton sémantique (succès, erreur…) ne sont jamais thémés.
+ */
+const THEMABLE = Symbol.for('gadget.themable');
+
+/** (guildId) => couleur entière ou null ; posé par GadgetClient au démarrage. */
+let themeResolver = null;
+
+/** Installe (ou retire, avec null) le résolveur de thème. @returns {Function|null} */
+function setThemeResolver(fn) {
+  themeResolver = typeof fn === 'function' ? fn : null;
+  return themeResolver;
+}
+
+/** Résolveur de thème installé (ou null). */
+function getThemeResolver() {
+  return themeResolver;
+}
+
+/**
+ * Couleur du thème d'un serveur, ou null (pas de serveur, pas de résolveur, pas de thème,
+ * valeur invalide). Le noir (0) devient 0x010101 : Discord traite 0 comme « pas de couleur ».
+ * Ne lève jamais.
+ */
+function themeColor(guildId) {
+  if (!guildId || !themeResolver) return null;
+  try {
+    const color = themeResolver(guildId);
+    if (!Number.isInteger(color) || color < 0 || color > 0xffffff) return null;
+    return color === 0 ? 0x010101 : color;
+  } catch {
+    return null;
+  }
+}
+
+/** Vrai si l'embed (builder) porte la marque « thémable » de card(). */
+function isThemable(embed) {
+  return Boolean(embed && embed[THEMABLE]);
+}
+
 /** Tronque proprement une chaîne (ajoute « … »). */
 function truncate(value, max) {
   const str = value == null ? '' : String(value);
@@ -98,12 +142,19 @@ function embedLength(data) {
 }
 
 /**
- * Sanitize une liste d'embeds d'un même message (max 10, total ≤ 6000).
+ * Sanitize une liste d'embeds d'un même message (max 10, total ≤ 6000). Avec `guildId`, les
+ * cartes MARQUÉES par card() (ton « marque ») prennent la couleur du thème de ce serveur.
  * @param {Array} list
+ * @param {{ guildId?: string|null }} [opts]
  * @returns {object[]}
  */
-function sanitizeEmbeds(list) {
-  const out = (list || []).slice(0, 10).map(sanitizeEmbed);
+function sanitizeEmbeds(list, { guildId = null } = {}) {
+  const color = themeColor(guildId);
+  const out = (list || []).slice(0, 10).map((embed) => {
+    const data = sanitizeEmbed(embed);
+    if (color != null && isThemable(embed)) data.color = color;
+    return data;
+  });
   let total = out.reduce((n, e) => n + embedLength(e), 0);
   // Réduit d'abord les derniers champs, puis les descriptions, jusqu'à passer sous la limite.
   for (let i = out.length - 1; i >= 0 && total > LIMITS.total; i--) {
@@ -129,6 +180,11 @@ function errorReply(description, { title, footer } = {}) {
 module.exports = {
   errorReply,
   setBrand,
+  THEMABLE,
+  setThemeResolver,
+  getThemeResolver,
+  themeColor,
+  isThemable,
   brand,
   brandFooter,
   truncate,

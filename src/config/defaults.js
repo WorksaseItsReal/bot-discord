@@ -7,6 +7,12 @@
  */
 const defaultGuildConfig = Object.freeze({
   locale: 'fr',
+  // Apparence du bot sur ce serveur (/settings theme). `color` : couleur des cartes « marque »
+  // (null = couleur par défaut). Ne s'applique qu'aux cartes marquées par card() (ton brand),
+  // jamais aux couleurs choisies (/couleur, /embed) ni aux tons sémantiques (succès, erreur…).
+  appearance: {
+    color: null,
+  },
   logChannels: {
     moderation: null,
     messages: null,

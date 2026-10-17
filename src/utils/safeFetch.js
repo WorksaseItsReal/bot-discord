@@ -7,7 +7,8 @@ const https = require('node:https');
 const zlib = require('node:zlib');
 
 /**
- * Requête HTTP sortante « sûre » (flux RSS) : `http(s).request` natif, http(s) uniquement,
+ * Requête HTTP sortante « sûre » (flux RSS, CDN de Discord via utils/discordCdn.js) :
+ * `http(s).request` natif, http(s) uniquement (https seul et liste blanche d'hôtes en option),
  * ports 80 / 443 / 8080 / 8443, délai total de 10 s (corps compris), corps limité à 1 Mo
  * (après décompression gzip / deflate / br), en-têtes limités à 16 Ko, hôtes privés refusés
  * — IPv6 locales et IPv4 mappées comprises —, redirections suivies À LA MAIN (3 sauts au
@@ -166,6 +167,34 @@ function parseHttpUrl(raw) {
   if (url.username || url.password) throw new FetchError('une adresse avec identifiants n\'est pas acceptée', { blocked: true });
   url.hash = '';
   return url;
+}
+
+/**
+ * Liste blanche d'hôtes (option `allowedHosts`) : noms exacts, en minuscules, sans point final.
+ * null / undefined = aucune restriction. Pur.
+ * @returns {Set<string>|null}
+ */
+function hostAllowList(allowedHosts) {
+  if (allowedHosts == null) return null;
+  const list = (Array.isArray(allowedHosts) ? allowedHosts : [allowedHosts])
+    .map((h) => String(h ?? '').trim().toLowerCase().replace(/\.$/, ''))
+    .filter(Boolean);
+  // Une liste vide n'autorise RIEN (jamais « tout » par erreur de configuration).
+  return new Set(list);
+}
+
+/**
+ * Cible autorisée par les options de l'appelant (protocole https exigé, hôte de la liste
+ * blanche), vérifiée à CHAQUE saut, avant la résolution DNS. S'ajoute aux protections
+ * générales (adresses privées, ports, revalidation à la connexion) : ne les remplace jamais.
+ */
+function assertAllowedTarget(url, { allowList, httpsOnly }) {
+  if (httpsOnly && url.protocol !== 'https:') throw new FetchError('seules les adresses https sont acceptées', { blocked: true });
+  if (!allowList) return;
+  let host = String(url.hostname ?? '').toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (host.endsWith('.')) host = host.slice(0, -1);
+  if (!allowList.has(host)) throw new FetchError(`hôte non autorisé (${host.slice(0, 80) || 'vide'})`, { blocked: true });
 }
 
 /** Promesse rejetée quand `signal` est interrompu. */
@@ -376,9 +405,12 @@ function requestOnce(url, { headers, signal, lookup, allowLoopback }) {
  * @param {{
  *   headers?: Record<string, string>, maxBytes?: number, timeoutMs?: number, maxRedirects?: number,
  *   allowLoopback?: boolean, allowedPorts?: number[], signal?: AbortSignal,
+ *   allowedHosts?: string[] | null, httpsOnly?: boolean,
  *   lookup?: (host: string, opts: object) => Promise<Array<{ address: string, family?: number }>>,
  * }} [opts] `allowLoopback`, `allowedPorts` et `lookup` : injection pour les tests uniquement
- *   (`allowLoopback` n'autorise QUE 127.0.0.1, sur tout port)
+ *   (`allowLoopback` n'autorise QUE 127.0.0.1, sur tout port). `allowedHosts` : seuls ces noms
+ *   d'hôte exacts sont contactés (liste vide = aucun) ; `httpsOnly` : http refusé. Les deux sont
+ *   revérifiés à chaque redirection, EN PLUS des protections générales (jamais à leur place).
  * @returns {Promise<{ status: number, ok: boolean, headers: Headers, url: string, body: Buffer, redirects: number }>}
  */
 async function safeFetch(rawUrl, opts = {}) {
@@ -391,7 +423,10 @@ async function safeFetch(rawUrl, opts = {}) {
     allowedPorts = ALLOWED_PORTS,
     signal: outer,
     lookup = dns.promises.lookup,
+    allowedHosts = null,
+    httpsOnly = false,
   } = opts;
+  const allowList = hostAllowList(allowedHosts);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
@@ -405,6 +440,7 @@ async function safeFetch(rawUrl, opts = {}) {
   try {
     let url = parseHttpUrl(rawUrl);
     for (let hop = 0; ; hop += 1) {
+      assertAllowedTarget(url, { allowList, httpsOnly });
       await assertPublicHost(url, { lookup, allowLoopback, signal });
       assertPort(url, { allowLoopback, allowedPorts });
       let res;
@@ -461,6 +497,8 @@ module.exports = {
   parseIPv6,
   checkHostname,
   parseHttpUrl,
+  hostAllowList,
+  assertAllowedTarget,
   MAX_BYTES,
   TIMEOUT_MS,
   MAX_REDIRECTS,

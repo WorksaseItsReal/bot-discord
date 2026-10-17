@@ -33,6 +33,11 @@ const config = {
   token: process.env.DISCORD_TOKEN || '',
   clientId: process.env.CLIENT_ID || '',
   devGuildId: process.env.DEV_GUILD_ID || '',
+  /**
+   * Serveur des commandes de portée « owner » (/bot) : enregistrées UNIQUEMENT sur ce serveur,
+   * jamais globalement. Vide = ces commandes ne sont déployées nulle part.
+   */
+  ownerGuildId: process.env.OWNER_GUILD_ID || '',
   ownerIds: parseList(process.env.OWNER_IDS),
   /**
    * Secur : les propriétaires du bot (OWNER_IDS) ont le niveau « propriétaire-bot » (exemptés,
@@ -55,6 +60,11 @@ const config = {
    * FEEDS_NETWORK=off la coupe (hébergement sans accès sortant, tests).
    */
   feedsNetwork: !/^(off|false|0|non|no)$/i.test(String(process.env.FEEDS_NETWORK ?? '').trim()),
+  /**
+   * Téléchargement de pièces jointes depuis le CDN de Discord (avatar et bannière du bot,
+   * fichier de /embed texte) : hôtes Discord uniquement. CDN_NETWORK=off le coupe.
+   */
+  cdnNetwork: !/^(off|false|0|non|no)$/i.test(String(process.env.CDN_NETWORK ?? '').trim()),
   /** Présence du bot (statuts tournants, réglage global) : voir src/utils/presence.js. */
   presenceStatuses: process.env.PRESENCE_STATUSES || '',
   presenceIntervalMinutes: parseNumberEnv(process.env.PRESENCE_INTERVAL_MINUTES, { min: 1, max: 1440, integer: false }),

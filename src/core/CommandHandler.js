@@ -8,6 +8,32 @@ const { createLogger } = require('./logger');
 const logger = createLogger('commands');
 
 /**
+ * Portées de déploiement : « global » (par défaut, toutes les commandes publiques) et « owner »
+ * (console des propriétaires : enregistrée UNIQUEMENT sur le serveur OWNER_GUILD_ID, jamais
+ * globalement, voir scripts/deploy-commands.js).
+ */
+const SCOPES = Object.freeze(['global', 'owner']);
+
+/** Portée d'une commande ('global' si non déclarée). */
+function scopeOf(command) {
+  return command?.scope ?? 'global';
+}
+
+/**
+ * Problème de portée d'un module de commande, ou null : portée inconnue, ou commande « owner »
+ * sans `ownerOnly` ni permission par défaut (elle serait visible et exécutable). Pur.
+ */
+function scopeIssue(command) {
+  const scope = scopeOf(command);
+  if (!SCOPES.includes(scope)) return `portée inconnue « ${scope} »`;
+  if (scope === 'owner') {
+    if (command.ownerOnly !== true) return 'commande de portée owner sans ownerOnly';
+    if (command.data?.toJSON?.().default_member_permissions == null) return 'commande de portée owner sans permission par défaut';
+  }
+  return null;
+}
+
+/**
  * Charge récursivement les modules de commandes depuis src/commands.
  * Chaque module exporte : { data: SlashCommandBuilder, category, execute, autocomplete? }.
  * Menus contextuels (clic droit → Applications) : `data` est un ContextMenuCommandBuilder
@@ -49,6 +75,11 @@ class CommandHandler {
         }
         applyContexts(command);
         command.data.toJSON(); // valide le builder dès le chargement (erreur explicite si invalide)
+        const issue = scopeIssue(command);
+        if (issue) {
+          fail(file, issue);
+          continue;
+        }
         this.commands.set(command.data.name, command);
       } catch (err) {
         fail(file, err?.message ?? String(err), err);
@@ -63,9 +94,14 @@ class CommandHandler {
     return new CommandHandler().#walk(path.resolve(dir)).length;
   }
 
-  /** Payload JSON pour l'API REST (déploiement des slash commands). */
-  toJSON() {
-    return this.commands.map((c) => c.data.toJSON());
+  /**
+   * Payload JSON pour l'API REST (déploiement des slash commands), filtré par portée :
+   * 'global' (défaut : jamais les commandes « owner »), 'owner' ou 'all'.
+   * @param {{ scope?: 'global'|'owner'|'all' }} [opts]
+   */
+  toJSON({ scope = 'global' } = {}) {
+    if (scope !== 'all' && !SCOPES.includes(scope)) throw new Error(`Portée de déploiement inconnue : ${scope}`);
+    return this.commands.filter((c) => scope === 'all' || scopeOf(c) === scope).map((c) => c.data.toJSON());
   }
 
   #walk(dir) {
@@ -118,4 +154,4 @@ function contextMenuWhere(command) {
   return commandType(command) === ApplicationCommandType.Message ? 'Clic droit sur un message → Applications' : 'Clic droit sur un membre → Applications';
 }
 
-module.exports = { CommandHandler, applyContexts, commandType, isContextMenu, commandLabel, contextMenuWhere };
+module.exports = { CommandHandler, applyContexts, commandType, isContextMenu, commandLabel, contextMenuWhere, scopeOf, scopeIssue, SCOPES };

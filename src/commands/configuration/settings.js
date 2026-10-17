@@ -2,11 +2,18 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { progressBar } = require('../../utils/embeds');
-const { card, field, wide, blank, subtext, status, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { card, field, wide, blank, subtext, status, ICONS, TONES, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { UserError } = require('../../core/errors');
 const { parseDuration } = require('../../utils/time');
 const { decayDaysOf, MAX_DECAY_DAYS } = require('../../services/StrikeService');
+const { safeName } = require('../../utils/safeText');
+const { logCard } = require('../../services/LoggingService');
+const { formatDuration } = require('../../utils/time');
+const {
+  BotProfileService, parseThemeColor, colorHex, validateNick, validateBio, assertImageAttachment,
+  MAX_NICK, MAX_BIO, PROFILE_IMAGE_COOLDOWN_MS,
+} = require('../../services/BotProfileService');
 
 /** « Après 30 jours » / « Jamais ». Pur. */
 function decayText(cfg) {
@@ -336,6 +343,150 @@ function moderationUpdatedView(cfg, edited) {
   };
 }
 
+// ---------------------------------------------------------------- apparence (/settings theme, profil)
+
+/** Carte d'aperçu du thème (ton « marque » : elle prend elle-même la couleur choisie). */
+function themeView(color) {
+  const hex = colorHex(color);
+  return {
+    embeds: [
+      card({
+        tone: 'brand',
+        section: 'configuration',
+        icon: ICONS.color,
+        title: 'Thème du bot',
+        description: [
+          color == null ? `Couleur par défaut rétablie (${colorHex(TONES.brand)}).` : `Les cartes du bot prennent désormais la couleur **${hex}** sur ce serveur.`,
+          subtext('Cette carte est un aperçu.'),
+        ],
+        fields: [
+          field(ICONS.color, 'Couleur', color == null ? `Par défaut · \`${colorHex(TONES.brand)}\`` : `\`${hex}\``),
+          wide(ICONS.success, 'Appliquée à', 'Réponses du bot (cartes générales), logs d\'information, messages épinglés, cartes des annonces, signalements, candidatures et absences.'),
+          wide(ICONS.info, 'Jamais modifiées', 'Couleurs choisies (/couleur, /embed, couleur d\'un rôle, annonces colorées) et couleurs de sens : succès, erreur, avertissement, sanction.'),
+          wide(ICONS.warning, 'Pas encore thémés', 'Messages d\'accueil, giveaways et panneaux (tickets, rôles, vérification) : couleur par défaut.'),
+        ],
+        footer: 'Revenir à la couleur d\'origine : /settings theme couleur: défaut',
+      }),
+    ],
+  };
+}
+
+/** Options de profil reçues → changements à appliquer (validés). Lève une UserError. Pur (hors options). */
+function readProfileOptions(interaction, cfg) {
+  const { options } = interaction;
+  const nickIn = options.getString('pseudo');
+  const bioIn = options.getString('bio');
+  const avatar = options.getAttachment('avatar');
+  const banner = options.getAttachment('banniere');
+  const reset = options.getString('reinitialiser');
+  const resets = new Set(reset === 'tout' ? ['pseudo', 'avatar', 'banniere', 'bio'] : reset ? [reset] : []);
+  const given = { pseudo: nickIn != null, avatar: Boolean(avatar), banniere: Boolean(banner), bio: bioIn != null };
+  for (const key of resets) if (given[key]) throw new UserError(`\`${key}\` est à la fois fourni et réinitialisé : choisissez l'un ou l'autre.`);
+  const changes = {};
+  if (given.pseudo) changes.nick = validateNick(nickIn, cfg);
+  if (given.bio) changes.bio = validateBio(bioIn, cfg);
+  if (avatar) assertImageAttachment(avatar, 'Avatar');
+  if (banner) assertImageAttachment(banner, 'Bannière');
+  if (resets.has('pseudo')) changes.nick = null;
+  if (resets.has('avatar')) changes.avatar = null;
+  if (resets.has('banniere')) changes.banner = null;
+  if (resets.has('bio')) changes.bio = null;
+  return { changes, avatar, banner, resets };
+}
+
+/** Temps restant avant un nouveau changement d'image (avatar ou bannière) sur ce serveur. */
+function imageCooldownLeft(client, guildId, kind) {
+  return client.cooldowns.remaining(BotProfileService.imageCooldownKey(guildId, kind));
+}
+
+/** Carte « profil du bot sur ce serveur » (état actuel, champs modifiés marqués ✏️). */
+function profileView(client, guild, edited = new Set()) {
+  const me = guild.members?.me;
+  const mark = (key) => (edited.has(key) ? ' ✏️' : '');
+  const cooldown = (kind) => {
+    const left = imageCooldownLeft(client, guild.id, kind);
+    return left ? `\n${subtext(`Prochain changement dans ${formatDuration(left)}`)}` : '';
+  };
+  return {
+    embeds: [
+      card({
+        tone: 'brand',
+        section: 'configuration',
+        icon: ICONS.bot,
+        title: edited.size ? 'Profil du bot mis à jour' : 'Profil du bot sur ce serveur',
+        description: [
+          edited.size ? 'Les changements ne concernent que **ce serveur** : le profil global du bot est inchangé.' : 'Personnalisez mon pseudo, mon avatar, ma bannière et ma bio **sur ce serveur uniquement**.',
+          subtext('Options : pseudo, avatar, banniere, bio, reinitialiser.'),
+        ],
+        thumbnail: me?.displayAvatarURL?.({ size: 128 }) ?? null,
+        fields: [
+          field('🏷️', 'Pseudo', `${me?.nickname ? `**${safeNick(me.nickname)}**` : `*Aucun (nom global : ${safeNick(client.user?.username ?? 'bot')})*`}${mark('nick')}`),
+          field(ICONS.image, 'Avatar', `${me?.avatar ? 'Propre à ce serveur' : 'Avatar global'}${mark('avatar')}${cooldown('avatar')}`),
+          field('🖼️', 'Bannière', `${me?.banner ? 'Propre à ce serveur' : 'Bannière globale'}${mark('banner')}${cooldown('banner')}`),
+          edited.has('bio') ? wide(ICONS.reason, 'Bio', 'Modifiée ✏️') : null,
+        ],
+        footer: `Pseudo ${MAX_NICK} caractères · bio ${MAX_BIO} · images 8 Mo, une fois par 10 min`,
+      }),
+    ],
+  };
+}
+
+/** Pseudo affiché sans Markdown actif. */
+function safeNick(name) {
+  return safeName(String(name ?? '').slice(0, 64));
+}
+
+/** /settings theme */
+async function runTheme(interaction, client) {
+  const { config, logging } = client.services;
+  const guild = interaction.guild;
+  const color = parseThemeColor(interaction.options.getString('couleur', true));
+  const before = config.get(guild.id).appearance?.color ?? null;
+  config.update(guild.id, { appearance: { color } });
+  await interaction.reply({ ...themeView(color), ephemeral: true });
+  await logging.send(guild.id, 'server', logCard({
+    category: 'server',
+    icon: ICONS.color,
+    title: 'Thème du bot modifié',
+    user: interaction.user,
+    description: `${interaction.user} a changé la couleur des cartes du bot.`,
+    fields: [
+      field(null, 'Avant', colorHex(before) ? `\`${colorHex(before)}\`` : 'Par défaut'),
+      field(null, 'Après', colorHex(color) ? `\`${colorHex(color)}\`` : 'Par défaut'),
+    ],
+  }), [], { event: 'botProfile' });
+}
+
+/** /settings profil */
+async function runProfile(interaction, client) {
+  const { config, logging, botProfile } = client.services;
+  const guild = interaction.guild;
+  const { changes, avatar, banner } = readProfileOptions(interaction, config.get(guild.id));
+  if (!Object.keys(changes).length && !avatar && !banner) return interaction.reply({ ...profileView(client, guild), ephemeral: true });
+  for (const [kind, label, wanted] of [['avatar', 'l\'avatar', avatar || changes.avatar === null], ['banner', 'la bannière', banner || changes.banner === null]]) {
+    const left = wanted ? imageCooldownLeft(client, guild.id, kind) : 0;
+    if (left) throw new UserError(`Je ne peux changer ${label} qu'une fois toutes les 10 minutes sur ce serveur : réessayez dans ${formatDuration(left)}.`);
+  }
+  await interaction.deferReply({ ephemeral: true });
+  if (avatar) changes.avatar = await botProfile.fetchImage(avatar.url);
+  if (banner) changes.banner = await botProfile.fetchImage(banner.url);
+  await botProfile.applyGuildProfile(guild, changes, { reason: `Profil du bot modifié par ${interaction.user.tag ?? interaction.user.id} (/settings profil)` });
+  for (const kind of ['avatar', 'banner']) {
+    if (changes[kind] !== undefined) client.cooldowns.hit(BotProfileService.imageCooldownKey(guild.id, kind), PROFILE_IMAGE_COOLDOWN_MS);
+  }
+  const edited = new Set(Object.keys(changes));
+  await interaction.editReply(profileView(client, guild, edited));
+  const label = { nick: 'pseudo', avatar: 'avatar', banner: 'bannière', bio: 'bio' };
+  await logging.send(guild.id, 'server', logCard({
+    category: 'server',
+    icon: ICONS.bot,
+    title: 'Profil du bot modifié',
+    user: interaction.user,
+    description: `${interaction.user} a modifié mon profil sur ce serveur.`,
+    fields: Object.entries(changes).map(([key, value]) => field(null, label[key], value === null ? 'Réinitialisé' : key === 'nick' ? `**${safeNick(value)}**` : key === 'bio' ? 'Modifiée' : 'Changé')),
+  }), [], { event: 'botProfile' });
+}
+
 function dashboardView(guild, cfg) {
   return { embeds: [renderDashboard(guild, cfg)], components: [...tabsFor('view'), ...shortcuts()] };
 }
@@ -373,6 +524,8 @@ module.exports = {
   renderModeration,
   parseThresholds,
   readModerationOptions,
+  themeView,
+  readProfileOptions,
   data: new SlashCommandBuilder()
     .setName('settings')
     .setDescription('Configure le bot pour ce serveur.')
@@ -389,6 +542,33 @@ module.exports = {
         .addStringOption((o) => o.setName('paliers').setDescription('Paliers de strikes, ex : 3=mute 1h, 5=kick, 7=ban (ou « aucun »)').setMaxLength(300))
         .addIntegerOption((o) => o.setName('decroissance').setDescription('Les strikes de plus de N jours ne comptent plus (0 = jamais)').setMinValue(0).setMaxValue(MAX_DECAY_DAYS))
         .addRoleOption((o) => o.setName('role_muet').setDescription('Rôle utilisé par /mute (sinon un rôle « Muted » est créé).')),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('theme')
+        .setDescription('Change la couleur des cartes du bot sur ce serveur.')
+        .addStringOption((o) => o.setName('couleur').setDescription('#hex, rgb(r, v, b), un nom (rouge, bleu…) ou « défaut »').setRequired(true).setMaxLength(40)),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('profil')
+        .setDescription('Pseudo, avatar, bannière et bio du bot sur ce serveur uniquement.')
+        .addStringOption((o) => o.setName('pseudo').setDescription(`Pseudo du bot sur ce serveur (${MAX_NICK} caractères au plus)`).setMaxLength(MAX_NICK))
+        .addAttachmentOption((o) => o.setName('avatar').setDescription('Avatar du bot sur ce serveur (PNG, JPEG, GIF, WebP, 8 Mo)'))
+        .addAttachmentOption((o) => o.setName('banniere').setDescription('Bannière du bot sur ce serveur (PNG, JPEG, GIF, WebP, 8 Mo)'))
+        .addStringOption((o) => o.setName('bio').setDescription(`Bio du bot sur ce serveur (${MAX_BIO} caractères au plus)`).setMaxLength(MAX_BIO))
+        .addStringOption((o) =>
+          o
+            .setName('reinitialiser')
+            .setDescription('Revenir au profil global pour un élément')
+            .addChoices(
+              { name: 'Pseudo', value: 'pseudo' },
+              { name: 'Avatar', value: 'avatar' },
+              { name: 'Bannière', value: 'banniere' },
+              { name: 'Bio', value: 'bio' },
+              { name: 'Tout', value: 'tout' },
+            ),
+        ),
     ),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
@@ -413,6 +593,8 @@ module.exports = {
       const cfg = config.update(guild.id, patch);
       return interaction.reply({ ...moderationUpdatedView(cfg, edited), ephemeral: true });
     }
+    if (sub === 'theme') return runTheme(interaction, client);
+    if (sub === 'profil') return runProfile(interaction, client);
     throw new UserError('Sous-commande inconnue.');
   },
 

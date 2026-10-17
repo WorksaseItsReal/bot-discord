@@ -50,6 +50,7 @@ const { AutoThreadCounterRepository } = require('../database/repositories/AutoTh
 const { GuildPurgeRepository } = require('../database/repositories/GuildPurgeRepository');
 const { SecurityIncidentRepository } = require('../database/repositories/SecurityIncidentRepository');
 const { SecurityGrantRepository } = require('../database/repositories/SecurityGrantRepository');
+const { BotSettingsRepository } = require('../database/repositories/BotSettingsRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -89,6 +90,8 @@ const { ApplicationService } = require('../services/ApplicationService');
 const { TicketRatingService } = require('../services/TicketRatingService');
 const { FeedService } = require('../services/FeedService');
 const { AutomationService } = require('../services/AutomationService');
+const { BotProfileService } = require('../services/BotProfileService');
+const { setThemeResolver, getThemeResolver } = require('../utils/embeds');
 
 const logger = createLogger('client');
 
@@ -175,6 +178,8 @@ class GadgetClient extends Client {
       // Secur (anti-nuke) : incidents et accès de whitelist en attente.
       securityIncidents: new SecurityIncidentRepository(db),
       securityGrants: new SecurityGrantRepository(db),
+      // Réglages GLOBAUX du bot (console /bot) : table sans guild_id, rien à purger.
+      botSettings: new BotSettingsRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -239,7 +244,11 @@ class GadgetClient extends Client {
       feeds: new FeedService({ client: this, feeds: this.repositories.feeds, networkEnabled: config.feedsNetwork }),
       // Automatisations (/automatisations) : publication automatique, fils, rôle vocal, boosts.
       automations: new AutomationService({ client: this, config: configService, counters: this.repositories.autoThreadCounters }),
+      // Identité du bot : présence imposée par /bot, profil par serveur (/settings profil).
+      botProfile: new BotProfileService({ client: this, settings: this.repositories.botSettings }),
     };
+    // Thème par serveur (/settings theme) : couleur des cartes « marque » (voir utils/embeds.js).
+    this.themeResolver = setThemeResolver((guildId) => configService.get(guildId)?.appearance?.color ?? null);
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
     this.componentHandler.loadAll(path.join(__dirname, '..', 'components'));
@@ -336,6 +345,9 @@ class GadgetClient extends Client {
 
   async #doShutdown() {
     if (this.presenceTimer) clearInterval(this.presenceTimer);
+    this.presenceTimer = null;
+    // Résolveur de thème de CE client retiré (un autre client du même processus garde le sien).
+    if (this.themeResolver && getThemeResolver() === this.themeResolver) setThemeResolver(null);
     try {
       await this.healthServer?.close();
     } catch (err) {
