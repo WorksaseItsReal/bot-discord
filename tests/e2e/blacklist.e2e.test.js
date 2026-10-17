@@ -18,7 +18,6 @@ const botMessages = (h, mark, pred = () => true) => h.fake.messageLog.slice(mark
 const titled = (re) => (m) => (m.embeds ?? []).some((e) => re.test(e.title ?? ''));
 const logged = (h, mark, re) => botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && titled(re)(m));
 const calls = (h, mark, method, re) => h.fake.calls.slice(mark).filter((c) => c.method === method && re.test(c.route));
-const recOf = (h, message) => ({ messages: [message.id], followUps: [], msgMark: h.fake.messageLog.length, modals: [] });
 
 test('liste noire : ajout par le propriétaire (ban, casier, log) ; doublon sans second ban ; admin non-owner et membre refusés en embed ; /unban refusé ; débannissement manuel annulé avec son auteur', async () => {
   const h = await createHarness();

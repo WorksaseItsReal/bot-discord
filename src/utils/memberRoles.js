@@ -12,21 +12,21 @@
  * Les retraits passent en premier ; une erreur sur un rôle n'empêche pas les autres.
  *
  * Blrank (/secur blrank) : un membre listé ne peut recevoir AUCUN rôle. Ses AJOUTS sont ignorés
- * (comptés dans `skipped`, sans appel à Discord) : rôles d'arrivée, menus, boutique, niveaux,
- * rendus… Les retraits restent appliqués.
+ * (comptés dans `skipped`, présent seulement s'il n'est pas vide, sans appel à Discord) : rôles
+ * d'arrivée, menus, boutique, niveaux, rendus… Les retraits restent appliqués.
  * @param {import('discord.js').GuildMember} member
  * @param {{ add?: string[], remove?: string[] }} changes
  * @param {string} [reason]
  * @param {(roleId: string, error: Error, action: 'add'|'remove') => void} [onError]
- * @returns {Promise<{ added: string[], removed: string[], failed: string[], skipped: string[] }>}
+ * @returns {Promise<{ added: string[], removed: string[], failed: string[], skipped?: string[] }>}
  */
 async function applyRoles(member, { add = [], remove = [] } = {}, reason, onError) {
-  const out = { added: [], removed: [], failed: [], skipped: [] };
+  const out = { added: [], removed: [], failed: [] };
   let blocked = null; // lu une fois, au premier ajout
   for (const [action, ids, done] of [['remove', remove, out.removed], ['add', add, out.added]]) {
     for (const id of new Set(ids)) {
       if (action === 'add' && (blocked ??= isRankBlocked(member))) {
-        out.skipped.push(id);
+        (out.skipped ??= []).push(id);
         continue;
       }
       try {
