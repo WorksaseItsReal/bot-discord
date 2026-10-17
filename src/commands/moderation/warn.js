@@ -8,6 +8,10 @@ const { permissionLabel } = require('../../utils/permissionNames');
 const { sanctionCard, historyButton, assertReason } = require('../../services/ModerationService');
 const { describeThreshold, escalationReason, ACTION_LABELS, ACTION_PERMISSIONS } = require('../../services/StrikeService');
 const { UserError } = require('../../core/errors');
+const { strictActionLevelMissing } = require('../../utils/access');
+
+/** Commande équivalente à chaque palier (mode strict de /permissions). */
+const ACTION_COMMANDS = Object.freeze({ mute: 'timeout', timeout: 'timeout', kick: 'kick', ban: 'ban' });
 
 /** Ton de la carte selon l'escalade réellement appliquée. */
 const ESCALATION_TONES = { timeout: 'caution', kick: 'caution', ban: 'danger' };
@@ -117,6 +121,17 @@ async function applyEscalation(client, interaction, member, step) {
       ok: false,
       type: null,
       text: `${ICONS.warning} Palier de **${step.strikes} strikes** atteint (${label}), mais il faut la permission **${permissionLabel(permission)}** pour l'appliquer. Il sera appliqué au prochain avertissement donné par un modérateur qui l'a.`,
+    };
+  }
+  // Mode strict : /ban (ou /kick, /timeout) réservé à un niveau que l'invocateur n'a pas.
+  const command = ACTION_COMMANDS[step.action];
+  const level = command ? strictActionLevelMissing(client, interaction.guild, interaction.member, command) : 0;
+  if (level) {
+    const label = ACTION_LABELS[step.action] ?? step.action;
+    return {
+      ok: false,
+      type: null,
+      text: `${ICONS.warning} Palier de **${step.strikes} strikes** atteint (${label}), mais **/${command}** est réservée au **niveau ${level}** sur ce serveur (mode strict). Il sera appliqué au prochain avertissement donné par un modérateur de ce niveau.`,
     };
   }
   const reason = escalationReason(step);

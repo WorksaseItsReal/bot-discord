@@ -405,3 +405,141 @@ test('S41 /channel renouveler : le salon bloqué des alertes de mots-clés suit 
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ S29 : mode strict au niveau de l'action
+
+const banPuts = (h, mark, userId) => h.fake.calls.slice(mark).filter((c) => c.method === 'PUT' && c.route.endsWith(`/bans/${userId}`)).length;
+const timeoutPatches = (h, mark, userId) => h.fake.calls.slice(mark).filter((c) => c.method === 'PATCH' && c.route.endsWith(`/members/${userId}`) && c.body?.communication_disabled_until).length;
+
+/** Vraie quarantaine AutoMod (compte piraté) sur « target » ; renvoie le log avec ses boutons. */
+async function quarantineTarget(h) {
+  h.configure({ antiraid: { enabled: false }, levels: { enabled: false }, automod: { enabled: true, notify: 'none', escalation: { enabled: false }, newMembers: { enabled: false }, filters: {
+    antiHacked: { enabled: true, removeRoles: true, scamScore: 5, channels: 3, action: 'quarantine', duration: '1d', purgeMinutes: 10 },
+  } } });
+  const mark = h.fake.messageLog.length;
+  await h.userMessage({ as: 'target', content: 'Nitro gratuit !! https://dlscord-gift.ru/claim @everyone' });
+  await h.settle();
+  const log = h.fake.messageLog.slice(mark).map((id) => h.message(id)).find((m) => m?.embeds?.[0]?.title?.includes('quarantaine'));
+  assert.ok(log, 'quarantaine posée');
+  return log;
+}
+
+test('S29 mode strict : /ban (niv. 3), /timeout et /sanctions (niv. 2) restreints → le menu « Sanctions du membre », le bouton Timeout d\'un signalement et « Bannir » d\'une quarantaine sont refusés aussi', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ moderation: { confirmDangerous: false }, reports: { channelId: IDS.channels.staff, pingRoleId: IDS.roles.mod } });
+    for (const [n, l] of [['timeout', 2], ['sanctions', 2], ['ban', 3]]) assert.ok(!h.isError(await assign(h, n, l)));
+    h.configure({ permissions: { strict: true } });
+    assert.equal(h.client.services.permissions.rankOf(h.member('mod')), 0);
+    assert.ok(h.isError(await h.slash('ban', [opt('membre', 6, IDS.users.target)], { as: 'mod' })));
+
+    // a) Menu contextuel « Sanctions du membre » (même vue que /sanctions historique).
+    const menu = await h.contextMenu('Sanctions du membre', 'target', { as: 'mod' });
+    assert.ok(h.isError(menu), h.replyText(menu));
+    assert.match(h.replyText(menu), /\/sanctions\*\* est réservée au \*\*niveau 2/);
+
+    // b) Signalement réel puis bouton « Timeout » de la carte.
+    const msg = h.fake.buildMessage({ channelId: IDS.channels.general, body: { content: 'Spam spam' }, author: h.fake.users.get(IDS.users.target) });
+    await h.submitModal(await h.contextMenu('Signaler le message', msg, { as: 'member' }), { raison: 'spam' });
+    const card = [...h.fake.messages.values()].find((m) => m.channel_id === IDS.channels.staff && buttonsOf(m).some((c) => c.custom_id === 'cmd:signalements:mute:1'));
+    assert.ok(card, 'carte du signalement');
+    let mark = h.fake.calls.length;
+    const timeout = await h.click(card, 'cmd:signalements:mute:1', { as: 'mod' });
+    assert.ok(h.isError(timeout), h.replyText(timeout));
+    assert.match(h.replyText(timeout), /\/timeout\*\* est réservée au \*\*niveau 2/);
+    assert.equal(timeoutPatches(h, mark, IDS.users.target), 0);
+
+    // c) Vraie quarantaine AutoMod puis « Bannir » → confirmation refusée, aucun bannissement.
+    const log = await quarantineTarget(h);
+    const qban = buttonsOf(log).find((c) => c.custom_id.startsWith('cmd:automod:qban:')).custom_id;
+    const ask = await h.click(log, qban, { as: 'mod', channel: 'logs' });
+    const ok = btn(h.messagesOf(ask)[0], 'cmd:automod:qbanok:');
+    assert.ok(ok, h.replyText(ask));
+    mark = h.fake.calls.length;
+    const banned = await h.click(h.messagesOf(ask)[0], ok.custom_id, { as: 'mod', channel: 'logs' });
+    assert.ok(h.isError(banned), h.replyText(banned));
+    assert.match(h.replyText(banned), /\/ban\*\* est réservée au \*\*niveau 3/);
+    assert.equal(banPuts(h, mark, IDS.users.target), 0);
+
+    // Témoin : un administrateur n'est jamais bloqué par le mode strict.
+    mark = h.fake.calls.length;
+    const adminBan = await h.click(h.messagesOf(ask)[0], ok.custom_id, { as: 'admin', channel: 'logs' });
+    assert.ok(!h.isError(adminBan), h.replyText(adminBan));
+    assert.equal(banPuts(h, mark, IDS.users.target), 1);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S29 mode strict : escalade de /warn (1 strike → ban) alors que /ban est réservé au niveau 3 → palier non appliqué, aucun bannissement', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ moderation: { confirmDangerous: false }, strikes: { enabled: true, thresholds: [{ strikes: 1, action: 'ban' }] } });
+    assert.ok(!h.isError(await assign(h, 'ban', 3)));
+    h.configure({ permissions: { strict: true } });
+    const mark = h.fake.calls.length;
+    const rec = await h.slash('warn', [opt('membre', 6, IDS.users.target)], { as: 'mod' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    assert.equal(banPuts(h, mark, IDS.users.target), 0);
+    const escalation = (h.messagesOf(rec)[0]?.embeds?.[0]?.fields ?? []).find((f) => /Escalade/.test(f.name))?.value ?? '';
+    assert.match(escalation, /Palier de \*\*1 strikes\*\* atteint/);
+    assert.match(escalation, /\*\*\/ban\*\* est réservée au \*\*niveau 3/);
+    assert.ok(h.fake.members.has(IDS.users.target));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S29 mode strict : /kick réservé au niveau 2 → l\'expulsion groupée de /activite est refusée aussi', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ moderation: { confirmDangerous: false } });
+    h.client.repositories.activity.setSince(h.guild.id, Date.now() - 60 * DAY);
+    const user = h.addUser('Dormeur', { ageDays: 500 });
+    const raw = rawMember(user, [], 100);
+    h.fake.members.set(user.id, raw);
+    h.guild.members._add(JSON.parse(JSON.stringify(raw)));
+    const modPerms = BigInt(h.fake.roles.get(IDS.roles.mod).permissions);
+    await h.asHuman('owner').editRole(IDS.roles.mod, { permissions: String(modPerms | P.ManageGuild) });
+    assert.ok(!h.isError(await assign(h, 'kick', 2)));
+    h.configure({ permissions: { strict: true } });
+    const list = h.messagesOf(await h.slash('activite', [opt('jours', 4, 30)], { as: 'mod' }))[0];
+    const ask = await h.click(list, 'cmd:activite:act:30:kick', { as: 'mod' });
+    assert.ok(h.isError(ask), h.replyText(ask));
+    assert.match(h.replyText(ask), /\/kick\*\* est réservée au \*\*niveau 2/);
+    assert.ok(h.fake.members.has(user.id));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S29 effet inverse : /automod (Gérer le serveur) réservé au niveau 3 ne bloque plus « Lever la quarantaine » ni « Bannir » d\'un modérateur', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    assert.ok(!h.isError(await assign(h, 'automod', 3, 'admin')));
+    h.configure({ permissions: { strict: true } });
+    const ver = await perm(h, 'verifier', [opt('membre', 6, IDS.users.mod)], 'owner');
+    const fld = h.messagesOf(ver)[0]?.embeds?.[0]?.fields?.find((f) => /mode strict/i.test(f.name));
+    assert.match(fld?.value ?? '', /Aucune/);
+    const log = await quarantineTarget(h);
+    const lift = buttonsOf(log).find((c) => c.custom_id.startsWith('cmd:automod:qlift:')).custom_id;
+    const qban = buttonsOf(log).find((c) => c.custom_id.startsWith('cmd:automod:qban:')).custom_id;
+    const ask = await h.click(log, qban, { as: 'mod', channel: 'logs' });
+    assert.ok(!h.isError(ask), h.replyText(ask));
+    const mark = h.fake.calls.length;
+    const lifted = await h.click(log, lift, { as: 'mod', channel: 'logs' });
+    assert.ok(!h.isError(lifted), h.replyText(lifted));
+    assert.ok(h.fake.calls.slice(mark).some((c) => c.method === 'PATCH' && c.route.endsWith(`/members/${IDS.users.target}`)), 'timeout levé');
+    // Les boutons de configuration de /automod restent soumis au mode strict (mod n'a de toute façon pas Gérer le serveur).
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

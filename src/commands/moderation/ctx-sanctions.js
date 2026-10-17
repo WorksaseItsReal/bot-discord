@@ -6,6 +6,8 @@ const { requirePermission } = require('../../services/ModerationService');
 /** Menu contextuel UTILISATEUR « Sanctions du membre » (modérateurs) : la fiche historique de /sanctions. */
 module.exports = {
   category: 'moderation',
+  /** Mode strict de /permissions : restreint comme /sanctions (un menu contextuel n'est pas attribuable). */
+  strictKey: 'sanctions',
   description: 'Ouvre l\'historique de modération d\'un membre (comme /sanctions historique).',
   data: new ContextMenuCommandBuilder()
     .setName('Sanctions du membre')

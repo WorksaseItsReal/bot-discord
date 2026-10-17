@@ -17,6 +17,7 @@ const { requirePermission } = require('../../services/ModerationService');
 const { logCard, fitList } = require('../../services/LoggingService');
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { canActOnByHierarchy, assertRankAllows } = require('../../utils/permissions');
+const access = require('../../utils/access');
 const { applyRoles } = require('../../utils/memberRoles');
 const { DAY_MS, formatDay, fr } = require('../../utils/activity');
 const { createLogger } = require('../../core/logger');
@@ -175,6 +176,8 @@ function checkRole(interaction, roleId, action) {
 function assertActionPermissions(interaction, action) {
   guard(interaction);
   const perm = ACTIONS[action].permission;
+  // Expulsion groupée = /kick : son mode strict s'applique (même action, faite par le bot).
+  if (action === 'kick') access.assertStrict(interaction.client, interaction, 'kick');
   if (perm) {
     requirePermission(interaction, perm);
     if (!interaction.guild.members.me?.permissions?.has(PermissionFlagsBits[perm])) {

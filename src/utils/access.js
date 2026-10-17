@@ -204,25 +204,65 @@ function strictMessage(name, level) {
 }
 
 /**
+ * Mode strict : niveau N exigé pour la commande `key` (attribuée au niveau N) que l'auteur
+ * n'atteint pas, ou 0 (accès : mode strict coupé, commande non attribuée, Administrateur, rang 4
+ * et plus, rang suffisant). Ne lève jamais.
+ */
+function strictLevelMissing(client, interaction, key) {
+  const svc = service(client);
+  if (!svc || !key || !interaction?.guildId) return 0;
+  if (!svc.settings(interaction.guildId).strict) return 0;
+  const required = svc.assignedLevel(interaction.guildId, key);
+  if (!required) return 0;
+  if (interaction.memberPermissions?.has?.(PermissionFlagsBits.Administrator)) return 0;
+  const rank = rankFor(client, interaction);
+  if (rank >= 4 || rank >= required) return 0;
+  return required;
+}
+
+/**
  * Mode strict : refuse une commande attribuée au niveau N à un membre de rang < N, même avec la
  * permission native (Administrateur et rang 4 et plus exemptés). UserError.
  */
 function assertStrict(client, interaction, key) {
-  const svc = service(client);
-  if (!svc || !key || !interaction?.guildId) return;
-  if (!svc.settings(interaction.guildId).strict) return;
-  const required = svc.assignedLevel(interaction.guildId, key);
-  if (!required) return;
-  if (interaction.memberPermissions?.has?.(PermissionFlagsBits.Administrator)) return;
-  const rank = rankFor(client, interaction);
-  if (rank >= 4 || rank >= required) return;
-  throw new UserError(strictMessage(key, required));
+  const required = strictLevelMissing(client, interaction, key);
+  if (required) throw new UserError(strictMessage(key, required));
+}
+
+/**
+ * Contexte « interaction » d'un modérateur (GuildMember, ou User en cache sur le serveur) pour le
+ * mode strict, ou null : action du bot (AutoMod, échéances, escalade automatique), modérateur
+ * absent du cache (la permission native reste revérifiée par l'appelant).
+ */
+function moderatorContext(client, guild, moderator) {
+  if (!guild || !moderator?.id || moderator.id === client?.user?.id || moderator.bot || moderator.user?.bot) return null;
+  const member = moderator.roles?.cache ? moderator : guild.members?.cache?.get?.(moderator.id);
+  if (!member) return null;
+  return { guildId: guild.id, guild, member, memberPermissions: member.permissions };
+}
+
+/**
+ * Mode strict au niveau de l'ACTION (ModerationService, /activite) : bannir, expulser, timeout…
+ * sont refusés à un modérateur de rang < N quand la commande équivalente (`key` : 'ban', 'kick',
+ * 'timeout'…) est réservée au niveau N, QUEL QUE SOIT le chemin (bouton d'une autre commande,
+ * escalade de /warn). Actions du bot exemptées. UserError.
+ */
+function assertStrictAction(client, guild, moderator, key) {
+  const ctx = moderatorContext(client, guild, moderator);
+  if (ctx) assertStrict(client, ctx, key);
+}
+
+/** Niveau exigé par le mode strict pour l'action `key` que le modérateur n'atteint pas, ou 0. Ne lève jamais. */
+function strictActionLevelMissing(client, guild, moderator, key) {
+  const ctx = moderatorContext(client, guild, moderator);
+  return ctx ? strictLevelMissing(client, ctx, key) : 0;
 }
 
 /**
  * Contrôle central d'une commande slash (preflight). `assertNative` = assertMemberPermissions de
  * interactionCreate (vérification de 0.6.0, toujours appliquée hors délégation).
- *  (a) commande non attribuée (ou menu contextuel, ou hors serveur) : assertNative, à l'identique ;
+ *  (a) commande non attribuée (ou hors serveur) : assertNative, à l'identique ; menu contextuel :
+ *      assertNative, puis le mode strict de la commande qu'il reproduit (`strictKey`) ;
  *  (b) mode strict et rang < niveau requis : refus « réservée au niveau N » ;
  *  (c) permission native présente : accès ;
  *  (d) commande DÉLÉGABLE et rang ≥ niveau : accès, délégation posée sur l'interaction ;
@@ -232,7 +272,14 @@ function assertStrict(client, interaction, key) {
 function assertCommandAccess(client, interaction, command, assertNative) {
   const name = command?.data?.name;
   const svc = service(client);
-  const required = interaction?.inGuild?.() && svc && !isContextMenu(command) ? svc.assignedLevel(interaction.guildId, name) : 0;
+  if (isContextMenu(command)) {
+    // Menu contextuel : jamais attribuable ni délégué, mais restreint comme la commande qu'il
+    // reproduit (`strictKey`, ex. « Sanctions du membre » → /sanctions), après le contrôle natif.
+    assertNative(interaction, command);
+    if (command.strictKey && interaction?.inGuild?.()) assertStrict(client, interaction, command.strictKey);
+    return null;
+  }
+  const required = interaction?.inGuild?.() && svc ? svc.assignedLevel(interaction.guildId, name) : 0;
   if (!required) {
     assertNative(interaction, command);
     return null;
@@ -267,6 +314,9 @@ module.exports = {
   hasPermission,
   memberCanIn,
   assertStrict,
+  strictLevelMissing,
+  assertStrictAction,
+  strictActionLevelMissing,
   strictMessage,
   assertCommandAccess,
 };

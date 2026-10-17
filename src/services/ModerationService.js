@@ -239,10 +239,18 @@ function needPermission(flag) {
  * Exige une permission du cliqueur / de l'invocateur (nom de flag, ex : 'BanMembers'). Honore la
  * délégation de /permissions pour SA commande seulement (commande slash en cours, ou bouton
  * « cmd:<commande>: » dont la commande est déléguée ; jamais une permission sensible), et le mode
- * strict pour les boutons (utils/access.js).
+ * strict pour les boutons (utils/access.js) : la restriction de la commande du customId ne
+ * s'applique qu'aux boutons qui exigent une permission QUE CETTE COMMANDE DÉCLARE (restreindre
+ * /automod, « Gérer le serveur », ne bloque pas « Lever la quarantaine », « Exclure
+ * temporairement »). L'action elle-même (bannir, timeout…) est restreinte dans ModerationService.
  */
 function requirePermission(interaction, flag) {
-  if (!interaction.commandName) access.assertStrict(interaction.client, interaction, access.commandKeyOf(interaction.customId));
+  if (!interaction.commandName) {
+    const key = access.commandKeyOf(interaction.customId);
+    const declared = key ? access.declaredFlags(interaction.client?.commands?.get?.(key)) : null;
+    const bits = PermissionFlagsBits[flag];
+    if (declared != null && bits != null && (declared & bits) !== 0n) access.assertStrict(interaction.client, interaction, key);
+  }
   if (!access.hasPermission(interaction, PermissionFlagsBits[flag])) throw needPermission(flag);
 }
 
@@ -524,6 +532,7 @@ class ModerationService {
 
   async mute(guild, targetMember, moderator, reason, durationMs) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'mute' });
+    this.#assertStrict(guild, moderator, 'mute');
     const role = await this.ensureMutedRole(guild);
     if (targetMember.roles.cache.has(role.id)) throw new UserError('Ce membre est déjà mute.');
     await targetMember.roles.add(role, reason || undefined);
@@ -540,6 +549,7 @@ class ModerationService {
    */
   async unmute(guild, targetMember, moderator, reason) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'retirer le mute de' });
+    this.#assertStrict(guild, moderator, 'unmute');
     const role = this.mutedRole(guild);
     if (!role || !targetMember.roles.cache.has(role.id)) {
       if (!this.sanctions.activeMute?.(guild.id, targetMember.id)) throw new UserError('Ce membre n\'est pas mute.');
@@ -598,12 +608,14 @@ class ModerationService {
 
   async warn(guild, targetMember, moderator, reason) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'avertir' });
+    this.#assertStrict(guild, moderator, 'warn');
     return this.record(guild, targetMember.user, moderator, { type: 'warn', reason });
   }
 
   /** @param {{ escalationStep?: number|null }} [opts] palier d'escalade appliqué (/warn) */
   async timeout(guild, targetMember, moderator, reason, durationMs, { escalationStep = null } = {}) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'timeout' });
+    this.#assertStrict(guild, moderator, 'timeout');
     if (!durationMs) throw new UserError('Une durée valide est requise pour un timeout.');
     if (durationMs > 28 * 24 * 60 * 60 * 1000) throw new UserError('La durée maximale d\'un timeout est de 28 jours.');
     if (!targetMember.moderatable) {
@@ -617,6 +629,7 @@ class ModerationService {
 
   async removeTimeout(guild, targetMember, moderator, reason) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'retirer le timeout de' });
+    this.#assertStrict(guild, moderator, 'untimeout');
     if (!targetMember.moderatable) {
       throw new UserError('Je ne peux pas retirer le timeout de ce membre (rôle trop élevé ou permission manquante).');
     }
@@ -629,6 +642,7 @@ class ModerationService {
   /** @param {{ escalationStep?: number|null }} [opts] palier d'escalade appliqué (/warn) */
   async kick(guild, targetMember, moderator, reason, { escalationStep = null } = {}) {
     assertCanModerate(moderator, targetMember, guild.members.me, { action: 'expulser' });
+    this.#assertStrict(guild, moderator, 'kick');
     if (!targetMember.kickable) {
       throw new UserError('Je ne peux pas expulser ce membre (rôle trop élevé ou permission « Expulser » manquante).');
     }
@@ -642,6 +656,7 @@ class ModerationService {
   }
 
   async ban(guild, targetUser, moderator, reason, { durationMs, deleteMessageSeconds = 0, targetMember, escalationStep = null } = {}) {
+    this.#assertStrict(guild, moderator, durationMs ? 'tempban' : 'ban');
     if (targetMember) {
       assertCanModerate(moderator, targetMember, guild.members.me, { action: 'bannir' });
       if (!targetMember.bannable) {
@@ -692,6 +707,7 @@ class ModerationService {
     // Liste noire (SEC3) : le débannissement immédiat du softban est refusé pour un blacklisté.
     guild.client?.services?.blacklist?.assertNotBlacklisted?.(guild.id, targetUser.id, 'softban');
     if (targetUser.id === moderator?.id) throw new UserError('Vous ne pouvez pas vous softbannir vous-même.');
+    this.#assertStrict(guild, moderator, 'softban');
     if (targetMember) {
       assertCanModerate(moderator, targetMember, guild.members.me, { action: 'softbannir' });
       if (!targetMember.bannable) {
@@ -736,6 +752,15 @@ class ModerationService {
    */
   async reportDestructiveAction(guild, moderator, type, { targetId = null, targetJoinedAt = null, count = 1 } = {}) {
     await this.#reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count);
+  }
+
+  /**
+   * Mode strict de /permissions au niveau de l'ACTION : la commande équivalente (`key` : 'ban',
+   * 'timeout'…) réservée au niveau N refuse l'action à un modérateur de rang < N, quel que soit
+   * le chemin (bouton, menu, escalade de /warn). Actions du bot exemptées. Lève une UserError.
+   */
+  #assertStrict(guild, moderator, key) {
+    access.assertStrictAction(guild?.client, guild, moderator, key);
   }
 
   /** Pré-contrôle Secur / AntiRaid d'une action faite par le bot pour un modérateur (lève une UserError). */
@@ -833,6 +858,7 @@ class ModerationService {
     // Liste noire (SEC3) : un blacklisté ne se débannit que par /secur blacklist retirer (/unban,
     // bouton « Débannir », levée d'une sanction).
     guild.client?.services?.blacklist?.assertNotBlacklisted?.(guild.id, userId, 'unban');
+    this.#assertStrict(guild, moderator, 'unban');
     let fetchError = null;
     const existing = await guild.bans.fetch(userId).catch((err) => {
       fetchError = err;
@@ -935,6 +961,8 @@ class ModerationService {
     const lift = LIFTS[sanction?.type];
     // Échue mais pas encore levée (levée automatique en attente ou en échec) : levable aussi.
     if (!lift || (sanctionState(sanction) !== 'active' && !awaitingLift(sanction))) throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
+    // Levée = /unban, /untimeout ou /unmute : leur mode strict s'applique (y compris levée en base seule).
+    this.#assertStrict(guild, moderator, lift.type);
     const userId = sanction.user_id;
     if (lift.type === 'unban') {
       if (!guild.members?.me?.permissions?.has(PermissionFlagsBits.BanMembers)) {
