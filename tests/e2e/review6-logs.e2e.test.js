@@ -434,3 +434,32 @@ test('R53 : jamais de carte de log dans un salon d\'annonces (publication automa
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R54
+
+test('R54 : sans « Joindre des fichiers », la purge est journalisée sans transcription (et le tableau de bord le signale)', async () => {
+  const h = await createHarness({ botAdministrator: false });
+  try {
+    h.configureAll();
+    const raw = h.fake.channels.get(IDS.channels.logs);
+    raw.permission_overwrites.push({ id: IDS.roles.bot, type: 0, allow: String(P.ViewChannel | P.SendMessages | P.EmbedLinks), deny: String(P.AttachFiles) });
+    h.fake.dispatchNow('CHANNEL_UPDATE', raw, '#logs sans Joindre des fichiers');
+    await h.settle();
+    const mark = h.fake.messageLog.length;
+    const m1 = await h.userMessage({ as: 'member', content: 'insulte 1' });
+    const m2 = await h.userMessage({ as: 'member', content: 'insulte 2' });
+    h.fake.dispatchNow('MESSAGE_DELETE_BULK', { ids: [m1.id, m2.id], channel_id: IDS.channels.general, guild_id: h.guild.id }, 'purge');
+    await h.settle();
+    const purge = titled(botPostsIn(h, mark, IDS.channels.logs), /Suppression en masse/);
+    assert.equal(purge.length, 1, 'log de purge perdu');
+    assert.equal(purge[0].attachments?.length ?? 0, 0);
+    assert.match(blob(purge), /Joindre des fichiers/);
+    // Tableau de bord : la catégorie Messages signale la permission manquante.
+    const panel = await panelOf(h, 'admin');
+    await h.click(panel, 'cmd:logs:nav', { as: 'admin', values: ['cat:messages'] });
+    assert.match(JSON.stringify(h.message(panel.id).embeds), /Joindre des fichiers/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

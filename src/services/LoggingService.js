@@ -2,7 +2,7 @@
 
 const { PermissionFlagsBits, ChannelType, OverwriteType } = require('discord.js');
 const { createLogger } = require('../core/logger');
-const { card } = require('../utils/ui');
+const { card, wide, ICONS } = require('../utils/ui');
 const { LOG_CATEGORIES, EVENT_CATEGORY } = require('../utils/logCatalog');
 const { canReadCached } = require('../utils/channelAccess');
 
@@ -154,6 +154,19 @@ function fitList(items, max = 1000, separator = ' ') {
   return out.join(separator);
 }
 
+/** Le bot peut-il joindre des fichiers dans ce salon (d'après le cache) ? */
+function canAttach(channel) {
+  const me = channel?.guild?.members?.me;
+  if (!me || typeof channel.permissionsFor !== 'function') return true;
+  return channel.permissionsFor(me)?.has(PermissionFlagsBits.AttachFiles) !== false;
+}
+
+/** Ajoute à la carte l'explication « fichier non joint » (une seule fois). */
+function withoutFilesNote(embed) {
+  if (typeof embed?.addFields !== 'function' || embed.data?.fields?.some((f) => f.name.includes('Fichier non joint'))) return;
+  embed.addFields(wide(ICONS.warning, 'Fichier non joint', 'Il me manque la permission **Joindre des fichiers** dans ce salon de logs.'));
+}
+
 /**
  * Envoie des embeds de log dans le salon configuré pour chaque catégorie.
  * Tolère silencieusement l'absence de configuration ou de permissions.
@@ -256,8 +269,21 @@ class LoggingService {
       if (!channel) return false;
       const payload = { embeds: [embed] };
       if (components?.length) payload.components = components;
-      if (ctx.files?.length) payload.files = ctx.files;
-      const message = await channel.send(payload);
+      // Pièces jointes (transcription d'une purge) : sans « Joindre des fichiers », la carte part
+      // quand même, sans le fichier et avec une explication (sinon 50013 : log entier perdu).
+      if (ctx.files?.length) {
+        if (canAttach(channel)) payload.files = ctx.files;
+        else withoutFilesNote(embed);
+      }
+      let message;
+      try {
+        message = await channel.send(payload);
+      } catch (err) {
+        if (!payload.files || err?.code !== 50013) throw err;
+        delete payload.files;
+        withoutFilesNote(embed);
+        message = await channel.send(payload);
+      }
       // Optionnel : l'appelant peut mémoriser le message (ex : fiche de sanction mise à jour plus tard).
       if (typeof ctx.onSent === 'function') {
         try {
@@ -290,4 +316,4 @@ class LoggingService {
   }
 }
 
-module.exports = { LoggingService, LOG_SECTIONS, logSection, logCard, fitList, shouldLog, sourceLessVisible, PRIVATE_CONTENT, REQUIRED_PERMISSIONS };
+module.exports = { LoggingService, LOG_SECTIONS, logSection, logCard, fitList, shouldLog, sourceLessVisible, canAttach, PRIVATE_CONTENT, REQUIRED_PERMISSIONS };

@@ -13,7 +13,7 @@ const { card, field, wide, ICONS, actionButton, buttonRows, ButtonStyle, subtext
 const { truncate, progressBar } = require('../../utils/embeds');
 const { LOG_CATEGORIES, CATEGORY_KEYS, LAYOUTS } = require('../../utils/logCatalog');
 const { planChannels } = require('../../services/LogSetupService');
-const { logCard } = require('../../services/LoggingService');
+const { logCard, canAttach } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
@@ -263,6 +263,9 @@ function categoryView(client, guild, key, notice) {
           meta.description,
           hints[state] ? `\n${ICONS.info} ${hints[state]}` : null,
           isPublic(guild, cfg, channelId) ? `\n${ICONS.warning} **Ce salon est visible par @everyone** : les logs (messages supprimés, IP de raid, etc.) seront publics.` : null,
+          key === 'messages' && state === 'ok' && !canAttach(guild.channels.cache.get(channelId))
+            ? `\n${ICONS.warning} Il me manque **Joindre des fichiers** dans ce salon : les transcriptions des purges ne seront pas jointes.`
+            : null,
         ],
         fields: [
           field(ICONS.status, 'État', `${dot} ${label}`),
