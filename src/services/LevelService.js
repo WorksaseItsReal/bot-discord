@@ -3,6 +3,7 @@
 const { PermissionFlagsBits } = require('discord.js');
 const { card, field, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
+const { safeName } = require('../utils/safeText');
 const { MAX_XP } = require('../database/repositories/LevelRepository');
 const { createLogger } = require('../core/logger');
 const { applyRoles } = require('../utils/memberRoles');
@@ -105,17 +106,21 @@ function rewardPlan(level, rewards = [], stack = true) {
   return { eligible: [...eligible], ineligible, lower };
 }
 
-/** Remplit le modèle d'annonce ({membre}, {niveau}, {pseudo}, {serveur}). Pur. */
+/**
+ * Remplit le modèle d'annonce ({membre}, {niveau}, {pseudo}, {serveur}) en une passe. Pseudo et
+ * nom du serveur : Markdown échappé, liens masqués compris (jamais un lien déguisé signé par le
+ * bot). Pur.
+ */
 function renderTemplate(template, { member, level, name, server }) {
+  const values = {
+    membre: member ?? '',
+    niveau: String(level ?? ''),
+    pseudo: name != null ? safeName(name) : '',
+    serveur: server != null ? safeName(server) : '',
+  };
+  const alias = { member: 'membre', level: 'niveau', name: 'pseudo', server: 'serveur' };
   const text = String(template || DEFAULT_ANNOUNCE);
-  return truncate(
-    text
-      .replace(/\{(membre|member)\}/gi, member ?? '')
-      .replace(/\{(niveau|level)\}/gi, String(level ?? ''))
-      .replace(/\{(pseudo|name)\}/gi, name ?? '')
-      .replace(/\{(serveur|server)\}/gi, server ?? ''),
-    2000,
-  );
+  return truncate(text.replace(/\{(membre|member|niveau|level|pseudo|name|serveur|server)\}/gi, (_, key) => values[alias[key.toLowerCase()] ?? key.toLowerCase()]), 2000);
 }
 
 /** Salon (ou son parent / sa catégorie) exclu ? Pur. */

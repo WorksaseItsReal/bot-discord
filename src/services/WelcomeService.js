@@ -1,7 +1,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { PermissionFlagsBits, escapeMarkdown } = require('discord.js');
+const { PermissionFlagsBits } = require('discord.js');
+const { safeName } = require('../utils/safeText');
 const { card, field, ICONS, userLine } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
@@ -179,8 +180,10 @@ const SAMPLE_VARS = Object.freeze({ id: null, name: 'Nouveau membre', server: 'V
  * Pur.
  */
 function renderTemplate(template, vars, { plain = false } = {}) {
-  const name = plain ? vars.name : escapeMarkdown(String(vars.name));
-  const server = plain ? vars.server : escapeMarkdown(String(vars.server));
+  // Markdown échappé, liens masqués compris : un nom d'affichage « [Nitro](https://…) » ne
+  // devient jamais un lien cliquable signé par le bot.
+  const name = plain ? vars.name : safeName(vars.name);
+  const server = plain ? vars.server : safeName(vars.server);
   const values = {
     membre: plain ? vars.name : vars.id ? `<@${vars.id}>` : `@${name}`,
     pseudo: name,

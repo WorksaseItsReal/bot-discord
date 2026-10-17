@@ -13,6 +13,10 @@ const { GiveawayRepository } = require('../src/database/repositories/GiveawayRep
 const { AutomodQuarantineRepository } = require('../src/database/repositories/AutomodQuarantineRepository');
 const { GiveawayService } = require('../src/services/GiveawayService');
 const { pickWinners, lazyShuffle } = require('../src/utils/random');
+const Welcome = require('../src/services/WelcomeService');
+const Levels = require('../src/services/LevelService');
+const Birthdays = require('../src/services/BirthdayService');
+const { safeName, neutralizeMaskedLinks } = require('../src/utils/safeText');
 
 const GUILD = '100000000000000001';
 
@@ -86,4 +90,29 @@ test('R77 AutomodQuarantineRepository.hasPendingRoles : quarantaine non levée a
   repo.lift(GUILD, id, 'mod');
   repo.lift(GUILD, noRoles, 'mod');
   assert.equal(repo.hasPendingRoles(GUILD, U), false, 'quarantaine levée');
+});
+
+// ---------------------------------------------------------------- R85 : pseudos en lien masqué
+
+/** Un lien masqué « [texte](url) » est-il encore cliquable ? (crochet ouvrant non échappé suivi de « ](http ») */
+const clickable = (text) => /(^|[^\\])\[[^\]]*[^\\]\]\(https?:/.test(String(text));
+const EVIL = '[Nitro gratuit](https://dlsc.rd)';
+
+test('R85 safeName / neutralizeMaskedLinks : aucun lien masqué cliquable, même plusieurs ou précédés d\'une barre oblique', () => {
+  for (const raw of [EVIL, `${EVIL} et [b](https://x.y)`, `\\${EVIL}`, `**${EVIL}**`]) {
+    assert.ok(!clickable(safeName(raw)), `safeName : ${safeName(raw)}`);
+    assert.ok(!clickable(neutralizeMaskedLinks(raw)), `neutralize : ${neutralizeMaskedLinks(raw)}`);
+  }
+  assert.equal(safeName('Jean_Dupont'), 'Jean\\_Dupont');
+  assert.equal(neutralizeMaskedLinks('**gras**'), '**gras**', 'le Markdown hors liens est conservé');
+});
+
+test('R85 cartes publiques : départ / arrivée, niveau, anniversaire ne rendent jamais un pseudo en lien masqué', () => {
+  const vars = { id: null, name: EVIL, server: EVIL, count: 3, age: '1 an' };
+  assert.ok(!clickable(Welcome.renderTemplate('**{pseudo}** a quitté {serveur} ({membre})', vars)), Welcome.renderTemplate('**{pseudo}** a quitté {serveur} ({membre})', vars));
+  const lvl = Levels.renderTemplate('Bravo {pseudo} ({membre}) sur {serveur} : niveau {niveau}', { member: '<@1>', level: 3, name: EVIL, server: EVIL });
+  assert.ok(!clickable(lvl), lvl);
+  assert.equal(Levels.renderTemplate('{pseudo}', { name: 'a$&b' }), 'a$&b', 'motif de remplacement interprété');
+  const bday = Birthdays.renderBirthday('Joyeux anniversaire {pseudo} {membre} sur {serveur}', { id: null, name: EVIL, server: EVIL, age: null });
+  assert.ok(!clickable(bday), bday);
 });
