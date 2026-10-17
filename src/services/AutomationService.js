@@ -172,6 +172,17 @@ function usableRoles(guild, ids) {
   });
 }
 
+/**
+ * Rôles que le bot peut RETIRER parmi `ids` (existants, hiérarchie et permission du bot). Un
+ * rôle devenu sensible n'est plus donné, mais il est toujours retiré (jamais conservé à vie).
+ */
+function removableRoles(guild, ids) {
+  return ids.filter((id) => {
+    const role = guild.roles?.cache?.get(id);
+    return role && role.id !== guild.id && !role.managed && !botRoleIssue(guild, role);
+  });
+}
+
 // ---------------------------------------------------------------- service
 
 /**
@@ -501,8 +512,9 @@ class AutomationService {
   async #applyVoice(guild, userId) {
     if (this.stopped) return;
     const cfg = this.settings(guild.id).voiceRole ?? {};
-    const managed = usableRoles(guild, managedVoiceRoles(cfg));
+    const managed = removableRoles(guild, managedVoiceRoles(cfg));
     if (!managed.length) return;
+    const addable = new Set(usableRoles(guild, managed));
     const key = `${guild.id}:${userId}`;
     const cached = guild.members.cache.get(userId);
     // Changement récent de notre part : le cache peut ne pas encore le refléter → relu chez Discord.
@@ -512,7 +524,7 @@ class AutomationService {
       : cached;
     if (!member || member.user?.bot) return;
     const desired = new Set(desiredVoiceRoles(cfg, guild.voiceStates?.cache?.get(userId)?.channelId ?? null));
-    const add = managed.filter((r) => desired.has(r) && !member.roles.cache.has(r));
+    const add = managed.filter((r) => addable.has(r) && desired.has(r) && !member.roles.cache.has(r));
     const remove = managed.filter((r) => !desired.has(r) && member.roles.cache.has(r));
     if (!add.length && !remove.length) return;
     const res = await applyRoles(member, { add, remove }, 'Rôle vocal automatique', (id, err) => logger.debug(`Rôle vocal ${id} (membre ${userId}) :`, err?.message));
@@ -536,7 +548,7 @@ class AutomationService {
     const cfg = this.settings(guild.id).voiceRole ?? {};
     if (!cfg.enabled || this.stopped || !guild.available) return 0;
     this.voiceReconciledAt.set(guild.id, now);
-    const managed = usableRoles(guild, managedVoiceRoles(cfg));
+    const managed = removableRoles(guild, managedVoiceRoles(cfg));
     if (!managed.length) return 0;
     // Cache des membres incomplet : les porteurs du rôle hors cache ne seraient pas vus.
     if (fetchMembers && guild.members.cache.size < (guild.memberCount ?? 0) && guild.memberCount <= 10_000) {
@@ -586,7 +598,7 @@ class AutomationService {
   /** Retire des rôles (anciennement « vocaux ») à tous les membres en cache qui les portent. */
   async releaseRoles(guild, roleIds) {
     let removed = 0;
-    for (const roleId of usableRoles(guild, roleIds)) {
+    for (const roleId of removableRoles(guild, roleIds)) {
       for (const member of [...(guild.roles.cache.get(roleId)?.members?.values() ?? [])]) {
         if (this.stopped) return removed;
         if (member.user?.bot) continue;
@@ -614,7 +626,9 @@ class AutomationService {
     if (!cfg.enabled) return null;
     const [roleId] = cfg.roleId ? usableRoles(guild, [cfg.roleId]) : [];
     if (change === 'end') {
-      if (roleId && newMember.roles.cache.has(roleId)) await applyRoles(newMember, { remove: [roleId] }, 'Fin du boost', (id, err) => logger.debug(`Rôle de boost ${id} :`, err?.message));
+      // Retrait même si le rôle est devenu sensible depuis (seuls existence et hiérarchie comptent).
+      const [removable] = cfg.roleId ? removableRoles(guild, [cfg.roleId]) : [];
+      if (removable && newMember.roles.cache.has(removable)) await applyRoles(newMember, { remove: [removable] }, 'Fin du boost', (id, err) => logger.debug(`Rôle de boost ${id} :`, err?.message));
       return 'end';
     }
     const key = `${guild.id}:${newMember.id}`;
@@ -660,6 +674,7 @@ module.exports = {
   assignableRoleIssue,
   botRoleIssue,
   usableRoles,
+  removableRoles,
   ARCHIVE_DURATIONS,
   THREAD_MODES,
   DEFAULT_THREAD_NAME,

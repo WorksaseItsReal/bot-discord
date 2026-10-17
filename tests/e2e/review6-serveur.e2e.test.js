@@ -237,3 +237,85 @@ test('R87 : un membre réellement parti (10007) : surcharge ignorée et signalé
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* R102 : rôle vocal / boost devenu sensible toujours retiré            */
+/* ------------------------------------------------------------------ */
+
+const memberRoles = (h, as) => h.fake.members.get(IDS.users[as] ?? as)?.roles ?? [];
+async function openAutomations(h, view, as = 'admin') {
+  const rec = await h.slash('automatisations', [], { as });
+  return h.click(h.messagesOf(rec)[0], 'cmd:automatisations:nav', { values: [view], as });
+}
+/** Surcharge sur #général : le rôle peut mentionner @everyone (il devient « sensible »). */
+async function makeSensitive(h, roleId) {
+  const ch = h.fake.channels.get(IDS.channels.general);
+  ch.permission_overwrites = [...ch.permission_overwrites, { id: roleId, type: 0, allow: String(P.MentionEveryone), deny: '0' }];
+  h.fake.dispatchNow('CHANNEL_UPDATE', ch, 'surcharge sensible');
+  await h.settle();
+}
+
+test('R102 : rôle vocal devenu sensible : plus donné, mais toujours retiré à la déconnexion et à la désactivation', async () => {
+  const h = await setup();
+  try {
+    const temp = IDS.roles.temp;
+    const view = await openAutomations(h, 'voice');
+    const global = await h.click(h.messagesOf(view)[0], 'cmd:automatisations:vrrole', { values: [temp] });
+    await h.click(h.messagesOf(global)[0], 'cmd:automatisations:toggle:voice:on:voice');
+    await h.voice('member', 'voice');
+    await h.settle();
+    assert.ok(memberRoles(h, 'member').includes(temp));
+    await makeSensitive(h, temp);
+    await h.voice('member', null);
+    await h.settle();
+    assert.equal(memberRoles(h, 'member').includes(temp), false, 'rôle sensible conservé hors vocal');
+    // Plus jamais donné tant qu'il est sensible.
+    await h.voice('member', 'voice');
+    await h.settle();
+    assert.equal(memberRoles(h, 'member').includes(temp), false, 'rôle sensible attribué');
+  } finally {
+    await h.close();
+  }
+});
+
+test('R102 : désactivation du rôle vocal : un rôle devenu sensible est retiré aux porteurs', async () => {
+  const h = await setup();
+  try {
+    const temp = IDS.roles.temp;
+    const view = await openAutomations(h, 'voice');
+    const global = await h.click(h.messagesOf(view)[0], 'cmd:automatisations:vrrole', { values: [temp] });
+    await h.click(h.messagesOf(global)[0], 'cmd:automatisations:toggle:voice:on:voice');
+    await h.voice('member', 'voice');
+    await h.settle();
+    assert.ok(memberRoles(h, 'member').includes(temp));
+    await makeSensitive(h, temp);
+    const v2 = await openAutomations(h, 'voice');
+    await h.click(h.messagesOf(v2)[0], 'cmd:automatisations:toggle:voice:off:voice');
+    await h.settle();
+    assert.equal(memberRoles(h, 'member').includes(temp), false, 'rôle sensible conservé après désactivation');
+  } finally {
+    await h.close();
+  }
+});
+
+test('R102 : fin de boost : le rôle de remerciement devenu sensible est retiré', async () => {
+  const h = await setup();
+  try {
+    const temp = IDS.roles.temp;
+    h.configure({ automations: { boost: { enabled: true, roleId: temp, channelId: null } } });
+    const svc = h.client.services.automations;
+    const member = h.guild.members.cache.get(IDS.users.member);
+    await member.roles.add(temp);
+    await h.settle();
+    await makeSensitive(h, temp);
+    const fresh = h.guild.members.cache.get(IDS.users.member);
+    const before = Object.create(fresh);
+    Object.defineProperty(before, 'premiumSinceTimestamp', { value: Date.now() - 1000 });
+    Object.defineProperty(before, 'premiumSince', { value: new Date(Date.now() - 1000) });
+    await svc.handleMemberUpdate(before, fresh);
+    await h.settle();
+    assert.equal(memberRoles(h, 'member').includes(temp), false, 'rôle de boost sensible conservé après la fin du boost');
+  } finally {
+    await h.close();
+  }
+});
