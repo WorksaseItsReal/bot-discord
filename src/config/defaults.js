@@ -126,6 +126,38 @@ const defaultGuildConfig = Object.freeze({
     users: [],
     roles: [],
   },
+  // Secur (/secur) : anti-nuke par modules (SecurService). Bloc dédié, TOUT est coupé par défaut ;
+  // aucune clé antiraid n'est touchée. Source unique des modules et bornes : src/utils/secur.js.
+  secur: {
+    owners: [],              // owners de sécurité (25 humains au plus) : exemptés en mode max
+    trustedBots: [],         // bots de confiance (25 au plus) : exemptés en on ET en max
+    verrou: false,
+    raidPingRoleId: null,    // rôle mentionné dans le salon d'alerte (60 s au moins entre deux pings)
+    alertOwnersDm: true,     // MP aux owners de sécurité pour un événement critique
+    notifyOwner: true,       // MP au propriétaire du serveur (seul le propriétaire peut le couper)
+    botExecutor: 'recent',   // bot auteur : 'recent' (expulsé s'il a moins de 7 jours) | 'always' | 'never'
+    // Par module : mode off|on|max, punish none|derank|kick|ban, undo, limit (null = hérite), windowSeconds.
+    modules: {
+      channelCreate: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      channelDelete: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      channelUpdate: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10, ignoreBenign: true },
+      roleCreate: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      roleDelete: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      roleUpdate: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10, dangerousOnly: true },
+      roleAdd: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      roleRemove: { mode: 'off', punish: 'derank', undo: true, limit: 3, windowSeconds: 10 },
+      webhook: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10, ignoreFollowers: true },
+      serverUpdate: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      expressions: { mode: 'off', punish: 'derank', undo: true, limit: 3, windowSeconds: 10 },
+      ban: { mode: 'off', punish: 'derank', undo: false, limit: null, windowSeconds: 10 },
+      unban: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      kick: { mode: 'off', punish: 'derank', undo: false, limit: null, windowSeconds: 10 },
+      bot: { mode: 'off', punish: 'derank', undo: true, limit: 1, windowSeconds: 10 },
+      voiceKick: { mode: 'off', punish: 'derank', undo: false, limit: 5, windowSeconds: 10 },
+      everyone: { mode: 'off', punish: 'none', undo: true, limit: 1, windowSeconds: 10 },
+      messagePurge: { mode: 'off', punish: 'derank', undo: false, limit: 2, windowSeconds: 10, minMessages: 20 },
+    },
+  },
   tickets: {
     categoryId: null,
     supportRoleId: null, // premier rôle staff (compatibilité)
