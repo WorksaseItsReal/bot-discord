@@ -6,6 +6,7 @@ const { parseDuration, discordTimestamp } = require('../../utils/time');
 const { card, field, wide, ICONS, subtext, status, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { assertInvoker } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
+const { assertAutomodClean } = require('../../utils/safeText');
 
 const REMINDER_ICON = '⏰';
 const MAX_LISTED = 10;
@@ -84,6 +85,10 @@ module.exports = {
       const message = interaction.options.getString('message').trim();
       if (!message) throw new UserError('Le message du rappel ne peut pas être vide.');
       if (message.length > 2000) throw new UserError('Le message du rappel est trop long (2000 caractères max).');
+      if (interaction.inGuild?.()) {
+        // Publié plus tard par le bot, que l'AutoMod ignore : mêmes filtres qu'un message ordinaire.
+        assertAutomodClean(message, { automod: client.services.config.get(interaction.guildId).automod, guild: interaction.guild, member: interaction.member, channel: interaction.channel, label: 'Le message du rappel' });
+      }
       const active = repo.listByUser(interaction.user.id).length;
       if (active >= MAX_ACTIVE_REMINDERS) {
         throw new UserError(`Vous avez déjà **${active}** rappels en cours (maximum ${MAX_ACTIVE_REMINDERS}). Supprimez-en avec \`/reminder list\` avant d'en créer un nouveau.`);

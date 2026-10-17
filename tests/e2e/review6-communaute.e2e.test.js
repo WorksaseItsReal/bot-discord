@@ -162,6 +162,7 @@ const isDm = (h, m) => h.fake.dms.has(m.channel_id);
 test('R79 /reminder : salon en lecture seule → rappel en MP ; auteur banni ou parti → jamais publié dans le salon ; lien masqué neutralisé', async () => {
   const h = await createHarness();
   h.configureAll();
+  h.configure({ automod: { enabled: false } }); // filtres de texte : voir R78
   try {
     const rules = h.fake.channels.get(IDS.channels.rules);
     rules.permission_overwrites = [{ id: IDS.guild, type: 0, allow: '0', deny: String(P.SendMessages) }];
@@ -406,6 +407,61 @@ test('R77 vérification « ajout » : un membre dérank, muet ou en timeout ne s
     await h.memberJoin(ok);
     await h.click(panel, 'cmd:bienvenue:verify', { as: ok.id });
     assert.ok(rolesOf(h, ok.id).includes(IDS.roles.member), 'vérification ordinaire refusée');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+// ------------------------------------------------------------------ R78 : textes publiés par le bot et AutoMod
+
+test('R78 /suggestion, /reminder, /sondage : texte que l\'AutoMod supprimerait refusé ; membre muet refusé ; liens masqués neutralisés', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const PAYLOAD = 'rejoignez discord.gg/arnaque42 vite';
+    const direct = await h.userMessage({ as: 'member', channel: 'general', content: PAYLOAD });
+    assert.ok(!h.fake.messages.has(direct.id), 'calibrage : l\'AutoMod ne supprime pas le message');
+    const suggestionCards = (mark) => h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m?.author.id === h.client.user.id && /Suggestion #\d+$/.test(m.embeds?.[0]?.title ?? '') && !(m.flags & 64));
+
+    let mark = h.fake.messageLog.length;
+    const s1 = await h.slash('suggestion', sub('create', [opt('contenu', 3, PAYLOAD)]), { as: 'member', channel: 'general' });
+    assert.ok(h.isError(s1), 'suggestion avec invitation acceptée');
+    assert.equal(suggestionCards(mark).length, 0);
+    const s2 = await h.slash('suggestion', sub('create', [opt('contenu', 3, 'Un mot interdit ici')]), { as: 'member', channel: 'general' });
+    assert.ok(h.isError(s2), 'suggestion avec mot interdit acceptée');
+
+    const r1 = await h.slash('reminder', sub('create', [opt('duree', 3, '1h'), opt('message', 3, PAYLOAD)]), { as: 'member', channel: 'general' });
+    assert.ok(h.isError(r1), 'rappel avec invitation accepté');
+    assert.equal(h.client.database.db.prepare('SELECT COUNT(*) n FROM reminders').get().n, 0);
+
+    const p1 = await h.slash('sondage', [opt('question', 3, `Qui vient ? ${PAYLOAD}`)], { as: 'member', channel: 'general' });
+    assert.ok(h.isError(p1), 'sondage avec invitation accepté');
+    const p2 = await h.slash('sondage', [opt('question', 3, 'On joue ?'), opt('choix', 3, 'Oui | Non | interdit')], { as: 'member', channel: 'general' });
+    assert.ok(h.isError(p2), 'sondage avec mot interdit dans les réponses accepté');
+
+    // Membre muet (rôle Muted) : /suggestion refusée même avec un texte propre.
+    h.configure({ moderation: { mutedRoleId: IDS.roles.muted } });
+    const tm = h.fake.members.get(IDS.users.target);
+    tm.roles = [...tm.roles, IDS.roles.muted];
+    h.fake.dispatchNow('GUILD_MEMBER_UPDATE', { guild_id: h.guild.id, ...tm }, 'préparation : cible muette');
+    await h.settle();
+    mark = h.fake.messageLog.length;
+    const s3 = await h.slash('suggestion', sub('create', [opt('contenu', 3, 'Idée propre')]), { as: 'target', channel: 'general' });
+    assert.ok(h.isError(s3), 'suggestion d\'un membre muet acceptée');
+    assert.equal(suggestionCards(mark).length, 0);
+
+    // Texte propre avec lien masqué vers un hôte autorisé : publié, lien neutralisé.
+    mark = h.fake.messageLog.length;
+    const ok = await h.slash('suggestion', sub('create', [opt('contenu', 3, 'Voir [la doc](https://discord.com/developers) svp')]), { as: 'member', channel: 'general' });
+    assert.ok(!h.isError(ok), h.replyText(ok));
+    const card = suggestionCards(mark)[0];
+    assert.ok(card, `suggestion propre non publiée : ${h.replyText(ok)}`);
+    assert.ok(!/(^|[^\\])\[la doc/.test(card.embeds[0].description), `lien masqué cliquable : ${card.embeds[0].description}`);
+
+    // Staff exempté de l'AutoMod (« Gérer les messages ») : comme pour un message ordinaire.
+    const staff = await h.slash('suggestion', sub('create', [opt('contenu', 3, 'Partenariat : discord.gg/partenaire')]), { as: 'mod', channel: 'general' });
+    assert.ok(!h.isError(staff), h.replyText(staff));
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
