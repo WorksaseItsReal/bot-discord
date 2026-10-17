@@ -1622,7 +1622,7 @@ module.exports = {
           }
         };
         // Déjà banni (confirmation restée ouverte, autre modérateur) : rien de plus (ni sanction ni compteur).
-        const existing = await interaction.guild.bans.fetch({ user: userId, force: true }).catch(() => null);
+        const existing = await Promise.resolve(interaction.guild.bans?.fetch({ user: userId, force: true })).catch(() => null);
         if (existing?.user?.id === userId) {
           await interaction.editReply({ embeds: [status.warn(`${userLine(user)} est déjà banni. Rien n'a été modifié.`)], components: [] });
           return settleLog();
