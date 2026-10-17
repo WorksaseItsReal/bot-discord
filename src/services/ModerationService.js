@@ -760,7 +760,8 @@ class ModerationService {
         return;
       }
       if (!this.antiraid?.handleDestructive) return;
-      await this.antiraid.handleDestructive(guild, moderator.id, type, { targetId, targetJoinedAt, at: Date.now(), count });
+      // at : maintenant (valeur par défaut) ; count : actions d'une opération groupée.
+      await this.antiraid.handleDestructive(guild, moderator.id, type, { targetId, targetJoinedAt, ...(count > 1 ? { count } : {}) });
     } catch {
       // La détection ne doit jamais faire échouer la sanction déjà appliquée.
     }

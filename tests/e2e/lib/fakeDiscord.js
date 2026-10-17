@@ -2,7 +2,7 @@
 
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { DiscordAPIError, PermissionFlagsBits: P } = require('discord.js');
-const { nextId, DAY } = require('./ids');
+const { nextId, snowflakeAt, DAY } = require('./ids');
 const L = require('./limits');
 
 /**
@@ -26,6 +26,13 @@ const INTERACTION_CALLBACK = {
 };
 /** Scénario à l'origine d'une requête (suit les continuations asynchrones du bot). */
 const scenario = new AsyncLocalStorage();
+/**
+ * Acteur HUMAIN d'une requête faite par `perform()` : { id, at }. Ses permissions et sa
+ * hiérarchie sont contrôlées à la place de celles du bot, et les entrées d'audit sont signées
+ * de son identifiant (datées de `at` si fourni). Jamais propagé aux événements émis (le bot
+ * qui y réagit agit en son propre nom).
+ */
+const actorStore = new AsyncLocalStorage();
 const EPHEMERAL = 1 << 6;
 const LOADING = 1 << 7;
 const MAX_TIMEOUT_MS = 28 * DAY;
@@ -120,7 +127,7 @@ class FakeDiscord {
       if (prepend) this.routes.unshift(entry);
       else this.routes.push(entry);
     };
-    const helpers = { error: (...args) => this.#error(...args) };
+    const helpers = { error: (...args) => this.#error(...args), audit: (...args) => this.#audit(...args) };
     for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js')).sort()) require(path.join(dir, file))(this, route, helpers);
   }
 
@@ -150,6 +157,7 @@ class FakeDiscord {
       reason: options.reason ?? null,
       label: scenario.getStore() ?? this.label,
       status: 200,
+      actor: actorStore.getStore()?.id ?? null,
     };
     this.calls.push(call);
 
@@ -231,10 +239,11 @@ class FakeDiscord {
     if (!this.echo) return;
     this.pendingDispatch += 1;
     const label = scenario.getStore() ?? this.label;
-    setImmediate(() => {
+    // Hors du contexte d'un acteur humain : le bot qui réagit à l'événement agit en son nom.
+    actorStore.exit(() => setImmediate(() => {
       this.pendingDispatch -= 1;
       this.dispatchNow(t, d, label);
-    });
+    }));
   }
 
   dispatchNow(t, d, label = scenario.getStore() ?? this.label) {
@@ -248,11 +257,12 @@ class FakeDiscord {
   }
 
   #audit(actionType, targetId, call, changes = [], options = undefined) {
+    const actor = actorStore.getStore();
     const entry = {
-      id: nextId(),
+      id: actor?.at ? snowflakeAt(actor.at) : nextId(),
       action_type: actionType,
       target_id: targetId ?? null,
-      user_id: this.botUser.id,
+      user_id: actor?.id ?? this.botUser.id,
       reason: call?.reason ?? undefined,
       changes,
       ...(options ? { options } : {}),
@@ -260,6 +270,59 @@ class FakeDiscord {
     this.auditLog.unshift(entry);
     this.dispatch('GUILD_AUDIT_LOG_ENTRY_CREATE', { ...entry, guild_id: this.guildId });
     return entry;
+  }
+
+  /** Entrée d'audit (signée par l'acteur courant, sinon par le bot) : pour les fichiers de fakeRoutes/. */
+  audit(actionType, targetId, call, changes = [], options = undefined) {
+    return this.#audit(actionType, targetId, call, changes, options);
+  }
+
+  /** Identifiant de l'acteur humain de la requête en cours (perform), ou null (le bot). */
+  get actorId() {
+    return actorStore.getStore()?.id ?? null;
+  }
+
+  /**
+   * Requête REST faite par un HUMAIN (interface Discord, autre client) : mêmes routes que le bot,
+   * permissions et hiérarchie de `actorId` contrôlées, entrées d'audit signées de son identifiant
+   * (snowflake daté de `at` si fourni). Lève l'erreur que Discord renverrait.
+   * @param {string} method
+   * @param {string} route ex. `/channels/123`
+   * @param {object} [body]
+   * @param {{ actorId: string, reason?: string|null, at?: number|null, label?: string }} opts
+   */
+  async perform(method, route, body = undefined, { actorId, reason = null, at = null, label } = {}) {
+    if (!actorId || (!this.members.has(actorId) && actorId !== this.guild.owner_id)) throw new Error(`perform : acteur inconnu (${actorId})`);
+    const run = () => this.request({ method, fullRoute: route, body, reason: reason ?? undefined });
+    return actorStore.run({ id: actorId, at }, () => (label ? scenario.run(label, run) : run()));
+  }
+
+  /** Différences « changes » d'une entrée d'audit (clés du corps modifiées). Pur. */
+  static changesOf(before, body) {
+    const out = [];
+    for (const [key, value] of Object.entries(body ?? {})) {
+      if (key === 'permission_overwrites') continue;
+      const old = before?.[key];
+      if (JSON.stringify(old ?? null) === JSON.stringify(value ?? null)) continue;
+      out.push({ key, ...(old !== undefined ? { old_value: json(old) } : {}), ...(value !== undefined ? { new_value: json(value) } : {}) });
+    }
+    return out;
+  }
+
+  /** Entrées d'audit des surcharges (13 création, 14 modification, 15 suppression) entre deux listes. */
+  #overwriteAudits(ch, before, after, call) {
+    const map = (list) => new Map((list ?? []).map((o) => [o.id, { id: o.id, type: Number(o.type ?? 0), allow: String(o.allow ?? '0'), deny: String(o.deny ?? '0') }]));
+    const b = map(before);
+    const a = map(after);
+    const options = (o) => ({ id: o.id, type: String(o.type), ...(o.type === 0 ? { role_name: this.roles.get(o.id)?.name ?? '' } : {}) });
+    for (const [id, o] of a) {
+      const old = b.get(id);
+      if (!old) this.#audit(13, ch.id, call, [{ key: 'id', new_value: id }, { key: 'type', new_value: o.type }, { key: 'allow', new_value: o.allow }, { key: 'deny', new_value: o.deny }], options(o));
+      else if (old.allow !== o.allow || old.deny !== o.deny) this.#audit(14, ch.id, call, FakeDiscord.changesOf(old, { allow: o.allow, deny: o.deny }), options(o));
+    }
+    for (const [id, o] of b) {
+      if (!a.has(id)) this.#audit(15, ch.id, call, [{ key: 'id', old_value: id }, { key: 'type', old_value: o.type }, { key: 'allow', old_value: o.allow }, { key: 'deny', old_value: o.deny }], options(o));
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -552,10 +615,13 @@ class FakeDiscord {
       if (b.bitrate != null && (b.bitrate < 8000 || b.bitrate > 384000)) problems.push(`bitrate hors bornes (${b.bitrate})`);
       problems.push(...this.#checkOverwrites(b.permission_overwrites));
       this.#violate(call, problems);
+      const changes = FakeDiscord.changesOf(ch, b);
+      const overwritesBefore = json(ch.permission_overwrites ?? []);
       Object.assign(ch, b);
       if (b.permission_overwrites) ch.permission_overwrites = b.permission_overwrites.map((o) => ({ ...o, allow: String(o.allow ?? '0'), deny: String(o.deny ?? '0') }));
       this.dispatch('CHANNEL_UPDATE', ch);
-      this.#audit(11, ch.id, call);
+      this.#audit(11, ch.id, call, changes);
+      if (b.permission_overwrites) this.#overwriteAudits(ch, overwritesBefore, ch.permission_overwrites, call);
       return ch;
     });
     r('DELETE', '/channels/:channel', (p, call) => {
@@ -568,14 +634,18 @@ class FakeDiscord {
       const ch = this.channel(p.channel, call);
       const b = call.body ?? {};
       this.#violate(call, this.#checkOverwrites([{ id: p.overwrite, ...b }]));
+      const before = json(ch.permission_overwrites ?? []);
       ch.permission_overwrites = ch.permission_overwrites.filter((o) => o.id !== p.overwrite);
       ch.permission_overwrites.push({ id: p.overwrite, type: b.type ?? 0, allow: String(b.allow ?? '0'), deny: String(b.deny ?? '0') });
       this.dispatch('CHANNEL_UPDATE', ch);
+      this.#overwriteAudits(ch, before, ch.permission_overwrites, call);
     });
     r('DELETE', '/channels/:channel/permissions/:overwrite', (p, call) => {
       const ch = this.channel(p.channel, call);
+      const before = json(ch.permission_overwrites ?? []);
       ch.permission_overwrites = ch.permission_overwrites.filter((o) => o.id !== p.overwrite);
       this.dispatch('CHANNEL_UPDATE', ch);
+      this.#overwriteAudits(ch, before, ch.permission_overwrites, call);
     });
     r('GET', '/channels/:channel/messages', (p, call) => {
       this.channel(p.channel, call);
@@ -666,8 +736,10 @@ class FakeDiscord {
     r('POST', '/channels/:channel/webhooks', (p, call) => {
       const name = call.body?.name ?? '';
       if (!name || [...name].length > L.MAX.webhookName || /clyde|discord/i.test(name)) this.#violate(call, [`nom de webhook invalide « ${name} »`]);
-      const hook = { id: nextId(), type: 1, token: `wh-${nextId()}`, name, avatar: null, channel_id: p.channel, guild_id: this.guildId, application_id: null, user: this.botUser };
+      const author = this.actorId ? this.users.get(this.actorId) ?? this.botUser : this.botUser;
+      const hook = { id: nextId(), type: 1, token: `wh-${nextId()}`, name, avatar: null, channel_id: p.channel, guild_id: this.guildId, application_id: null, user: author };
       this.webhooks.set(hook.id, hook);
+      this.#audit(50, hook.id, call, [{ key: 'name', new_value: name }, { key: 'channel_id', new_value: p.channel }, { key: 'type', new_value: 1 }]);
       return hook;
     });
     r('GET', '/channels/:channel/invites', () => []);
@@ -699,9 +771,11 @@ class FakeDiscord {
     });
     r('PATCH', '/guilds/:guild', (p, call) => {
       this.#guild(p, call);
+      const changes = FakeDiscord.changesOf(this.guild, call.body ?? {});
       Object.assign(this.guild, call.body ?? {});
       const out = { ...this.guild, roles: [...this.roles.values()] };
       this.dispatch('GUILD_UPDATE', out);
+      if (changes.length) this.#audit(1, this.guildId, call, changes);
       return out;
     });
     r('GET', '/guilds/:guild/preview', (p, call) => ({ ...this.#guild(p, call), approximate_member_count: this.members.size, approximate_presence_count: 2 }));
@@ -833,9 +907,10 @@ class FakeDiscord {
       const b = call.body ?? {};
       if (b.name != null && [...b.name].length > L.MAX.roleName) this.#violate(call, [`name > ${L.MAX.roleName}`]);
       this.#assertRoleBelowBot(role, call);
+      const changes = FakeDiscord.changesOf(role, { ...b, ...(b.permissions != null ? { permissions: String(b.permissions) } : {}) });
       Object.assign(role, b, b.permissions != null ? { permissions: String(b.permissions) } : {});
       this.dispatch('GUILD_ROLE_UPDATE', { guild_id: this.guildId, role });
-      this.#audit(31, role.id, call);
+      this.#audit(31, role.id, call, changes);
       return role;
     });
     r('DELETE', '/guilds/:guild/roles/:role', (p, call) => {
@@ -984,7 +1059,10 @@ class FakeDiscord {
    */
   #checkPermissions(call) {
     const guild = this.client.guilds.cache.get(this.guildId);
-    const me = guild?.members.me;
+    // Requête d'un humain (perform) : SES permissions, calculées par discord.js.
+    const actor = actorStore.getStore();
+    const me = actor ? guild?.members.cache.get(actor.id) : guild?.members.me;
+    if (actor && !me) throw this.#error(call, 403, 50013, 'Missing Permissions');
     if (!me) return;
     const { method, route, body } = call;
     const inChannel = (id, ...flags) => {
@@ -1042,6 +1120,11 @@ class FakeDiscord {
     else if (/^\/guilds\/\d+\/roles/.test(route) && method !== 'GET') inGuild(P.ManageRoles);
     else if (/^\/guilds\/\d+\/emojis/.test(route) && method !== 'GET') inGuild(P.ManageGuildExpressions);
     else if (/^\/guilds\/\d+\/audit-logs$/.test(route)) inGuild(P.ViewAuditLog);
+    else if (/^\/guilds\/\d+\/prune$/.test(route) && method === 'POST') inGuild(P.KickMembers);
+    else if ((m = /^\/webhooks\/(\d+)$/.exec(route))) {
+      const hook = this.webhooks.get(m[1]);
+      if (hook) inChannel(hook.channel_id, P.ManageWebhooks);
+    }
     else if (/^\/guilds\/\d+\/auto-moderation\//.test(route)) inGuild(P.ManageGuild);
     else if (/^\/guilds\/\d+$/.test(route) && method === 'PATCH') inGuild(P.ManageGuild);
     else if (/^\/guilds\/\d+\/(invites|webhooks|integrations)$/.test(route)) inGuild(route.endsWith('webhooks') ? P.ManageWebhooks : P.ManageGuild);
@@ -1077,15 +1160,23 @@ class FakeDiscord {
     return Math.max(0, ...m.roles.map((r) => this.roles.get(r)?.position ?? 0));
   }
 
+  /** Auteur de la requête : l'acteur humain (perform) ou le bot. */
+  #actor() {
+    return actorStore.getStore()?.id ?? this.botUser.id;
+  }
+
   #assertManageable(userId, call) {
-    if (userId === this.guild.owner_id || this.#highest(userId) >= this.#highest(this.botUser.id)) {
-      throw this.#error(call, 403, 50013, 'Missing Permissions');
-    }
+    const actor = this.#actor();
+    if (userId === this.guild.owner_id) throw this.#error(call, 403, 50013, 'Missing Permissions');
+    if (actor === this.guild.owner_id) return; // le propriétaire domine toute la hiérarchie
+    if (this.#highest(userId) >= this.#highest(actor)) throw this.#error(call, 403, 50013, 'Missing Permissions');
   }
 
   #assertRoleBelowBot(role, call) {
     if (role.managed && call.method === 'DELETE') throw this.#error(call, 400, 50028, 'Invalid Role');
-    if (role.position >= this.#highest(this.botUser.id)) throw this.#error(call, 403, 50013, 'Missing Permissions');
+    const actor = this.#actor();
+    if (actor === this.guild.owner_id) return;
+    if (role.position >= this.#highest(actor)) throw this.#error(call, 403, 50013, 'Missing Permissions');
   }
 
   #editMember(userId, call) {
@@ -1293,4 +1384,4 @@ class FakeDiscord {
   }
 }
 
-module.exports = { FakeDiscord, EPHEMERAL, LOADING, INTERACTION_CALLBACK, scenario };
+module.exports = { FakeDiscord, EPHEMERAL, LOADING, INTERACTION_CALLBACK, scenario, actorStore };

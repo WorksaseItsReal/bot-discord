@@ -21,6 +21,7 @@
  *   `await h.slash('ban', [{ name: 'membre', type: 6, value: IDS.users.target }])`,
  *   `await h.click(message, customId, { as: 'member', values })`, `await h.submitModal(rec)`,
  *   `await h.contextMenu('Signaler le message', message)` (menus contextuels), `await h.userMessage({ as, channel, content })`, `await h.voice(as, salon)`…
+ *   Actions d'un humain (interface Discord) : `await h.asHuman('mod').deleteChannel(id)`, `h.asHuman('mod').perform(method, route, body)`.
  *   puis `assert.equal(h.problemCount(), 0, h.formatProblems())` et `await h.close()`.
  * Exploration automatique des composants : lib/explore.js.
  */
@@ -592,13 +593,50 @@ async function createHarness(opts = {}) {
       await this.settle();
     },
 
-    /** Entrée du journal d'audit (GUILD_AUDIT_LOG_ENTRY_CREATE) faite par un humain. */
-    async auditEntry(entry, { label } = {}) {
-      const full = { id: nextId(), changes: [], ...entry };
+    /**
+     * Entrée du journal d'audit (GUILD_AUDIT_LOG_ENTRY_CREATE) faite par un humain.
+     * `at` : horodatage de l'entrée (identifiant snowflake daté), pour simuler une entrée
+     * reçue en retard (rejeu après RESUME de la passerelle).
+     */
+    async auditEntry(entry, { label, at } = {}) {
+      const full = { id: at ? snowflakeAt(at) : nextId(), changes: [], ...entry };
       fake.auditLog.unshift(full);
       fake.label = label ?? `audit ${entry.action_type}`;
       fake.dispatchNow('GUILD_AUDIT_LOG_ENTRY_CREATE', { ...full, guild_id: guild.id });
       await this.settle();
+    },
+
+    /**
+     * Actions REST faites par un HUMAIN (interface Discord) : mêmes routes que le bot, permissions
+     * et hiérarchie de cet humain contrôlées, entrées d'audit signées de son identifiant (datées
+     * de `at` si fourni). Attend la fin des réactions du bot ; lève l'erreur Discord en cas de refus.
+     * @param {string} as clé d'IDS.users ou identifiant
+     */
+    asHuman(as) {
+      const actorId = IDS.users[as] ?? as;
+      const g = guild.id;
+      const perform = async (method, route, body, opts = {}) => {
+        try {
+          return await fake.perform(method, route, body, { actorId, label: opts.label ?? `${as} : ${method} ${route}`, ...opts });
+        } finally {
+          await h.settle();
+        }
+      };
+      return {
+        id: actorId,
+        perform,
+        deleteChannel: (id, opts) => perform('DELETE', `/channels/${id}`, undefined, opts),
+        createChannel: (name, opts) => perform('POST', `/guilds/${g}/channels`, { name, type: 0 }, opts),
+        editChannel: (id, body, opts) => perform('PATCH', `/channels/${id}`, body, opts),
+        deleteRole: (id, opts) => perform('DELETE', `/guilds/${g}/roles/${id}`, undefined, opts),
+        editRole: (id, body, opts) => perform('PATCH', `/guilds/${g}/roles/${id}`, body, opts),
+        addRole: (userId, roleId, opts) => perform('PUT', `/guilds/${g}/members/${IDS.users[userId] ?? userId}/roles/${roleId}`, undefined, opts),
+        removeRole: (userId, roleId, opts) => perform('DELETE', `/guilds/${g}/members/${IDS.users[userId] ?? userId}/roles/${roleId}`, undefined, opts),
+        ban: (userId, opts) => perform('PUT', `/guilds/${g}/bans/${IDS.users[userId] ?? userId}`, {}, opts),
+        kick: (userId, opts) => perform('DELETE', `/guilds/${g}/members/${IDS.users[userId] ?? userId}`, undefined, opts),
+        prune: (days = 7, opts) => perform('POST', `/guilds/${g}/prune`, { days, compute_prune_count: true }, opts),
+        editGuild: (body, opts) => perform('PATCH', `/guilds/${g}`, body, opts),
+      };
     },
 
     /** Modifie la configuration du serveur (ConfigService réel). */

@@ -288,13 +288,14 @@ class SecurService {
    * Compte une action. Section critique SYNCHRONE (aucun await) : des entrées concurrentes
    * partagent le même incident (une sanction, une ligne), chacune avec sa tâche d'annulation.
    */
-  #count(guild, executorId, key, { at, weight = 1, record = null, member = null, isBot = false }) {
+  #count(guild, executorId, key, { at, weight = 1, record = null, member = null, isBot = false, attempts = 0 }) {
     const now = this.now();
     if (now - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(now);
     const cfg = this.config.get(guild.id);
     const windowMs = S.effectiveWindowMs(cfg, key);
     const limit = S.effectiveLimit(cfg, key);
-    const entry = { at, weight: Math.max(1, Math.floor(Number(weight)) || 1), record, late: now - at > LATE_MS, queued: false, counted: false };
+    // attempts : tentatives répétées bloquées par le pré-contrôle (aucune action réelle, rien à annuler).
+    const entry = { at, weight: Math.max(1, Math.floor(Number(weight)) || 1), record, late: now - at > LATE_MS, queued: Boolean(attempts), counted: Boolean(attempts) };
     const w = this.#window(`${guild.id}:${executorId}:${key}`, windowMs);
     w.entries.push(entry);
     const best = bestWindow(w.entries, at, windowMs);
@@ -312,6 +313,7 @@ class SecurService {
     state.guild = guild;
     state.expiresAt = now + INCIDENT_MS;
     if (member?.user) state.executor = member.user;
+    if (attempts) state.details.push(`${attempts} tentatives bloquées par le pré-contrôle en 10 min (${S.SECUR_MODULES[key]?.label ?? key}) : aucune n'a eu lieu.`);
     for (const e of list) {
       if (e.counted) continue;
       e.counted = true;
@@ -725,8 +727,8 @@ class SecurService {
     if (list.length >= REFUSALS_BEFORE_INCIDENT) {
       this.refusals.delete(key);
       const escalate = path === 'secur'
-        ? this.#member(guild, userId).then((member) => this.#count(guild, userId, type, { at: now, weight: limit, record: null, member, isBot: Boolean(user.bot) }))
-        : this.antiraid.handleDestructive(guild, userId, type, { at: now, count: limit });
+        ? this.#member(guild, userId).then((member) => this.#count(guild, userId, type, { at: now, weight: limit, record: null, member, isBot: Boolean(user.bot), attempts: list.length }))
+        : this.antiraid.handleBlockedAttempts?.(guild, userId, type, list.length);
       Promise.resolve(escalate).catch((e) => logger.warn('Tentatives répétées :', e?.message));
     }
     throw new UserError(`Action bloquée par la sécurité (${label}) : ${count} action(s) atteindraient le seuil. Demandez à un owner.`);

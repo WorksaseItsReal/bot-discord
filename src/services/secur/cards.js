@@ -39,7 +39,7 @@ function incidentCard(view) {
       : `<@${view.executorId}> a déclenché la protection anti-nuke.`,
     fields: [
       field(ICONS.user, 'Auteur', view.executor ? userLine(view.executor) : `<@${view.executorId}>`),
-      field('💣', 'Actions', `×**${view.actions ?? 1}**`),
+      field('💣', 'Actions', view.actions ? `×**${view.actions}**` : 'Aucune (tentatives refusées)'),
       field(ICONS.shield, 'Sanction', PUNISH_LABELS[view.punishment] ?? view.punishment),
       wide('🧩', 'Modules', (view.modules ?? []).map(moduleLabel).join(', ') || '—'),
       field(ICONS.refresh, 'Annulations', undoTotal ? `**${view.undone ?? 0}**/${undoTotal}${view.undoFailed ? ` · ${view.undoFailed} échec(s)` : ''}` : 'Aucune'),

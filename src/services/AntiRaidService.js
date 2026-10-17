@@ -680,6 +680,36 @@ class AntiRaidService {
   }
 
   /**
+   * Tentatives répétées bloquées par le pré-contrôle (Secur.assertAllowed, 3 en 10 min) : l'auteur
+   * insiste sur le seuil via le bot. Aucune action n'a eu lieu, mais il est sanctionné et l'alerte
+   * part, comme s'il avait atteint le seuil.
+   */
+  async handleBlockedAttempts(guild, executorId, type, attempts) {
+    const cfg = this.config.get(guild.id).antiraid;
+    if (!cfg?.enabled || !executorId || executorId === this.client.user?.id || executorId === guild.ownerId) return;
+    const executor = await guild.members.fetch(executorId).catch(() => null);
+    if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [], { excludePending: true })) return;
+    const outcome = await this.#punishExecutor(guild, executorId, cfg, type);
+    await this.alert(guild, {
+      tone: 'danger',
+      icon: '🚨',
+      title: 'Tentatives destructrices répétées',
+      description: `<@${executorId}> a tenté **${attempts}** fois de dépasser le seuil via le bot en 10 minutes : chaque action a été refusée.`,
+      thumbnail: executor?.user?.displayAvatarURL?.(),
+      fields: [
+        field(ICONS.user, 'Auteur', executor ? userLine(executor.user) : `<@${executorId}>`),
+        field('💣', 'Type', `${DESTRUCTIVE_LABELS[type] ?? type} (refusées ×**${attempts}**)`),
+        field(ICONS.shield, 'Sanction', outcome.label ?? (outcome.ok ? EXECUTOR_LABELS[cfg.punishExecutor] ?? cfg.punishExecutor : 'Aucune (échec ou désactivée)')),
+        outcome.note ? wide(ICONS.warning, 'Attention', outcome.note) : null,
+      ],
+      footer: `ID : ${executorId}`,
+      buttons: outcome.buttons ?? [],
+      ping: true,
+      fallback: true,
+    });
+  }
+
+  /**
    * Expulse / bannit un compte récent ou un bot à son arrivée (l'annonce est faite par l'appelant).
    * @returns {Promise<{ ok: boolean, ban: boolean, error?: string }>}
    */
