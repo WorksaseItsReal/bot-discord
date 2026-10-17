@@ -21,8 +21,8 @@ function assertCanMoveTo(interaction, channel) {
  * (surcharges du salon comprises) : jamais d'action dans un vocal qui lui est fermé.
  */
 function assertCanActIn(interaction, channel, flag, label) {
-  if (!channel) return;
-  if (!channel.permissionsFor?.(interaction.member)?.has([PermissionFlagsBits.ViewChannel, flag])) {
+  if (typeof channel?.permissionsFor !== 'function') return; // salon partiel : Discord tranchera
+  if (!channel.permissionsFor(interaction.member)?.has([PermissionFlagsBits.ViewChannel, flag])) {
     throw new UserError(`Vous ne pouvez pas ${label} dans ${channel} : il vous faut **Voir le salon** et cette permission dans ce salon.`);
   }
 }
@@ -133,7 +133,7 @@ module.exports = {
 
     if (sub === 'cleanup') {
       const channel = interaction.options.getChannel('salon');
-      assertCanActIn(interaction, interaction.guild.channels.cache.get(channel.id) ?? channel, PermissionFlagsBits.MoveMembers, 'déconnecter des membres');
+      assertCanActIn(interaction, interaction.guild.channels?.cache?.get(channel.id) ?? channel, PermissionFlagsBits.MoveMembers, 'déconnecter des membres');
       await interaction.deferReply({ ephemeral: true });
       let n = 0;
       let failed = 0;
