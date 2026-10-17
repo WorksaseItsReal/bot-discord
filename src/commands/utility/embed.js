@@ -81,7 +81,7 @@ function computeAllowedMentions({ content = '', mentionRoles = false, notifyAll 
 
 /** Nom de fichier sûr pour un envoi (lettres, chiffres, . _ -), 100 caractères au plus. Pur. */
 function safeFileName(name) {
-  const clean = String(name ?? '').normalize('NFKD').replace(/[^\w.-]+/g, '_').replace(/^\.+/, '').slice(-100);
+  const clean = String(name ?? '').normalize('NFKD').replace(/[^\w.-]+/g, '_').replace(/\.{2,}/g, '.').replace(/^[._]+/, '').slice(-100);
   return clean && /[^._]/.test(clean) ? clean : 'fichier';
 }
 
