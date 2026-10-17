@@ -165,7 +165,7 @@ async function recreate(guild, snap, ctx, store) {
     d.withheld = (d.withheld ?? 0) + withheld;
     d.base = (d.base ?? 0) + base.carried;
     d.menus = (d.menus ?? 0) + base.lostMenus;
-  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs} ; en base : ${d.base})${d.menus ? ` — ${d.menus} menu(s) de rôles à republier (ils proposent l'ancien rôle)` : ''}${d.withheld ? ` — ${d.withheld} attribution(s) retenue(s) pour l'auteur sanctionné` : ''}${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
+  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs}${d.base ? ` ; en base : ${d.base}` : ''})${d.menus ? ` — ${d.menus} menu(s) de rôles à republier (ils proposent l'ancien rôle)` : ''}${d.withheld ? ` — ${d.withheld} attribution(s) retenue(s) pour l'auteur sanctionné` : ''}${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
   return { ok: true };
 }
 
