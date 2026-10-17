@@ -1,6 +1,6 @@
 'use strict';
 
-const { PermissionFlagsBits, escapeMarkdown, ButtonBuilder } = require('discord.js');
+const { PermissionFlagsBits, AuditLogEvent, SnowflakeUtil, escapeMarkdown, ButtonBuilder } = require('discord.js');
 const { SlidingWindow } = require('../utils/rate');
 const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, fitEmbeds } = require('../utils/ui');
 const { createLogger } = require('../core/logger');
@@ -48,6 +48,17 @@ const MAX_RECENT_JOINERS = 5_000;
  */
 const CREATED_CHANNEL_TTL_MS = 7 * DAY_MS;
 const MAX_CREATED_CHANNELS = 2_000;
+/**
+ * Mémoire perdue (redémarrage, salon créé pendant une coupure) : le créateur est relu dans le
+ * journal d'audit (ChannelCreate), au plus une lecture par auteur et par minute.
+ */
+const CREATOR_AUDIT_COOLDOWN_MS = 60_000;
+/**
+ * Rôles GÉRÉS supprimés (bot expulsé, intégration retirée) : l'entrée d'audit 32 est signée de
+ * l'auteur de l'expulsion, mais c'est Discord qui supprime le rôle. GUILD_ROLE_DELETE arrive en
+ * général avant l'entrée d'audit (rôle déjà sorti du cache) : il est mémorisé 60 s.
+ */
+const MANAGED_ROLE_TTL_MS = 60_000;
 /** Permissions qu'un exécutant « dépouillé » ne doit plus avoir (sinon la sanction a échoué). */
 const DANGEROUS_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.Administrator,
@@ -146,6 +157,39 @@ class AntiRaidService {
     this.digests = new Map();
     /** @type {Map<string, Map<string, { by: string, at: number }>>} salons créés (id → auteur) par serveur */
     this.createdChannels = new Map();
+    /** @type {Map<string, number>} lectures de l'audit ChannelCreate `${guild}:${auteur}` → instant */
+    this.creatorAuditAt = new Map();
+    /** @type {Map<string, number>} rôles gérés supprimés `${guild}:${rôle}` → instant */
+    this.managedRoles = new Map();
+  }
+
+  /** Rôle géré supprimé (événement roleDelete) : sa suppression n'est pas une action destructrice. */
+  rememberManagedRole(guildId, roleId, now = Date.now()) {
+    if (!guildId || !roleId) return;
+    const key = `${guildId}:${roleId}`;
+    this.managedRoles.delete(key);
+    this.managedRoles.set(key, now);
+    for (const [k, at] of this.managedRoles) {
+      if (this.managedRoles.size <= 1_000 && now - at < MANAGED_ROLE_TTL_MS) break;
+      this.managedRoles.delete(k);
+    }
+  }
+
+  /** Rôle géré (cache, entrée d'audit, ou suppression mémorisée) : jamais compté. */
+  #managedRole(guild, roleId, managedChange = false, now = Date.now()) {
+    if (managedChange) return true;
+    if (!roleId) return false;
+    const role = guild.roles?.cache?.get?.(roleId);
+    if (role?.managed || role?.tags?.botId || role?.tags?.integrationId) return true;
+    const at = this.managedRoles.get(`${guild.id}:${roleId}`);
+    return Boolean(at && now - at < MANAGED_ROLE_TTL_MS);
+  }
+
+  /** Bot de confiance (secur.trustedBots, niveau owner pour les modifier) : exempté comme sous Secur. */
+  #trustedBot(guildId, userId, isBot) {
+    if (!isBot || !userId) return false;
+    const bots = this.config.get(guildId).secur?.trustedBots;
+    return Array.isArray(bots) && bots.includes(userId);
   }
 
   /** Salon créé (entrée ChannelCreate du journal d'audit) : son auteur pourra le supprimer sans être compté. */
@@ -173,6 +217,38 @@ class AntiRaidService {
     m.delete(channelId);
     if (!m.size) this.createdChannels.delete(guildId);
     return e.by === executorId && now - e.at < CREATED_CHANNEL_TTL_MS;
+  }
+
+  /**
+   * Mémoire vide (redémarrage, salon créé pendant une coupure) : créateur relu dans le journal
+   * d'audit ChannelCreate. Seulement pour un salon de moins de 7 jours (d'après son identifiant) ;
+   * une lecture par auteur et par minute, dont toutes les créations sont mémorisées.
+   */
+  async #createdViaAudit(guild, channelId, executorId, now = Date.now()) {
+    if (!channelId || !executorId) return false;
+    let born;
+    try {
+      born = SnowflakeUtil.timestampFrom(String(channelId));
+    } catch {
+      return false;
+    }
+    if (!(now - born < CREATED_CHANNEL_TTL_MS)) return false;
+    if (!guild.members?.me?.permissions?.has?.(PermissionFlagsBits.ViewAuditLog)) return false;
+    const key = `${guild.id}:${executorId}`;
+    if (now - (this.creatorAuditAt.get(key) ?? 0) < CREATOR_AUDIT_COOLDOWN_MS) return false;
+    this.creatorAuditAt.delete(key);
+    this.creatorAuditAt.set(key, now);
+    while (this.creatorAuditAt.size > 1_000) this.creatorAuditAt.delete(this.creatorAuditAt.keys().next().value);
+    const logs = await guild.fetchAuditLogs?.({ type: AuditLogEvent.ChannelCreate, user: executorId, limit: 100 }).catch(() => null);
+    let found = false;
+    for (const e of logs?.entries?.values?.() ?? []) {
+      const target = e.targetId ?? e.target?.id;
+      const by = e.executorId ?? e.executor?.id;
+      if (!target || by !== executorId) continue;
+      if (target === channelId) found = true;
+      else if (guild.channels?.cache?.has?.(target)) this.rememberChannelCreator(guild.id, target, by, Number.isFinite(e.createdTimestamp) ? Math.min(e.createdTimestamp, now) : now);
+    }
+    return found;
   }
 
   /** Arrêt du bot : minuteurs des cartes récapitulatives annulés. */
@@ -313,8 +389,10 @@ class AntiRaidService {
       if (!m.size) this.recentJoiners.delete(guildId);
     }
     for (const [guildId, w] of this.joinWindows) {
-      if (!w.entries.some((e) => e.at > now - w.windowMs)) this.joinWindows.delete(guildId);
+      if (!w.entries.some((e) => e.seen > now - w.windowMs)) this.joinWindows.delete(guildId);
     }
+    for (const [key, at] of this.managedRoles) if (now - at >= MANAGED_ROLE_TTL_MS) this.managedRoles.delete(key);
+    for (const [key, at] of this.creatorAuditAt) if (now - at >= CREATOR_AUDIT_COOLDOWN_MS) this.creatorAuditAt.delete(key);
     for (const [guildId, m] of this.createdChannels) {
       for (const [id, e] of m) if (now - e.at >= CREATED_CHANNEL_TTL_MS) m.delete(id);
       if (!m.size) this.createdChannels.delete(guildId);
@@ -328,7 +406,7 @@ class AntiRaidService {
     const d = this.digests.get(guildId);
     if (d?.timer) clearTimeout(d.timer);
     this.digests.delete(guildId);
-    for (const key of this.destructiveWindows.keys()) if (key.startsWith(`${guildId}:`)) this.destructiveWindows.delete(key);
+    for (const map of [this.destructiveWindows, this.managedRoles, this.creatorAuditAt]) for (const key of map.keys()) if (key.startsWith(`${guildId}:`)) map.delete(key);
   }
 
   /** Marque un ban lancé par le bot (pas de log en double dans guildBanAdd). */
@@ -354,16 +432,22 @@ class AntiRaidService {
     return (byUser && !pending.user) || byRoles.some((r) => !pending.roles.has(r));
   }
 
-  /** Enregistre une arrivée et renvoie les arrivants encore dans la fenêtre (le plus ancien d'abord). */
-  #recordJoin(guildId, memberId, ms, now = Date.now()) {
+  /**
+   * Enregistre une arrivée et renvoie les arrivants de la même rafale (le plus ancien d'abord,
+   * l'arrivée courante en dernier). La rafale est comptée sur `at`, l'heure d'arrivée fixée par
+   * Discord (joined_at) : des arrivées étalées puis livrées d'un bloc (rejeu après RESUME, rafale
+   * retardée par Discord) ne forment pas une vague. Les entrées sont comparées entre elles, jamais
+   * à l'horloge de l'hôte ; la mémoire, elle, est purgée sur l'instant de réception (`seen`).
+   */
+  #recordJoin(guildId, memberId, ms, at = Date.now(), now = Date.now()) {
     let w = this.joinWindows.get(guildId);
     if (!w || w.windowMs !== ms) {
       w = { windowMs: ms, entries: [] };
       this.joinWindows.set(guildId, w);
     }
-    w.entries = w.entries.filter((e) => e.at > now - ms && e.id !== memberId);
-    w.entries.push({ id: memberId, at: now });
-    return w.entries;
+    w.entries = w.entries.filter((e) => e.seen > now - ms && e.id !== memberId);
+    w.entries.push({ id: memberId, at, seen: now });
+    return w.entries.filter((e) => Math.abs(e.at - at) < ms);
   }
 
   /** Hook de vague (services.raidResponse.onWave) : son `{ text }` devient le champ « Invitations ». */
@@ -408,12 +492,14 @@ class AntiRaidService {
     if (Date.now() - this.lastWindowPrune > WINDOW_PRUNE_INTERVAL_MS) this.pruneWindows();
     this.#rememberJoin(member.guild.id, member.id);
     if (this.isWhitelisted(member.guild.id, member.id, [...(member.roles?.cache?.keys() ?? [])])) return;
+    if (this.#trustedBot(member.guild.id, member.id, member.user?.bot)) return;
 
     // Vague d'arrivées : TOUT arrivant hors whitelist est compté, avant les filtres individuels.
     // Un raid de comptes récents ou de bots déclenche ainsi la vague (lockdown), que leur
     // sanction individuelle réussisse ou échoue (permission perdue, hiérarchie, 429).
     const guild = member.guild;
-    const entries = this.#recordJoin(guild.id, member.id, cfg.joinWindowSeconds * 1000);
+    const joinedAt = Number.isFinite(member.joinedTimestamp) ? member.joinedTimestamp : Date.now();
+    const entries = this.#recordJoin(guild.id, member.id, cfg.joinWindowSeconds * 1000, joinedAt);
     const entry = entries[entries.length - 1];
     const count = entries.length;
     const waveEntries = count >= cfg.joinThreshold ? entries : null;
@@ -631,7 +717,7 @@ class AntiRaidService {
    * @param {{ targetId?: string|null, targetJoinedAt?: number|null, at?: number, count?: number }} [opts] cible du ban/kick
    *   (exemption des arrivants récents) ou salon supprimé (exemption des salons créés par le même auteur)
    */
-  async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null, at = Date.now(), count = 1 } = {}) {
+  async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null, at = Date.now(), count = 1, managedRole = false } = {}) {
     const cfg = this.config.get(guild.id).antiraid;
     if (!cfg?.enabled || !executorId) return;
     if (executorId === this.client.user?.id) return;
@@ -639,14 +725,19 @@ class AntiRaidService {
     if (this.client.services?.secur?.covers?.(guild.id, type)) return;
     // Supprimer un salon que l'on a soi-même créé (ticket ou vocal temporaire d'un bot tiers) non plus.
     if (type === 'channelDelete' && this.#ownChannel(guild.id, targetId, executorId)) return;
+    // Rôle géré supprimé par Discord (bot expulsé, intégration retirée) : pas une action de l'auteur.
+    if (type === 'roleDelete' && this.#managedRole(guild, targetId, managedRole)) return;
     // Bannir ou expulser un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
     if (this.#raiderTarget(guild, type, targetId, targetJoinedAt)) return;
     const executor = await guild.members.fetch(executorId).catch(() => null);
     // Accès de whitelist en attente (donné par un non-owner, pas encore approuvé) : n'exempte pas.
     if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [], { excludePending: true })) return;
+    if (this.#trustedBot(guild.id, executorId, executor?.user?.bot ?? this.client.users?.cache?.get?.(executorId)?.bot)) return;
 
     const limit = AntiRaidService.#threshold(cfg, type);
     if (!limit) return;
+    // Mémoire perdue (redémarrage) : le créateur du salon est relu dans le journal d'audit.
+    if (type === 'channelDelete' && (await this.#createdViaAudit(guild, targetId, executorId))) return;
 
     const now = Date.now();
     if (now - this.lastWindowPrune > WINDOW_PRUNE_INTERVAL_MS) this.pruneWindows(now);
@@ -690,6 +781,7 @@ class AntiRaidService {
     if (!cfg?.enabled || !executorId || executorId === this.client.user?.id || executorId === guild.ownerId) return;
     const executor = await guild.members.fetch(executorId).catch(() => null);
     if (this.isWhitelisted(guild.id, executorId, executor ? [...executor.roles.cache.keys()] : [], { excludePending: true })) return;
+    if (this.#trustedBot(guild.id, executorId, executor?.user?.bot)) return;
     const outcome = await this.#punishExecutor(guild, executorId, cfg, type);
     await this.alert(guild, {
       tone: 'danger',
@@ -751,9 +843,11 @@ class AntiRaidService {
     if (everyone) remaining.push(everyone);
     const residual = () => {
       const viaRoles = remaining.filter((r) => r.permissions?.any?.(dangerous));
-      // Surcharges de salon propres au membre : le retrait des rôles ne les touche pas.
+      // Surcharges de salon propres au membre, ou d'un rôle CONSERVÉ (géré, au-dessus du bot ; hors
+      // @everyone, commun à tous) : le retrait des rôles ne les touche pas.
+      const kept = [member.id, ...remaining.filter((r) => r.id !== guild.id).map((r) => r.id)];
       const overwrites = [...(guild.channels?.cache?.values?.() ?? [])]
-        .filter((c) => c.permissionOverwrites?.cache?.get?.(member.id)?.allow?.any?.(dangerous));
+        .filter((c) => kept.some((id) => c.permissionOverwrites?.cache?.get?.(id)?.allow?.any?.(dangerous)));
       return [
         ...viaRoles.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)),
         ...overwrites.slice(0, 5).map((c) => `la surcharge de ${c}`),
