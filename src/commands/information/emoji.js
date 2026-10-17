@@ -275,10 +275,11 @@ async function renameEmoji(interaction) {
   if (name === emoji.name) throw new UserError(`Cet emoji s'appelle déjà \`:${name}:\`.`);
   if (interaction.guild.emojis.cache.some((e) => e.name === name && e.id !== emoji.id)) throw new UserError(`Un emoji \`:${name}:\` existe déjà sur ce serveur.`);
   const before = emoji.name;
+  // Route des emojis très limitée : une attente de limite de débit dépasserait les 3 s.
+  await interaction.deferReply({ ephemeral: true });
   const updated = await emoji.edit({ name, reason: truncate(`Renommé par ${interaction.user.tag}`, 400) });
-  await interaction.reply({
+  await interaction.editReply({
     embeds: [emojiCard(updated ?? emoji, { title: 'Emoji renommé', description: `\`:${before}:\` s'appelle désormais \`:${name}:\`.` })],
-    ephemeral: true,
   });
 }
 
@@ -292,6 +293,9 @@ async function showEmoji(interaction, client) {
     const ext = animated ? 'gif' : 'png';
     const url = `https://cdn.discordapp.com/emojis/${id}.${ext}?size=512`;
     const known = client.emojis?.cache?.get(id);
+    // Origine affichée seulement pour ce serveur, ou un serveur dont l'auteur est membre : jamais
+    // le nom d'un autre serveur (éventuellement privé) où se trouve le bot.
+    const origin = known?.guild && (known.guild.id === interaction.guildId || known.guild.members?.cache?.has(interaction.user.id)) ? known.guild : null;
     const created = Number(SnowflakeUtil.timestampFrom(id));
     return interaction.reply({
       embeds: [
@@ -303,7 +307,7 @@ async function showEmoji(interaction, client) {
           url,
           description: [
             `Emoji personnalisé${animated ? ' **animé**' : ''}.`,
-            subtext(known?.guild ? `Provient du serveur ${known.guild.name}.` : 'Serveur d\'origine inconnu du bot.'),
+            subtext(origin ? `Provient du serveur ${origin.name}.` : 'Serveur d\'origine non communiqué.'),
           ],
           image: url,
           fields: [

@@ -341,3 +341,40 @@ test('R111 : « Oui, tout effacer » acquitte (deferUpdate) avant de supprimer, 
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* R6 / R96 : /emoji                                                    */
+/* ------------------------------------------------------------------ */
+
+test('R6 : /emoji renommer acquitte avant d\'appeler Discord (limite de débit sur la route des emojis)', async () => {
+  const h = await setup();
+  try {
+    h.fake.inject({ method: 'PATCH', route: /^\/guilds\/\d+\/emojis\/\d+$/ }, { status: 429, retryAfter: 400, times: 1 });
+    const rec = await h.slash('emoji', sub('renommer', [opt('emoji', 3, 'gadget'), opt('nom', 3, 'gadget_lent')]));
+    await h.settle();
+    assert.ok(rec.ackedAt != null);
+    assert.ok(rec.ackedAt - rec.createdAt < 300, `acquittée après ${rec.ackedAt - rec.createdAt} ms (après l'appel à Discord)`);
+    assert.equal(rec.ackType, 5);
+    assert.match(h.replyText(rec), /Emoji renommé/);
+    assert.equal(h.guild.emojis.cache.get(IDS.emoji).name, 'gadget_lent');
+  } finally {
+    await h.close();
+  }
+});
+
+test('R96 : /emoji info ne révèle pas le nom d\'un autre serveur du bot dont l\'auteur n\'est pas membre', async () => {
+  const h = await setup();
+  try {
+    const secretGuild = '990000000000000001';
+    const secretEmoji = '990000000000000002';
+    h.client.guilds._add({ id: secretGuild, name: 'Serveur très secret', features: [], roles: [], channels: [], members: [],
+      emojis: [{ id: secretEmoji, name: 'secret', roles: [], require_colons: true, managed: false, animated: false, available: true }] });
+    const rec = await h.slash('emoji', sub('info', [opt('emoji', 3, `<:secret:${secretEmoji}>`)]), { as: 'member' });
+    assert.doesNotMatch(h.replyText(rec), /Serveur très secret/, 'nom d\'un serveur privé révélé');
+    // Emoji du serveur courant : origine affichée.
+    const own = await h.slash('emoji', sub('info', [opt('emoji', 3, `<:gadget:${IDS.emoji}>`)]), { as: 'member' });
+    assert.match(h.replyText(own), new RegExp(h.guild.name));
+  } finally {
+    await h.close();
+  }
+});
