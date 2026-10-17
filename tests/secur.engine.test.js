@@ -657,7 +657,10 @@ test('coquille /secur : section injectée fusionnée ; nom ou action en double, 
   const shellCmd = require('../src/commands/security/secur');
   const section = (name, extra = {}) => ({ name, type: 'subcommand', build: (s) => s.setName(name).setDescription('Section de test'), execute: async () => {}, ...extra });
   const shell = shellCmd.buildShell([...shellCmd.loadSections(), section('factice', { buttons: { factice: async () => {} }, views: { factice: () => ({ embeds: [] }) } })]);
-  assert.deepEqual(shell.data.toJSON().options.map((o) => o.name), ['statut', 'factice']);
+  // Sections livrées (statut, puis celles des paquets suivants), dans l'ordre de chargement, puis l'injectée.
+  const names = shell.data.toJSON().options.map((o) => o.name);
+  assert.deepEqual(names, [...shellCmd.loadSections().map((s) => s.name), 'factice']);
+  assert.ok(names.includes('statut'));
   assert.ok(shell.buttons.factice && shell.buttons.statut);
   assert.throws(() => shellCmd.buildShell([section('a'), section('a')]), /en double/);
   assert.throws(() => shellCmd.buildShell([section('a', { buttons: { x: () => {} } }), section('b', { buttons: { x: () => {} } })]), /action « x » en double/);
