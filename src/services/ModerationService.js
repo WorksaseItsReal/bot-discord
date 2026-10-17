@@ -375,12 +375,14 @@ class ModerationService {
    * @param {import('./ConfigService').ConfigService} deps.config
    * @param {import('./LoggingService').LoggingService} deps.logging
    * @param {import('./AntiRaidService').AntiRaidService} [deps.antiraid] détection des bans en masse faits via le bot
+   * @param {import('./SecurService').SecurService} [deps.secur] pré-contrôle (assertAllowed) et modules anti-nuke
    */
-  constructor({ sanctions, config, logging, antiraid = null }) {
+  constructor({ sanctions, config, logging, antiraid = null, secur = null }) {
     this.sanctions = sanctions;
     this.config = config;
     this.logging = logging;
     this.antiraid = antiraid;
+    this.secur = secur;
     /**
      * Actions (ban/unban) lancées par le bot, marquées AVANT l'appel API : les
      * événements guildBanAdd/guildBanRemove les reconnaissent et ne les journalisent
@@ -623,6 +625,8 @@ class ModerationService {
     if (!targetMember.kickable) {
       throw new UserError('Je ne peux pas expulser ce membre (rôle trop élevé ou permission « Expulser » manquante).');
     }
+    // Pré-contrôle AVANT Discord : le kick qui atteindrait le seuil de l'AntiRaid / de Secur est refusé.
+    this.#assertAllowed(guild, moderator, 'kick', { targetId: targetMember.id });
     const joinedAt = targetMember.joinedTimestamp ?? null;
     const result = await this.record(guild, targetMember.user, moderator, { type: 'kick', reason, escalationStep }, () => targetMember.kick(reason || undefined));
     // Comme pour les bans : le kick est signé par le bot, on signale le MODÉRATEUR à l'AntiRaid.
@@ -637,6 +641,8 @@ class ModerationService {
         throw new UserError('Je ne peux pas bannir ce membre (rôle trop élevé ou permission « Bannir » manquante).');
       }
     }
+    // Pré-contrôle AVANT toute requête : le ban qui atteindrait le seuil de l'AntiRaid / de Secur est refusé.
+    this.#assertAllowed(guild, moderator, 'ban', { targetId: targetUser?.id ?? null });
     const type = durationMs ? 'tempban' : 'ban';
     if (durationMs && SNOWFLAKE.test(String(targetUser?.id ?? ''))) {
       // Déjà banni (souvent définitivement) : un tempban le débannirait à son échéance.
@@ -714,11 +720,20 @@ class ModerationService {
   /**
    * Action destructrice exécutée PAR LE BOT pour un modérateur (/channel supprimer, /role delete) :
    * l'audit log l'attribue au bot (ignoré par l'AntiRaid), on signale donc le MODÉRATEUR.
-   * Best-effort, ne lève jamais.
-   * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
+   * Une opération groupée est d'abord pré-contrôlée (secur.assertAllowed avec `count`), puis
+   * rapportée en une fois après succès (`count` actions). Best-effort, ne lève jamais.
+   * @param {'channelDelete'|'roleDelete'|'ban'|'kick'|'unban'|'channelCreate'|'channelUpdate'|'roleCreate'|'roleUpdate'|'roleAdd'|'roleRemove'|'everyone'|'messagePurge'} type
+   *   les types hors seuils historiques (channelCreate…) n'alimentent que les modules Secur
    */
-  async reportDestructiveAction(guild, moderator, type, { targetId = null, targetJoinedAt = null } = {}) {
-    await this.#reportDestructive(guild, moderator, type, targetId, targetJoinedAt);
+  async reportDestructiveAction(guild, moderator, type, { targetId = null, targetJoinedAt = null, count = 1 } = {}) {
+    await this.#reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count);
+  }
+
+  /** Pré-contrôle Secur / AntiRaid d'une action faite par le bot pour un modérateur (lève une UserError). */
+  #assertAllowed(guild, moderator, type, { count = 1, targetId = null } = {}) {
+    if (!this.secur?.assertAllowed || !moderator?.id) return;
+    const member = guild.members?.cache?.get?.(moderator.id) ?? null;
+    this.secur.assertAllowed({ guild, user: moderator, member }, type, { count, targetId });
   }
 
   /**
@@ -733,11 +748,19 @@ class ModerationService {
     return id;
   }
 
-  /** Signale un ban ou un kick fait via le bot à l'AntiRaid (best-effort, jamais bloquant). */
-  async #reportDestructive(guild, moderator, type, targetId, targetJoinedAt) {
-    if (!this.antiraid?.handleDestructive || !moderator?.id) return;
+  /**
+   * Signale une action faite via le bot au nom du modérateur (best-effort, jamais bloquant) : au
+   * module Secur s'il couvre ce type, sinon au chemin historique de l'AntiRaid (at = maintenant).
+   */
+  async #reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count = 1) {
+    if (!moderator?.id) return;
     try {
-      await this.antiraid.handleDestructive(guild, moderator.id, type, { targetId, targetJoinedAt });
+      if (this.secur?.covers?.(guild.id, type)) {
+        await this.secur.reportBotAction(guild, moderator, type, { count, targetId });
+        return;
+      }
+      if (!this.antiraid?.handleDestructive) return;
+      await this.antiraid.handleDestructive(guild, moderator.id, type, { targetId, targetJoinedAt, at: Date.now(), count });
     } catch {
       // La détection ne doit jamais faire échouer la sanction déjà appliquée.
     }
@@ -816,11 +839,14 @@ class ModerationService {
       return { ok: true, user, userId, dbOnly: true };
     }
     const user = existing.user;
+    // Pré-contrôle AVANT Discord (module Secur « unban ») ; le débannissement est ensuite rapporté.
+    this.#assertAllowed(guild, moderator, 'unban', { targetId: user.id });
     await this.#asBot('unban', guild.id, user.id, () => guild.bans.remove(user.id, reason || undefined));
     // Lève les bannissements (temporaires et définitifs) encore actifs, avec leur auteur.
     this.#deactivateActive(guild.id, user.id, 'tempban', revoke);
     this.#deactivateActive(guild.id, user.id, 'ban', revoke);
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unban', user, userId: user.id, moderator, reason }), undefined, { event: 'revocation' });
+    await this.#reportDestructive(guild, moderator, 'unban', user.id, null);
     return { ok: true, user, userId: user.id };
   }
 

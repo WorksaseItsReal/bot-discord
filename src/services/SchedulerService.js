@@ -131,6 +131,8 @@ class SchedulerService {
       ['activity', () => this.client.services?.activity?.processDue({ isStopping: this.#budget() })],
       ['feeds', () => this.client.services?.feeds?.processDue({ isStopping: this.#budget() })],
       ['voiceroles', () => this.client.services?.automations?.processDue({ isStopping: this.#budget() })],
+      // Sécurité : chaque service qui l'expose (Secur : purge des incidents et des accès ; liste noire…).
+      ['security', () => this.#processSecurityDue()],
     ];
     for (const [name, run] of stages) {
       if (this.stopping) return;
@@ -138,6 +140,22 @@ class SchedulerService {
         await run();
       } catch (e) {
         logger.error(`Étape « ${name} » du scheduler en échec :`, e);
+      }
+    }
+  }
+
+  /**
+   * Étape `security` : processSecurityDue({ isStopping }) de chaque service qui l'expose (Secur,
+   * puis la liste noire), chacun isolé et sous son propre budget de temps.
+   */
+  async #processSecurityDue() {
+    for (const [name, service] of Object.entries(this.client.services ?? {})) {
+      if (this.stopping) return;
+      if (typeof service?.processSecurityDue !== 'function') continue;
+      try {
+        await service.processSecurityDue({ isStopping: this.#budget() });
+      } catch (e) {
+        logger.error(`Étape « security » (${name}) en échec :`, e);
       }
     }
   }

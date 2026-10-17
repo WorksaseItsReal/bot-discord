@@ -37,6 +37,14 @@ const PURGE_INTERVAL_MS = HOUR;
 const RECENT_BOT_MS = 7 * DAY;
 const BOT_REMOVED_TTL_MS = 10 * MINUTE;
 const SNOWFLAKE = /^\d{17,20}$/;
+/**
+ * Tentatives bloquées par le pré-contrôle : à la 3ᵉ en 10 min pour un même auteur et un même type,
+ * il est traité comme l'auteur d'un incident (sinon un compte compromis enchaînerait « seuil − 1 »
+ * actions par fenêtre sans jamais être sanctionné). Une opération groupée refusée d'emblée ne
+ * compte qu'une tentative : un admin légitime n'est jamais sanctionné pour une seule demande.
+ */
+const REFUSALS_BEFORE_INCIDENT = 3;
+const REFUSAL_WINDOW_MS = 10 * MINUTE;
 /** Types du chemin historique de l'AntiRaid (seuils antiraid.*Threshold). */
 const HISTORICAL_TYPES = new Set(['channelDelete', 'roleDelete', 'ban', 'kick']);
 const HISTORICAL_LABELS = { channelDelete: 'Suppression de salons', roleDelete: 'Suppression de rôles', ban: 'Bannissements', kick: 'Expulsions' };
@@ -105,6 +113,8 @@ class SecurService {
     this.botsRemoved = new Map();
     /** @type {Set<string>} expulsions de bots en cours (bouton) */
     this.kickingBots = new Set();
+    /** @type {Map<string, number[]>} tentatives bloquées `${guild}:${auteur}:${type}` → instants */
+    this.refusals = new Map();
     this.lastPrune = now();
     this.lastPurgeAt = 0;
     this.stopped = false;
@@ -690,19 +700,35 @@ class SecurService {
       const level = S.securityLevel(guild, userId, roleIds, cfg, { ...opts, isBot: Boolean(user.bot), pending: this.pendingExemptions(guild.id, userId) });
       if (S.isExempt(level, mode)) return true;
       const limit = S.effectiveLimit(cfg, type);
-      if (this.windowSum(guild.id, userId, type) + n >= limit) this.#refuse(guild, userId, S.SECUR_MODULES[type].label, n, limit);
+      if (this.windowSum(guild.id, userId, type) + n >= limit) this.#refuse(guild, user, type, S.SECUR_MODULES[type].label, n, limit, 'secur');
       return true;
     }
     if (!HISTORICAL_TYPES.has(type) || !cfg.antiraid?.enabled || typeof this.antiraid?.wouldTrigger !== 'function') return true;
     if (userId === guild.ownerId) return true;
     if (this.antiraid.isWhitelisted(guild.id, userId, roleIds, { excludePending: true })) return true;
     const limit = this.antiraid.wouldTrigger(guild, userId, type, n, { targetId });
-    if (limit) this.#refuse(guild, userId, HISTORICAL_LABELS[type], n, limit);
+    if (limit) this.#refuse(guild, user, type, HISTORICAL_LABELS[type], n, limit, 'antiraid');
     return true;
   }
 
-  #refuse(guild, userId, label, count, limit) {
+  #refuse(guild, user, type, label, count, limit, path) {
+    const userId = user.id;
     Promise.resolve(this.logging?.send?.(guild.id, 'security', cards.blockedCard({ userId, label, count, limit }), undefined, { event: 'secur' })).catch(() => {});
+    // Tentatives répétées : l'auteur insiste sur le seuil → traité comme l'auteur d'un incident.
+    const now = this.now();
+    const key = `${guild.id}:${userId}:${type}`;
+    const list = (this.refusals.get(key) ?? []).filter((t) => now - t < REFUSAL_WINDOW_MS);
+    list.push(now);
+    this.refusals.delete(key);
+    this.refusals.set(key, list);
+    while (this.refusals.size > 1_000) this.refusals.delete(this.refusals.keys().next().value);
+    if (list.length >= REFUSALS_BEFORE_INCIDENT) {
+      this.refusals.delete(key);
+      const escalate = path === 'secur'
+        ? this.#member(guild, userId).then((member) => this.#count(guild, userId, type, { at: now, weight: limit, record: null, member, isBot: Boolean(user.bot) }))
+        : this.antiraid.handleDestructive(guild, userId, type, { at: now, count: limit });
+      Promise.resolve(escalate).catch((e) => logger.warn('Tentatives répétées :', e?.message));
+    }
     throw new UserError(`Action bloquée par la sécurité (${label}) : ${count} action(s) atteindraient le seuil. Demandez à un owner.`);
   }
 
@@ -934,6 +960,7 @@ class SecurService {
     }
     for (const [key, state] of this.open) if (now > state.expiresAt) this.open.delete(key);
     for (const [key, at] of this.botsRemoved) if (now - at >= BOT_REMOVED_TTL_MS) this.botsRemoved.delete(key);
+    for (const [key, list] of this.refusals) if (!list.some((t) => now - t < REFUSAL_WINDOW_MS)) this.refusals.delete(key);
     this.breaker.prune();
   }
 
@@ -952,7 +979,7 @@ class SecurService {
   forgetGuild(guildId) {
     if (!guildId) return;
     const prefix = `${guildId}:`;
-    for (const map of [this.windows, this.open, this.botsRemoved]) for (const key of map.keys()) if (key.startsWith(prefix)) map.delete(key);
+    for (const map of [this.windows, this.open, this.botsRemoved, this.refusals]) for (const key of map.keys()) if (key.startsWith(prefix)) map.delete(key);
     const q = this.queues.get(guildId);
     if (q) {
       this.queues.delete(guildId);
