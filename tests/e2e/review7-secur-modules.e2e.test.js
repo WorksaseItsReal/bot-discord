@@ -229,3 +229,72 @@ test('S2 : /backup restore pendant la file d\'annulation (429 sur les membres) �
     await h.close();
   }
 });
+
+/* -------------------------------------------------------------------- */
+/* S24 : mémoires périmées pendant que la file rend les membres            */
+/* -------------------------------------------------------------------- */
+
+const { rawMember } = require('./lib/fixtures');
+const St = require('../../src/services/secur/structure');
+
+/**
+ * Rafale : 3 rôles portés par `members` membres, puis le vocal et sa catégorie. Chaque PUT de
+ * membre envoyé par le bot fait avancer de `stepMs` l'horloge des mémoires de Secur (aller-retour
+ * et limite de débit de la route) : les salons, en priorité 3, attendent derrière les rôles.
+ */
+async function ttlScenario(order, stepMs, members = 40) {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { roleDelete: { mode: 'on', punish: 'none' }, channelDelete: { mode: 'on', punish: 'none' } } } });
+    const roles = [IDS.roles.gamer, IDS.roles.notif, IDS.roles.member];
+    for (let i = 0; i < members; i += 1) {
+      const user = h.addUser(`porteur${i}`, { ageDays: 500 });
+      const raw = rawMember(user, [...roles], 100);
+      h.fake.members.set(user.id, raw);
+      h.guild.members._add({ ...raw, roles: [...roles] });
+    }
+    const store = St.storeFor(h.client);
+    let offset = 0;
+    store.now = () => Date.now() + offset;
+    const route = h.fake.routes.find((r) => r.method === 'PUT' && r.re.test(`/guilds/${h.guild.id}/members/1/roles/2`));
+    const orig = route.handler;
+    route.handler = async (p, call) => {
+      if (call.actor == null) {
+        offset += stepMs;
+        await sleep(2);
+      }
+      return orig(p, call);
+    };
+    const attacker = (method, path) => h.fake.perform(method, path, undefined, { actorId: IDS.users.admin });
+    for (const id of roles) await attacker('DELETE', `/guilds/${h.guild.id}/roles/${id}`);
+    const chans = order === 'voiceFirst' ? [IDS.channels.voice, IDS.channels.catVoice] : [IDS.channels.catVoice, IDS.channels.voice];
+    for (const id of chans) await attacker('DELETE', `/channels/${id}`);
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30_000) {
+      await sleep(50);
+      const queue = h.client.services.secur.queues.get(h.guild.id);
+      if (queue && !queue.busy && Date.now() - t0 > 500) break;
+    }
+    await h.settle();
+    const cat = [...h.fake.channels.values()].find((c) => c.name === 'Vocaux' && c.type === 4);
+    const voice = [...h.fake.channels.values()].find((c) => c.name === 'Salon vocal');
+    return { cat, voice, elapsed: offset };
+  } finally {
+    await h.close();
+  }
+}
+
+test('S24 : vocal supprimé avant sa catégorie, file occupée plus de 120 s par les membres rendus → vocal recréé dans sa catégorie', async () => {
+  const { cat, voice, elapsed } = await ttlScenario('voiceFirst', 1_100);
+  assert.ok(elapsed > 120_000, `scénario trop court : ${elapsed} ms`);
+  assert.ok(cat && voice, 'catégorie ou vocal non recréé');
+  assert.equal(voice.parent_id, cat.id, 'vocal recréé hors de sa catégorie');
+});
+
+test('S24 : catégorie supprimée d\'abord, file occupée plus de 30 s → vocal recréé dans sa catégorie', async () => {
+  const { cat, voice, elapsed } = await ttlScenario('catFirst', 300);
+  assert.ok(elapsed > 30_000, `scénario trop court : ${elapsed} ms`);
+  assert.ok(cat && voice, 'catégorie ou vocal non recréé');
+  assert.equal(voice.parent_id, cat.id, 'vocal recréé hors de sa catégorie');
+});

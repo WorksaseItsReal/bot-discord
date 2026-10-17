@@ -11,7 +11,7 @@ const channelRemap = require('../../utils/channelRemap');
  *
  *  - StructureStore : instantanés pris AVANT tout nettoyage (écouteurs `prepend`), orphelins d'une
  *    catégorie supprimée et surcharges retirées (channelUpdate), correspondance ancien → nouvel
- *    identifiant. Tout est borné (500 instantanés par serveur, 120 s ; 1 000 orphelins ou
+ *    identifiant. Tout est borné (500 instantanés par serveur, 30 min ; 1 000 orphelins ou
  *    surcharges, 30 s ; 1 000 serveurs) et oublié au départ du serveur.
  *  - Captures (cache + base, synchrones) et planificateurs PURS (diff de permissions, filtres
  *    « on » / « max », clés de serveur restaurables, charges utiles de recréation).
@@ -22,7 +22,12 @@ const channelRemap = require('../../utils/channelRemap');
  * déterminable n'est JAMAIS recréé.
  */
 
-const SNAPSHOT_TTL_MS = 120_000;
+/**
+ * Instantanés, suppressions classées et correspondances ancien → nouvel identifiant : 30 min. La
+ * file d'annulation peut rester occupée plusieurs minutes (membres rendus un par un, limites de
+ * débit) : une mémoire plus courte expirait avant la recréation (salon hors de sa catégorie).
+ */
+const SNAPSHOT_TTL_MS = 30 * 60_000;
 const MAX_SNAPSHOTS = 500;
 const BUFFER_TTL_MS = 30_000;
 const MAX_BUFFERED = 1_000;
@@ -374,7 +379,7 @@ class StructureStore {
   }
 
   /**
-   * Ancien identifiant (salon ou rôle recréé) → nouveau, 120 s (entre incidents). Le nouveau garde
+   * Ancien identifiant (salon ou rôle recréé) → nouveau, 30 min (entre incidents). Le nouveau garde
    * l'identifiant d'ORIGINE de la chaîne (originOf) : clé du disjoncteur, qui suit un objet recréé
    * puis supprimé de nouveau sans confondre deux homonymes.
    */
@@ -556,7 +561,9 @@ function captureChannel(client, channel, now = Date.now()) {
     defaultReactionEmoji: channel.defaultReactionEmoji ? { id: channel.defaultReactionEmoji.id ?? null, name: channel.defaultReactionEmoji.name ?? null } : null,
     defaultSortOrder: channel.defaultSortOrder ?? null,
     defaultForumLayout: channel.defaultForumLayout ?? null,
-    parentId: channel.parentId ?? null,
+    // Catégorie perdue juste avant (catégorie supprimée d'abord : Discord sort l'enfant) figée dans
+    // l'instantané, le tampon des orphelins ne durant que 30 s.
+    parentId: channel.parentId ?? (isCategory ? null : storeFor(client).orphanParentOf(guild?.id ?? channel.guildId, channel.id)) ?? null,
     position: Number.isInteger(channel.rawPosition) ? channel.rawPosition : null,
     overwrites: overwritesOf(channel),
     children: isCategory ? [...(guild?.channels?.cache?.values?.() ?? [])].filter((c) => c.parentId === channel.id && !c.isThread?.()).map((c) => c.id) : [],
