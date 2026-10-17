@@ -56,7 +56,21 @@ function forbiddenOverwriteChannel(role) {
  * un salon (surcharge) ? Point de contrôle unique de tout rôle attribué automatiquement.
  */
 function hasForbiddenPermissions(role) {
-  return Boolean(role.permissions.any(FORBIDDEN_PERMISSIONS) || forbiddenOverwriteChannel(role));
+  return Boolean(role.permissions.any(FORBIDDEN_PERMISSIONS) || forbiddenOverwriteChannel(role) || isProtectedAccessRole(role));
+}
+
+/**
+ * Rôle de NIVEAU (/permissions) ou rôle de la whitelist : il confère un accès (commandes
+ * déléguées, exemption de l'AntiRaid) et ne doit jamais être attribué automatiquement (menu de
+ * rôles, boutique, récompense, candidature, rôle soutien…). Lu dans la configuration courante.
+ */
+function isProtectedAccessRole(role) {
+  const guildId = role?.guild?.id;
+  if (!guildId || !role.id) return false;
+  const services = role.guild.client?.services;
+  if (services?.permissions?.isProtectedRole) return services.permissions.isProtectedRole(guildId, role.id);
+  const roles = services?.config?.get?.(guildId)?.whitelist?.roles;
+  return Array.isArray(roles) && roles.includes(role.id);
 }
 
 /**
@@ -105,6 +119,7 @@ module.exports = {
   panelCard,
   FORBIDDEN_PERMISSIONS,
   hasForbiddenPermissions,
+  isProtectedAccessRole,
   forbiddenOverwriteChannel,
   reservedRoleReason,
   data: new SlashCommandBuilder()
@@ -134,6 +149,9 @@ module.exports = {
       if (!r || roles.some((x) => x.roleId === r.id)) continue;
       if (r.id === guild.id) throw new UserError('Le rôle @everyone ne peut pas faire partie d\'un menu de rôles.');
       if (r.managed) throw new UserError(`Le rôle ${r.name} est géré par une intégration et ne peut pas être auto-attribué.`);
+      if (isProtectedAccessRole(r)) {
+        throw new UserError(`Le rôle ${r.name} est un rôle de niveau (/permissions) ou de la whitelist : il ne peut pas être auto-attribuable.`);
+      }
       if (hasForbiddenPermissions(r)) {
         throw new UserError(`Le rôle ${r.name} possède des permissions de modération ou d'administration : il ne peut pas être auto-attribuable.`);
       }

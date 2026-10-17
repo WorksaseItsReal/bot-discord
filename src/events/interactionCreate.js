@@ -10,6 +10,7 @@ const { discordTimestamp } = require('../utils/time');
 const { deleteButton, status } = require('../utils/ui');
 const { MessagePayload, PermissionsBitField } = require('discord.js');
 const { commandLabel } = require('../core/CommandHandler');
+const { assertCommandAccess, GRANT } = require('../utils/access');
 
 const logger = createLogger('interaction');
 
@@ -69,7 +70,9 @@ function preflight(client, interaction, command) {
   if (command.ownerOnly && !client.config.ownerIds.includes(interaction.user.id)) {
     throw new UserError('Cette commande est réservée aux propriétaires du bot.');
   }
-  assertMemberPermissions(interaction, command);
+  // Niveaux de /permissions : sans commande attribuée, assertMemberPermissions à l'identique ;
+  // sinon mode strict (restriction) ou délégation du seul palier « courant » (utils/access.js).
+  assertCommandAccess(client, interaction, command, assertMemberPermissions);
   if (interaction.inGuild() && command.botPermissions?.length) {
     const missing = missingPermissions(interaction.appPermissions, command.botPermissions);
     if (missing.length) {
@@ -108,6 +111,8 @@ async function handleCommand(client, interaction) {
     interaction.gadgetDecorate = autoDecorate(interaction, command);
     await command.execute(interaction, client);
     client.stats.commandsRun += 1;
+    // Commande exécutée par délégation (/permissions) : journalisée APRÈS la réponse.
+    if (interaction[GRANT]) await client.services.permissions?.logUse?.(interaction, interaction[GRANT]);
   } catch (err) {
     if (consumed) client.cooldowns.release(cooldownKey);
     await reportError(client, interaction, err, `/${interaction.commandName}`);

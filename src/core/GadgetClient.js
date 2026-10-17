@@ -93,6 +93,7 @@ const { TicketRatingService } = require('../services/TicketRatingService');
 const { FeedService } = require('../services/FeedService');
 const { AutomationService } = require('../services/AutomationService');
 const { BotProfileService } = require('../services/BotProfileService');
+const { PermissionService } = require('../services/PermissionService');
 const { setThemeResolver, getThemeResolver } = require('../utils/embeds');
 
 const logger = createLogger('client');
@@ -261,6 +262,8 @@ class GadgetClient extends Client {
       automations: new AutomationService({ client: this, config: configService, counters: this.repositories.autoThreadCounters }),
       // Identité du bot : présence imposée par /bot, profil par serveur (/settings profil).
       botProfile: new BotProfileService({ client: this, settings: this.repositories.botSettings }),
+      // Niveaux de permissions (/permissions) : rangs, rôles de niveau, délégation fermée par défaut (utils/access.js).
+      permissions: new PermissionService({ client: this, config: configService, logging }),
     };
     // Thème par serveur (/settings theme) : couleur des cartes « marque » (voir utils/embeds.js).
     this.themeResolver = setThemeResolver((guildId) => configService.get(guildId)?.appearance?.color ?? null);

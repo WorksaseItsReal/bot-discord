@@ -2,6 +2,7 @@
 
 const { ChannelType, ButtonStyle, MessageFlags, PermissionFlagsBits } = require('discord.js');
 const { assertCanModerate } = require('../utils/permissions');
+const access = require('../utils/access');
 const { truncate } = require('../utils/embeds');
 const { formatDuration, discordTimestamp } = require('../utils/time');
 const { card, field, wide, ICONS, userLine, subtext, buttonRows, deleteButton, actionButton } = require('../utils/ui');
@@ -234,9 +235,15 @@ function needPermission(flag) {
   return new UserError(`Il vous faut la permission **${permissionLabel(flag)}** pour cette action.`);
 }
 
-/** Exige une permission du cliqueur / de l'invocateur (nom de flag, ex : 'BanMembers'). */
+/**
+ * Exige une permission du cliqueur / de l'invocateur (nom de flag, ex : 'BanMembers'). Honore la
+ * délégation de /permissions pour SA commande seulement (commande slash en cours, ou bouton
+ * « cmd:<commande>: » dont la commande est déléguée ; jamais une permission sensible), et le mode
+ * strict pour les boutons (utils/access.js).
+ */
 function requirePermission(interaction, flag) {
-  if (!interaction.memberPermissions?.has(PermissionFlagsBits[flag])) throw needPermission(flag);
+  if (!interaction.commandName) access.assertStrict(interaction.client, interaction, access.commandKeyOf(interaction.customId));
+  if (!access.hasPermission(interaction, PermissionFlagsBits[flag])) throw needPermission(flag);
 }
 
 /** Boutons d'administration (antiraid, lockdown…) : réservés aux administrateurs. */
