@@ -321,6 +321,8 @@ class PermissionService {
   async logUse(interaction, grant) {
     try {
       const sub = interaction.options?.getSubcommand?.(false);
+      // Délégation exercée par un composant « cmd:<commande>: » (bouton, menu, formulaire).
+      const via = interaction.isButton?.() ? ' (bouton)' : interaction.isAnySelectMenu?.() ? ' (menu)' : interaction.isModalSubmit?.() ? ' (formulaire)' : '';
       const missing = new PermissionsBitField(grant.flags).toArray();
       const custom = this.settings(interaction.guildId).levels[grant.level]?.name;
       const embed = card({
@@ -328,7 +330,7 @@ class PermissionService {
         section: 'security',
         icon: '🔑',
         title: 'Commande exécutée par délégation',
-        description: `${interaction.user} a utilisé **/${grant.key}${sub ? ` ${sub}` : ''}** grâce au **niveau ${grant.level}**${custom ? ` (${escapeMarkdown(custom)})` : ''}, sans la permission ${missing.map((p) => `**${permissionLabel(p)}**`).join(', ')}.`,
+        description: `${interaction.user} a utilisé **/${grant.key}${sub ? ` ${sub}` : ''}**${via} grâce au **niveau ${grant.level}**${custom ? ` (${escapeMarkdown(custom)})` : ''}, sans la permission ${missing.map((p) => `**${permissionLabel(p)}**`).join(', ')}.`,
         fields: [
           field(ICONS.user, 'Membre', `<@${interaction.user.id}>`),
           field(ICONS.channel, 'Salon', interaction.channelId ? `<#${interaction.channelId}>` : '—'),
