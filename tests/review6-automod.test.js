@@ -234,3 +234,53 @@ test('R45 : extraction des liens bornée sur un texte piégé (étiquettes « 0�
   assert.deepEqual(extractLinks(evil), []);
   assert.ok(performance.now() - t0 < 20, `extractLinks : ${(performance.now() - t0).toFixed(0)} ms`);
 });
+
+// ---------------------------------------------------------------- R47 / R48 / R49
+
+test('R47 : question et réponses d\'un sondage analysées', () => {
+  const { messageText, AutoModService } = require('../src/services/AutoModService');
+  const svc = new AutoModService({ config: {}, logging: {}, moderation: {} });
+  const poll = { question: { text: 'sale con, rejoins discord.gg/raidzone' }, answers: new Map([[1, { text: 'fdp' }], [2, { text: 'oui' }]]) };
+  const msg = { id: 'p', guild: { id: 'g' }, author: { id: 'u' }, channel: { id: 'c' }, content: '', poll };
+  const text = messageText(msg);
+  assert.match(text, /sale con/);
+  assert.match(text, /fdp/);
+  assert.equal(svc.inspect(msg, { badWords: { enabled: true, words: ['fdp'] } }, { temporal: false })?.filter, 'badWords');
+  assert.equal(svc.inspect(msg, { antiInvite: { enabled: true } }, { temporal: false })?.filter, 'antiInvite');
+  assert.equal(messageText({ content: 'salut' }), 'salut');
+});
+
+test('R48 : zalgo coupé par des caractères de format (ZWJ) détecté, y compris dans les pseudos', () => {
+  const { isZalgo } = require('../src/utils/automod/detectors');
+  const { nameViolation } = require('../src/utils/automod/names');
+  const marks = ['̸̢', '̛̙', '̧͎'];
+  const split = 'zalgo'.split('').map((c) => c + marks.join('‍')).join('');
+  assert.equal(isZalgo('zalgo'.split('').map((c) => c + marks.join('')).join('')), true);
+  assert.equal(isZalgo(split), true, 'zalgo coupé par ZWJ non détecté');
+  assert.equal(nameViolation('a̸̢‍̛̙', { unreadable: true })?.check, 'unreadable');
+  // Pas de faux positif : emojis composés (ZWJ) et écritures accentuées.
+  assert.equal(isZalgo('👨‍👩‍👧‍👦 élève à côté, Tiếng Việt'), false);
+});
+
+test('R49 : log AutoMod — pas de bouton « Retirer le timeout » quand l\'AutoMod n\'a posé aucun timeout', async () => {
+  const { AutoModService } = require('../src/services/AutoModService');
+  let sent = null;
+  let timeouts = 0;
+  const cfg = { enabled: true, notify: 'none', ignoredChannels: [], ignoredRoles: [], escalation: { enabled: false }, filters: { badWords: { enabled: true, words: ['connard'], action: 'timeout', duration: '5m' } } };
+  const svc = new AutoModService({
+    config: { get: () => ({ automod: cfg, moderation: {} }) },
+    logging: { send: async (_g, _c, _e, components) => { sent = components; } },
+    moderation: { timeout: async () => { timeouts += 1; return { id: 1 }; } },
+  });
+  const message = (id, until) => ({ id, guild: { id: 'g', members: { me: {} } }, channel: { id: 'c' }, author: { id: `u${id}`, bot: false, toString: () => `<@u${id}>` }, content: 'quel connard',
+    member: { permissions: { has: () => false }, roles: { cache: { some: () => false } }, communicationDisabledUntilTimestamp: until }, delete: async () => {} });
+  const ids = () => (sent ?? []).flatMap((r) => r.components.map((c) => c.data.custom_id));
+  // Déjà en timeout 7 jours (posé par un administrateur) : l'AutoMod ne pose rien.
+  await svc.handleMessage(message('1', Date.now() + 7 * 86_400_000));
+  assert.equal(timeouts, 0);
+  assert.equal(ids().some((id) => id.startsWith('cmd:untimeout:revoke:')), false, 'bouton qui lèverait le timeout d\'un autre modérateur');
+  // Timeout réellement posé : le bouton est proposé.
+  await svc.handleMessage(message('2', 0));
+  assert.equal(timeouts, 1);
+  assert.equal(ids().some((id) => id.startsWith('cmd:untimeout:revoke:')), true);
+});

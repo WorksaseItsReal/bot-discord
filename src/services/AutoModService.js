@@ -135,9 +135,12 @@ function attachmentsFingerprint(attachments) {
   return createHash('sha1').update(keys.join('\n')).digest('base64url').slice(0, 16);
 }
 
-/** Texte analysé : contenu + messages transférés (sinon « Transférer » contourne tout). */
+/** Texte analysé : contenu, sondage et messages transférés (sinon « Transférer » ou un sondage contournent tout). */
 function messageText(message) {
   const parts = [message.content || ''];
+  const poll = message.poll;
+  if (poll?.question?.text) parts.push(poll.question.text);
+  for (const answer of poll?.answers?.values?.() ?? []) if (answer?.text) parts.push(answer.text);
   const snapshots = message.messageSnapshots;
   if (snapshots?.size) for (const snap of snapshots.values()) if (snap?.content) parts.push(snap.content);
   return parts.join('\n').slice(0, MAX_SCAN_LENGTH);
@@ -842,7 +845,7 @@ class AutoModService {
     return { count, channels: channelIds.length, channelIds };
   }
 
-  /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean, until?: number }} (until : fin du timeout posé) */
+  /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean, until?: number }} (timedOut / until : timeout posé ICI) */
   async #sanction(message, { action, duration, reason }) {
     const guild = message.guild;
     const me = guild.members.me;
@@ -851,7 +854,8 @@ class AutoModService {
       // Ne jamais raccourcir un timeout plus long déjà en cours (ex. 1 j pour arnaque, puis 5 min pour spam).
       const until = message.member?.communicationDisabledUntilTimestamp ?? 0;
       if (until >= Date.now() + ms) {
-        return { timedOut: true, kicked: false, text: `${ACTION_LABELS.delete} · déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:t>` };
+        // Aucun timeout posé ici : pas de bouton « Retirer le timeout » (il lèverait celui d'un modérateur).
+        return { timedOut: false, kicked: false, until: 0, text: `${ACTION_LABELS.delete} · déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:t>` };
       }
       // Via ModerationService : garde-fous, sanction enregistrée (historique, scheduler), DM et log.
       const res = await this.moderation.timeout(guild, message.member, me, reason, ms).then((r) => r, () => null);

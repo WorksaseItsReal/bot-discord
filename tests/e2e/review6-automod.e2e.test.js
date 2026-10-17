@@ -325,3 +325,41 @@ test('R51 : double clic sur « Bannir » d\'une quarantaine — un seul ban, l\'
     await h.close();
   }
 });
+
+test('R50 : double clic sur « Lever la quarantaine » et « Faux positif » — une seule levée, un seul log', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.fake.latency = 5;
+  const T = IDS.users.target;
+  const timeoutPatches = (userId, mark) => h.fake.calls.slice(mark).filter((c) => c.method === 'PATCH' && c.route.includes(`/members/${userId}`) && c.body && 'communication_disabled_until' in c.body).length;
+  const logTitles = (mark) => h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m?.channel_id === IDS.channels.logs).map((m) => m.embeds?.[0]?.title ?? '');
+  try {
+    // Quarantaine levée par deux modérateurs en même temps.
+    const qlog = await quarantineTarget(h);
+    const lift = buttonsOf(qlog).find((c) => c.custom_id.startsWith('cmd:automod:qlift:')).custom_id;
+    let mark = h.fake.calls.length;
+    let logMark = h.fake.messageLog.length;
+    await Promise.all([h.click(qlog, lift, { as: 'admin' }), h.click(qlog, lift, { as: 'owner' })]);
+    await h.settle();
+    assert.equal(timeoutPatches(T, mark), 1, 'timeout levé deux fois');
+    assert.equal(logTitles(logMark).filter((t) => /Timeout retiré/i.test(t)).length, 1, 'deux logs « Timeout retiré »');
+
+    // « Faux positif » cliqué deux fois sur un log de timeout.
+    h.configure({ automod: { filters: { antiHacked: { enabled: false }, badWords: { enabled: true, words: ['interdit'], action: 'timeout', duration: '10m' } } } });
+    logMark = h.fake.messageLog.length;
+    await h.userMessage({ as: 'member', content: 'mot interdit ici' });
+    await h.settle();
+    const log = h.fake.messageLog.slice(logMark).map((id) => h.message(id)).find((m) => m?.channel_id === IDS.channels.logs && buttonsOf(m).some((c) => c.custom_id.startsWith('cmd:automod:fp:')));
+    assert.ok(log, 'log AutoMod avec « Faux positif » introuvable');
+    const fp = buttonsOf(log).find((c) => c.custom_id.startsWith('cmd:automod:fp:')).custom_id;
+    mark = h.fake.calls.length;
+    logMark = h.fake.messageLog.length;
+    await Promise.all([h.click(log, fp, { as: 'mod' }), h.click(log, fp, { as: 'admin' })]);
+    await h.settle();
+    assert.equal(timeoutPatches(IDS.users.member, mark), 1, 'timeout levé deux fois (faux positif)');
+    assert.equal(logTitles(logMark).filter((t) => /Timeout retiré/i.test(t)).length, 1, 'deux logs « Timeout retiré » (faux positif)');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -1122,6 +1122,55 @@ async function restoreRoles(interaction, userId, roleIds, reason) {
   return { ok: !aboveMod.length && !aboveBot.length && !refused.length, lines: lines.length ? lines : ['Aucun rôle à rendre.'] };
 }
 
+/**
+ * Levée d'une quarantaine (bouton qlift) : timeout posé retiré, rôles retirés rendus (relus en
+ * base ; anciens logs : relus dans le champ du log), infraction retirée du compteur de récidive.
+ */
+async function liftQuarantine(interaction, client, userId, rawQuarantineId) {
+  if (rawQuarantineId != null && !/^\d{1,15}$/.test(rawQuarantineId)) throw new UserError('Bouton invalide (quarantaine).');
+  const repo = client.repositories?.automodQuarantines;
+  const row = rawQuarantineId != null ? repo?.get(interaction.guildId, Number(rawQuarantineId)) ?? null : null;
+  if (row && row.user_id !== userId) throw new UserError('Ce bouton ne correspond pas à cette quarantaine.');
+  if (row?.lifted_at) throw new UserError('Cette quarantaine a déjà été levée.');
+  await interaction.deferUpdate();
+  const reason = `Quarantaine AutoMod levée par ${who(interaction)}`;
+  // Avec l'enregistrement : seul le timeout posé par la quarantaine est levé.
+  const timeout = await liftTimeout(interaction, client, userId, reason, row ? { expectedUntil: row.timeout_until ?? 0 } : {});
+  // Rôles relus en base ; repli (quarantaine antérieure) : CE log, s'il concerne bien ce membre.
+  const roleIds = row ? row.roles : footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
+  const since = row?.created_at ?? interaction.message?.createdTimestamp ?? 0;
+  const expired = roleIds.length ? expiredQuarantineRoles(client, interaction.guildId, userId, roleIds, since) : { keep: [], lines: [] };
+  const roles = expired.keep.length ? await restoreRoles(interaction, userId, expired.keep, reason) : { ok: true, lines: [] };
+  const done = [timeout.text, ...roles.lines, ...expired.lines];
+  if (row?.event_id) {
+    try {
+      if (client.repositories?.automodEvents?.remove(interaction.guildId, row.event_id)) done.push('Infraction retirée du compteur de récidive.');
+    } catch {
+      // journal indisponible : sans conséquence pour la levée
+    }
+  }
+  client.services.automod?.forget?.(interaction.guildId, userId);
+  const complete = timeout.ok && roles.ok;
+  if (complete) {
+    if (row) repo.lift(interaction.guildId, row.id, interaction.user.id);
+    await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
+  }
+  await interaction.followUp({
+    embeds: [
+      card({
+        tone: complete ? 'success' : 'warning',
+        section: 'automod',
+        icon: ICONS.unlock,
+        title: complete ? 'Quarantaine levée' : 'Quarantaine levée en partie',
+        description: [...done.map((d) => `› ${d}`), complete ? null : subtext('Le bouton reste actif : corrigez le problème puis cliquez à nouveau.')],
+        fields: [field(ICONS.user, 'Membre', `<@${userId}>`)],
+      }),
+    ],
+    components: buttonRows(historyButton(userId)),
+    ephemeral: true,
+  });
+}
+
 /** Actions de bouton en cours (`action:serveur:membre`) : un double clic (ou deux modérateurs) n'agit qu'une fois. */
 const pending = new Set();
 async function exclusiveAction(key, fn) {
@@ -1477,8 +1526,9 @@ module.exports = {
       // Le log et l'infraction doivent concerner le même membre (pied de page « ID : … »).
       if (footerUserId(interaction.message) !== row.user_id) throw new UserError('Ce bouton ne correspond pas à ce log.');
       const content = logMessageContent(interaction.message);
+      // Consommée AVANT tout appel à Discord : un double clic ne lève pas deux fois (ni deux logs).
+      if (!repo.remove(interaction.guildId, row.id)) throw new UserError('Ce faux positif est déjà en cours de traitement.');
       await interaction.deferUpdate();
-      repo.remove(interaction.guildId, row.id);
       client.services.automod?.forget?.(interaction.guildId, row.user_id);
       const done = ['Infraction retirée du compteur de récidive.'];
       if (row.action === 'timeout') {
@@ -1540,48 +1590,8 @@ module.exports = {
     async qlift(interaction, client, [rawUserId, rawQuarantineId]) {
       requirePermission(interaction, 'ModerateMembers');
       const userId = snowflake(rawUserId, 'membre');
-      if (rawQuarantineId != null && !/^\d{1,15}$/.test(rawQuarantineId)) throw new UserError('Bouton invalide (quarantaine).');
-      const repo = client.repositories?.automodQuarantines;
-      const row = rawQuarantineId != null ? repo?.get(interaction.guildId, Number(rawQuarantineId)) ?? null : null;
-      if (row && row.user_id !== userId) throw new UserError('Ce bouton ne correspond pas à cette quarantaine.');
-      if (row?.lifted_at) throw new UserError('Cette quarantaine a déjà été levée.');
-      await interaction.deferUpdate();
-      const reason = `Quarantaine AutoMod levée par ${who(interaction)}`;
-      // Avec l'enregistrement : seul le timeout posé par la quarantaine est levé.
-      const timeout = await liftTimeout(interaction, client, userId, reason, row ? { expectedUntil: row.timeout_until ?? 0 } : {});
-      // Rôles relus en base ; repli (quarantaine antérieure) : CE log, s'il concerne bien ce membre.
-      const roleIds = row ? row.roles : footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
-      const since = row?.created_at ?? interaction.message?.createdTimestamp ?? 0;
-      const expired = roleIds.length ? expiredQuarantineRoles(client, interaction.guildId, userId, roleIds, since) : { keep: [], lines: [] };
-      const roles = expired.keep.length ? await restoreRoles(interaction, userId, expired.keep, reason) : { ok: true, lines: [] };
-      const done = [timeout.text, ...roles.lines, ...expired.lines];
-      if (row?.event_id) {
-        try {
-          if (client.repositories?.automodEvents?.remove(interaction.guildId, row.event_id)) done.push('Infraction retirée du compteur de récidive.');
-        } catch {
-          // journal indisponible : sans conséquence pour la levée
-        }
-      }
-      client.services.automod?.forget?.(interaction.guildId, userId);
-      const complete = timeout.ok && roles.ok;
-      if (complete) {
-        if (row) repo.lift(interaction.guildId, row.id, interaction.user.id);
-        await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
-      }
-      await interaction.followUp({
-        embeds: [
-          card({
-            tone: complete ? 'success' : 'warning',
-            section: 'automod',
-            icon: ICONS.unlock,
-            title: complete ? 'Quarantaine levée' : 'Quarantaine levée en partie',
-            description: [...done.map((d) => `› ${d}`), complete ? null : subtext('Le bouton reste actif : corrigez le problème puis cliquez à nouveau.')],
-            fields: [field(ICONS.user, 'Membre', `<@${userId}>`)],
-          }),
-        ],
-        components: buttonRows(historyButton(userId)),
-        ephemeral: true,
-      });
+      // Deux clics simultanés : une seule levée (timeout, rôles, logs).
+      return exclusiveAction(`qlift:${interaction.guildId}:${userId}`, () => liftQuarantine(interaction, client, userId, rawQuarantineId));
     },
     /** cmd:automod:qban:<userId> — demande de confirmation (éphémère) avant de bannir. */
     async qban(interaction, client, [rawUserId]) {

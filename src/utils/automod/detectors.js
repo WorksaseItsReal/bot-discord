@@ -1,5 +1,7 @@
 'use strict';
 
+const { INVISIBLE } = require('./normalize');
+
 /**
  * Détecteurs de forme (pas de contenu) : majuscules, emojis, zalgo, pavés.
  */
@@ -31,7 +33,8 @@ function countEmojis(text) {
  * vocalisé ou le vietnamien (1 à 2 signes par lettre) ne sont pas concernés.
  */
 function isZalgo(text, { minMarks = 10 } = {}) {
-  const runs = String(text ?? '').normalize('NFD').match(/\p{M}{3,}/gu) || [];
+  // Caractères de format retirés d'abord : un ZWJ entre deux paires de marques ne casse pas l'empilement affiché.
+  const runs = String(text ?? '').replace(INVISIBLE, '').normalize('NFD').match(/\p{M}{3,}/gu) || [];
   return runs.reduce((n, r) => n + r.length, 0) >= minMarks;
 }
 
