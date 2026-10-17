@@ -79,10 +79,16 @@ module.exports = [
     // Requiert l'intent GuildModeration et la permission « Voir les logs du serveur ».
     name: 'guildAuditLogEntryCreate',
     async execute(client, entry, guild) {
+      // Salon créé : son auteur (bot de tickets, de vocaux temporaires…) peut le supprimer sans être compté.
+      if (entry?.action === AuditLogEvent.ChannelCreate && guild && entry.executorId) {
+        client.services.antiraid?.rememberChannelCreator?.(guild.id, entry.targetId, entry.executorId);
+        return;
+      }
       const type = DESTRUCTIVE_AUDIT_ACTIONS[entry?.action];
       if (!type || !guild || !entry.executorId) return;
-      // Cible transmise pour les bans et kicks : sanctionner un arrivant récent (raider) n'est pas compté.
-      const target = type === 'ban' || type === 'kick' ? { targetId: entry.targetId ?? null } : undefined;
+      // Cible transmise pour les bans et kicks (sanctionner un arrivant récent n'est pas compté) et
+      // les suppressions de salons (supprimer un salon que l'on a créé n'est pas compté).
+      const target = type === 'ban' || type === 'kick' || type === 'channelDelete' ? { targetId: entry.targetId ?? null } : undefined;
       await client.services.antiraid?.handleDestructive(guild, entry.executorId, type, target).catch(() => {});
     },
   },

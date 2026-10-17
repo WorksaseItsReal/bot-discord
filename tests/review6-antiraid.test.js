@@ -406,3 +406,27 @@ test('R35 : auteur parti, bannissement par identifiant en échec → marque reti
   assert.match(fieldOf(w.alerts[0], /Sanction/), /Aucune/);
   assert.match(fieldOf(w.alerts[0], /Attention/) ?? '', /quitté le serveur/);
 });
+
+// ---------------------------------------------------------------- R36
+
+const { AuditLogEvent } = require('discord.js');
+const banEvents = require('../src/events/banEvents');
+
+test('R36 : un bot tiers (tickets, vocaux temporaires) qui supprime les salons qu\'il a créés n\'est pas sanctionné', async () => {
+  const alerts = [];
+  const banned = [];
+  const ticketBot = { id: 'ticketbot', user: { id: 'ticketbot', bot: true, tag: 'Tickets#0001', toString: () => '<@ticketbot>', displayAvatarURL: () => null }, roles: { cache: new Collection() }, ban: async () => banned.push('ticketbot') };
+  const guild = { id: G, ownerId: 'owner', members: { fetch: async () => ticketBot, cache: new Map() }, roles: { cache: new Map() } };
+  const cfg = { antiraid: { enabled: true, channelDeleteThreshold: 2, roleDeleteThreshold: 2, banThreshold: 3, destructiveWindowSeconds: 15, punishExecutor: 'ban' }, whitelist: { users: [], roles: [] } };
+  const client = { user: { id: 'bot' }, services: {}, channels: { fetch: async () => null } };
+  client.services.antiraid = new AntiRaidService({ client, config: { get: () => cfg }, logging: { send: async (_g, _c, e) => { alerts.push(json(e)); return true; } } });
+  const audit = banEvents.find((e) => e.name === 'guildAuditLogEntryCreate');
+  for (const id of ['t1', 't2', 't3']) await audit.execute(client, { action: AuditLogEvent.ChannelCreate, executorId: 'ticketbot', targetId: id }, guild);
+  for (const id of ['t1', 't2', 't3']) await audit.execute(client, { action: AuditLogEvent.ChannelDelete, executorId: 'ticketbot', targetId: id }, guild);
+  assert.equal(alerts.length, 0, 'bot de tickets sanctionné pour ses propres salons');
+  assert.equal(banned.length, 0);
+  // Salons qu'il n'a pas créés : surveillance inchangée.
+  for (const id of ['general', 'regles']) await audit.execute(client, { action: AuditLogEvent.ChannelDelete, executorId: 'ticketbot', targetId: id }, guild);
+  assert.equal(alerts.length, 1);
+  assert.deepEqual(banned, ['ticketbot']);
+});

@@ -41,6 +41,12 @@ function newAccountAction(cfg) {
 const RECENT_JOIN_MS = 10 * 60_000;
 /** Plafond d'arrivants récents mémorisés par serveur (mémoire bornée pendant un raid). */
 const MAX_RECENT_JOINERS = 5_000;
+/**
+ * Salons créés récemment (journal d'audit) : supprimer un salon que l'on a soi-même créé (ticket,
+ * vocal temporaire d'un bot tiers) n'est pas destructeur. Mémoire bornée par serveur et par durée.
+ */
+const CREATED_CHANNEL_TTL_MS = 7 * DAY_MS;
+const MAX_CREATED_CHANNELS = 2_000;
 /** Permissions qu'un exécutant « dépouillé » ne doit plus avoir (sinon la sanction a échoué). */
 const DANGEROUS_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.Administrator,
@@ -127,6 +133,35 @@ class AntiRaidService {
      * @type {Map<string, { guild: object, until: number, timer: NodeJS.Timeout|null, banned: number, kicked: number, failed: number, wave: number, lastError: string|null }>}
      */
     this.digests = new Map();
+    /** @type {Map<string, Map<string, { by: string, at: number }>>} salons créés (id → auteur) par serveur */
+    this.createdChannels = new Map();
+  }
+
+  /** Salon créé (entrée ChannelCreate du journal d'audit) : son auteur pourra le supprimer sans être compté. */
+  rememberChannelCreator(guildId, channelId, executorId, now = Date.now()) {
+    if (!guildId || !channelId || !executorId) return;
+    if (!this.config.get(guildId).antiraid?.enabled) return;
+    let m = this.createdChannels.get(guildId);
+    if (!m) {
+      m = new Map();
+      this.createdChannels.set(guildId, m);
+    }
+    m.delete(channelId);
+    m.set(channelId, { by: executorId, at: now });
+    for (const [id, e] of m) {
+      if (m.size <= MAX_CREATED_CHANNELS && now - e.at < CREATED_CHANNEL_TTL_MS) break;
+      m.delete(id);
+    }
+  }
+
+  /** true (et oublié) si ce salon a été créé récemment par cet auteur. */
+  #ownChannel(guildId, channelId, executorId, now = Date.now()) {
+    const m = this.createdChannels.get(guildId);
+    const e = channelId ? m?.get(channelId) : null;
+    if (!e) return false;
+    m.delete(channelId);
+    if (!m.size) this.createdChannels.delete(guildId);
+    return e.by === executorId && now - e.at < CREATED_CHANNEL_TTL_MS;
   }
 
   /** Arrêt du bot : minuteurs des cartes récapitulatives annulés. */
@@ -479,13 +514,16 @@ class AntiRaidService {
    * @param {import('discord.js').Guild} guild
    * @param {string} executorId
    * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
-   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban/kick (exemption des arrivants récents)
+   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban/kick (exemption des arrivants
+   *   récents) ou salon supprimé (exemption des salons créés par le même auteur)
    */
   async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null } = {}) {
     const cfg = this.config.get(guild.id).antiraid;
     if (!cfg?.enabled || !executorId) return;
     if (executorId === this.client.user?.id) return;
     if (executorId === guild.ownerId) return;
+    // Supprimer un salon que l'on a soi-même créé (ticket ou vocal temporaire d'un bot tiers) non plus.
+    if (type === 'channelDelete' && this.#ownChannel(guild.id, targetId, executorId)) return;
     // Bannir ou expulser un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
     if (MEMBER_SANCTIONS.has(type) && targetId) {
       const joinedAt = targetJoinedAt ?? guild.members?.cache?.get?.(targetId)?.joinedTimestamp ?? null;

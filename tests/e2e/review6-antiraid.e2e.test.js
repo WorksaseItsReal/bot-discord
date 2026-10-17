@@ -271,3 +271,28 @@ test('R35 : auteur d\'un nuke qui a quitté le serveur → banni par identifiant
     await h.close();
   }
 });
+
+test('R36 : préréglage Strict, un bot de tickets qui ferme ses tickets n\'est pas banni ; il l\'est s\'il supprime d\'autres salons', async () => {
+  const { nextId } = require('./lib/ids');
+  const { rawMember } = require('./lib/fixtures');
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { channelDeleteThreshold: 2, destructiveWindowSeconds: 15, punishExecutor: 'ban' } });
+    const bot = h.addUser('TicketTool', { bot: true });
+    const raw = rawMember(bot, [], 30);
+    h.fake.members.set(bot.id, raw);
+    h.guild.members._add(JSON.parse(JSON.stringify(raw)));
+    const tickets = [nextId(), nextId(), nextId()];
+    for (const id of tickets) await h.auditEntry({ action_type: 10, target_id: id, user_id: bot.id });
+    for (const id of tickets) await h.auditEntry({ action_type: 12, target_id: id, user_id: bot.id });
+    await h.settle();
+    assert.ok(!h.fake.bans.has(bot.id), 'bot de tickets banni pour avoir fermé ses tickets');
+    for (const key of ['rules', 'announcements']) await h.auditEntry({ action_type: 12, target_id: IDS.channels[key], user_id: bot.id });
+    await h.settle();
+    assert.ok(h.fake.bans.has(bot.id), 'suppression de salons existants non sanctionnée');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
