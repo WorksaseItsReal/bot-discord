@@ -177,3 +177,21 @@ test('R41 : invitations encodées (./, ../, %xx, antislash, points idéographiqu
   assert.deepEqual(extractInvites('rejoins https://discord.gg/raidzone'), ['raidzone']);
   assert.deepEqual(extractInvites('https://discord.com/channels/1/2 et https://exemple.fr/discord.gg'), []);
 });
+
+// ---------------------------------------------------------------- R43 : normalisation
+
+test('R43 : petites capitales « ᴀ », caractères de format invisibles et homoglyphes courants normalisés', () => {
+  const { nameViolation, nameSkeleton } = require('../src/utils/automod/names');
+  const cp = (n) => String.fromCodePoint(n);
+  const words = ['connard', 'pute'];
+  for (const t of [`quel con${cp(0x1bca0)}nard`, `quel con${cp(0x1d173)}nard`, `quel con${cp(0xfff9)}nard`, `quel con${cp(0x13430)}nard`, `quel con${cp(0x2065)}nard`,
+    'quel cօnnard', 'quel cഠnnard', 'quel ϲonnard', 'quel connᴀrd', 'quel ᴄᴏɴɴᴀʀᴅ', 'sale ᴘᴜᴛᴇ', 'quel connɑrd']) {
+    assert.ok(findBadWord(t, words), `non détecté : ${JSON.stringify(t)}`);
+  }
+  const staff = new Map([[nameSkeleton('Alice'), 'Alice']]);
+  for (const n of ['ᴀᴅᴍɪɴ', 'Ad⁥min', 'Mod\u{1D173}erateur', 'ᴀlice', 'Աdmin'.replace('Ա', 'A')]) {
+    assert.equal(nameViolation(n, {}, { words, staff })?.check, 'impersonation', `pseudo accepté : ${JSON.stringify(n)}`);
+  }
+  // Pas de faux positif : textes ordinaires, emojis composés et écritures non latines intacts.
+  for (const t of ['quel connaisseur', 'cours de conduite', 'Ձեր անունը', '👨‍👩‍👧 famille', 'ελληνικά']) assert.equal(findBadWord(t, words), null, t);
+});
