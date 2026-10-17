@@ -11,7 +11,7 @@ const logger = createLogger('scheduler');
 const DAY_MS = 86_400_000;
 /** Un rappel non délivrable (erreurs transitoires) est abandonné 24 h après son échéance. */
 const REMINDER_MAX_LATE_MS = DAY_MS;
-/** Config d'un serveur quitté supprimée après 30 jours d'absence. */
+/** Données d'un serveur quitté supprimées après 30 jours d'absence. */
 const LEFT_GUILD_RETENTION_MS = 30 * DAY_MS;
 /** Fréquence de la purge des serveurs quittés. */
 const PURGE_INTERVAL_MS = DAY_MS;
@@ -59,6 +59,8 @@ class SchedulerService {
     /** @type {Promise<void> | null} tick en cours (attendu par stop()) */
     this.currentTick = null;
     this.lastPurgeAt = 0;
+    /** Rattrapage des serveurs quittés hors ligne fait (une fois par démarrage). */
+    this.leftGuildsReconciled = false;
   }
 
   start() {
@@ -158,9 +160,10 @@ class SchedulerService {
   }
 
   /**
-   * Purge quotidienne : supprime la config (guild_config uniquement) des serveurs
-   * quittés depuis plus de 30 jours. Si le bot y est de nouveau, la date de départ
-   * est simplement effacée.
+   * Purge quotidienne des serveurs quittés depuis plus de 30 jours : TOUTES leurs données
+   * (tables à guild_id et tables filles, en une transaction : GuildPurgeRepository) et les
+   * caches mémoire des services. Si le bot y est de nouveau, la date de départ est effacée.
+   * Au premier passage après le démarrage, rattrapage des serveurs quittés hors ligne.
    */
   async #processLeftGuildPurge(now = Date.now()) {
     const repo = this.client.repositories?.guildConfig;
@@ -168,16 +171,71 @@ class SchedulerService {
     if (!repo?.findLeftBefore || !config) return;
     // Cache incomplet tant que le client n'est pas prêt : on ne purge jamais à l'aveugle.
     if (!this.client.isReady?.()) return;
+    if (!this.leftGuildsReconciled) this.leftGuildsReconciled = await this.#reconcileLeftGuilds(now);
     if (now - this.lastPurgeAt < PURGE_INTERVAL_MS) return;
     this.lastPurgeAt = now;
+    const isStopping = this.#budget();
     for (const guildId of repo.findLeftBefore(now - LEFT_GUILD_RETENTION_MS)) {
+      if (isStopping()) {
+        // Budget épuisé : la suite au prochain tick (pas dans 24 h).
+        if (!this.stopping) this.lastPurgeAt = 0;
+        return;
+      }
       if (this.client.guilds.cache.has(guildId)) {
         config.clearLeft(guildId);
         continue;
       }
-      config.forget(guildId);
-      logger.info(`Configuration du serveur ${guildId} purgée (quitté depuis plus de 30 jours).`);
+      try {
+        this.#purgeGuild(guildId);
+      } catch (e) {
+        logger.warn(`Purge du serveur quitté ${guildId} en échec (nouvel essai demain) :`, e?.message ?? e);
+      }
+      await new Promise((resolve) => setImmediate(resolve)); // une purge par tour de boucle
     }
+  }
+
+  /** Supprime toutes les données d'un serveur quitté, puis les caches mémoire des services. */
+  #purgeGuild(guildId) {
+    const purge = this.client.repositories?.guildPurge;
+    const counts = purge?.purgeGuild ? purge.purgeGuild(guildId) : {};
+    this.client.services.config.forget(guildId);
+    for (const service of Object.values(this.client.services ?? {})) {
+      if (typeof service?.forgetGuild !== 'function') continue;
+      try {
+        service.forgetGuild(guildId);
+      } catch (e) {
+        logger.debug(`Cache du serveur purgé ${guildId} :`, e?.message);
+      }
+    }
+    const rows = Object.values(counts).reduce((n, c) => n + c, 0);
+    logger.info(`Données du serveur ${guildId} purgées (quitté depuis plus de 30 jours) : ${rows} ligne(s) dans ${Object.keys(counts).length} table(s), configuration comprise.`);
+  }
+
+  /**
+   * Rattrapage au démarrage : un serveur quitté pendant que le bot était hors ligne n'émet
+   * jamais guildDelete. Tout serveur présent en base mais absent du cache est daté (purge dans
+   * 30 jours) ; un serveur daté mais de nouveau présent (retour hors ligne) ne l'est plus.
+   * Seulement si AUCUN serveur n'est indisponible (panne Discord : liste incertaine).
+   * @returns {Promise<boolean>} true une fois fait (sinon nouvel essai au prochain tick)
+   */
+  async #reconcileLeftGuilds(now) {
+    const repo = this.client.repositories.guildConfig;
+    const config = this.client.services.config;
+    const cache = this.client.guilds.cache;
+    for (const guild of cache.values()) if (guild?.available === false) return false;
+    const dated = new Set(repo.findLeftBefore(Number.MAX_SAFE_INTEGER));
+    for (const guildId of dated) if (cache.has(guildId)) config.clearLeft(guildId);
+    const purge = this.client.repositories?.guildPurge;
+    if (!purge?.guildTables) return true;
+    const missing = new Set();
+    for (const table of purge.guildTables()) {
+      if (this.stopping) return false;
+      for (const guildId of purge.guildIds(table)) if (!cache.has(guildId) && !dated.has(guildId)) missing.add(guildId);
+      await new Promise((resolve) => setImmediate(resolve)); // une table par tour de boucle
+    }
+    for (const guildId of missing) config.markLeft(guildId, now);
+    if (missing.size) logger.info(`${missing.size} serveur(s) quitté(s) pendant l'arrêt du bot : données purgées dans 30 jours s'il n'y revient pas.`);
+    return true;
   }
 
   /** Sanction « absente » : serveur quitté (client prêt) → désactivée ; sinon réessai. */

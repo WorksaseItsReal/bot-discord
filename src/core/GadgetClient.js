@@ -47,6 +47,7 @@ const { ApplicationRepository } = require('../database/repositories/ApplicationR
 const { TicketRatingRepository } = require('../database/repositories/TicketRatingRepository');
 const { FeedRepository } = require('../database/repositories/FeedRepository');
 const { AutoThreadCounterRepository } = require('../database/repositories/AutoThreadCounterRepository');
+const { GuildPurgeRepository } = require('../database/repositories/GuildPurgeRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -166,6 +167,8 @@ class GadgetClient extends Client {
       ticketRatings: new TicketRatingRepository(db),
       feeds: new FeedRepository(db),
       autoThreadCounters: new AutoThreadCounterRepository(db),
+      // Purge des serveurs quittés (scheduler) : toutes les tables à guild_id et leurs filles.
+      guildPurge: new GuildPurgeRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);

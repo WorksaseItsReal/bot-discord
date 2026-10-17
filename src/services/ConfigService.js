@@ -99,13 +99,13 @@ class ConfigService {
   }
 
   /**
-   * Le bot a quitté le serveur : on date le départ (purge après 30 jours par le
-   * scheduler). Sans config stockée, il n'y a rien à purger.
+   * Le bot a quitté le serveur : on date le départ (purge de TOUTES ses données après 30 jours
+   * par le scheduler). Daté même sans config stockée (le serveur peut avoir des sanctions, des
+   * niveaux… sans config) ou avec une config corrompue (sauvegardée par #readStored).
    */
   markLeft(guildId, at = Date.now()) {
     this.cache.delete(guildId);
-    const stored = this.repo.get(guildId);
-    if (!stored) return false;
+    const stored = this.#readStored(guildId);
     this.repo.set(guildId, { ...stored, _leftAt: at });
     return true;
   }

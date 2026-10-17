@@ -14,14 +14,34 @@ const FETCH_TIMEOUT_MS = 60_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.());
 const stopping = (client) => Boolean(client.shutdownPromise);
 
-/** Le serveur a-t-il des lignes à rattraper (XP ou arrivées) ? Évite toute lecture inutile. */
+/** Le serveur a-t-il des lignes à rattraper (XP, arrivées, absences, alertes) ? Évite toute lecture inutile. */
 function hasRows(client, guildId) {
-  return Boolean(client.repositories?.levels?.hasGuild?.(guildId) || client.repositories?.inviteJoins?.hasOpen?.(guildId));
+  const repos = client.repositories ?? {};
+  return Boolean(repos.levels?.hasGuild?.(guildId) || repos.inviteJoins?.hasOpen?.(guildId) || repos.afk?.count?.(guildId) || repos.highlights?.listByGuild?.(guildId)?.length);
+}
+
+/**
+ * Données personnelles des membres partis hors ligne (effacées en ligne par memberTools.js au
+ * départ) : absence (/afk) et alertes de mots-clés (/alertes).
+ * @returns {number} entrées effacées
+ */
+function forgetDepartedTools(client, guildId, isPresent) {
+  const repos = client.repositories ?? {};
+  const services = client.services ?? {};
+  let forgotten = 0;
+  for (const userId of repos.afk?.userIds?.(guildId) ?? []) {
+    if (!isPresent(userId) && services.afk?.forget(guildId, userId)) forgotten += 1;
+  }
+  for (const entry of repos.highlights?.listByGuild?.(guildId) ?? []) {
+    if (!isPresent(entry.userId) && services.highlights?.forget(guildId, entry.userId)) forgotten += 1;
+  }
+  return forgotten;
 }
 
 /**
  * Rattrape, pour un serveur, les départs et retours manqués (bot hors ligne, membres partis
- * avant la migration 17) : classement des niveaux (`left_at`) et « net » des invitations.
+ * avant la migration 17) : classement des niveaux (`left_at`), « net » des invitations,
+ * absences et alertes de mots-clés des membres partis (effacées).
  * Uniquement d'après la liste COMPLÈTE des membres : une liste partielle (lecture échouée,
  * intent GuildMembers absent) ne marque jamais personne comme parti.
  * @returns {Promise<{ levels: { left: number, returned: number }, invites: number }|null>} null : serveur ignoré
@@ -38,8 +58,9 @@ async function reconcileGuild(client, guild, { now = Date.now() } = {}) {
   const isPresent = (id) => guild.members.cache.has(id);
   const levels = client.repositories?.levels?.reconcileDepartures?.(guild.id, isPresent, now) ?? { left: 0, returned: 0 };
   const invites = client.repositories?.inviteJoins?.reconcileDepartures?.(guild.id, isPresent, now) ?? 0;
-  if (levels.left || levels.returned || invites) {
-    logger.info(`Départs rattrapés sur ${guild.id} : niveaux ${levels.left} parti(s) / ${levels.returned} revenu(s), invitations ${invites}.`);
+  const tools = forgetDepartedTools(client, guild.id, isPresent);
+  if (levels.left || levels.returned || invites || tools) {
+    logger.info(`Départs rattrapés sur ${guild.id} : niveaux ${levels.left} parti(s) / ${levels.returned} revenu(s), invitations ${invites}, absences et alertes effacées ${tools}.`);
   }
   return { levels, invites };
 }
