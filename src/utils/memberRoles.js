@@ -13,7 +13,8 @@
  *
  * Blrank (/secur blrank) : un membre listé ne peut recevoir AUCUN rôle. Ses AJOUTS sont ignorés
  * (comptés dans `skipped`, présent seulement s'il n'est pas vide, sans appel à Discord) : rôles
- * d'arrivée, menus, boutique, niveaux, rendus… Les retraits restent appliqués.
+ * d'arrivée, menus, boutique, niveaux, rendus… Les retraits restent appliqués, de même que l'ajout
+ * d'un rôle RESTRICTIF (rôle Muted, rôle « non vérifié » en mode retrait : blacklist.restrictiveRoleIds).
  * @param {import('discord.js').GuildMember} member
  * @param {{ add?: string[], remove?: string[] }} changes
  * @param {string} [reason]
@@ -23,9 +24,10 @@
 async function applyRoles(member, { add = [], remove = [] } = {}, reason, onError) {
   const out = { added: [], removed: [], failed: [] };
   let blocked = null; // lu une fois, au premier ajout
+  let restrictive = null; // rôles restrictifs, lus une fois pour un membre du blrank
   for (const [action, ids, done] of [['remove', remove, out.removed], ['add', add, out.added]]) {
     for (const id of new Set(ids)) {
-      if (action === 'add' && (blocked ??= isRankBlocked(member))) {
+      if (action === 'add' && (blocked ??= isRankBlocked(member)) && !(restrictive ??= restrictiveRoles(member)).has(id)) {
         (out.skipped ??= []).push(id);
         continue;
       }
@@ -47,6 +49,15 @@ function isRankBlocked(member) {
     return Boolean(member?.guild?.id && member.client?.services?.blacklist?.isRankBlocked?.(member.guild.id, member.id));
   } catch {
     return false;
+  }
+}
+
+/** Rôles restrictifs du serveur (Muted, « non vérifié » en mode retrait), que le blrank laisse passer. */
+function restrictiveRoles(member) {
+  try {
+    return member?.client?.services?.blacklist?.restrictiveRoleIds?.(member.guild) ?? new Set();
+  } catch {
+    return new Set();
   }
 }
 

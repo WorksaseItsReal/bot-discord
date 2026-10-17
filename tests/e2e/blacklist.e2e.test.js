@@ -218,7 +218,7 @@ test('liste paginée (10 par page) : boutons explorés en administrateur', async
   }
 });
 
-test('blrank : rôle donné à la main → retiré avec log (auteur nommé) ; 4ᵉ retrait en 10 min → carte « boucle » sans retrait ; rôle d\'arrivée non appliqué ; refus pour un owner', async () => {
+test('blrank : rôle donné à la main → retiré avec log (auteur nommé) ; autre bot : 4ᵉ retrait en 10 min → carte « boucle » sans retrait ; rôle d\'arrivée non appliqué ; refus pour un owner', async () => {
   const h = await createHarness();
   try {
     h.configureAll();
@@ -241,14 +241,15 @@ test('blrank : rôle donné à la main → retiré avec log (auteur nommé) ; 4�
     assert.match(log.embeds[0].fields.find((f) => /Rôle donné par/.test(f.name)).value, new RegExp(IDS.users.admin));
     assert.ok(roleOf().includes(IDS.roles.gamer), 'rôle déjà porté retiré');
 
-    // Deux retraits de plus (3 en tout), puis le 4ᵉ : carte « boucle », aucun retrait.
-    await h.asHuman('admin').addRole('member', IDS.roles.notif);
-    await h.asHuman('admin').addRole('member', IDS.roles.notif);
+    // Rôle rendu en boucle par un AUTRE bot : 3 retraits, puis le 4ᵉ : carte « boucle », aucun
+    // retrait (un humain, lui, voit chaque ajout retiré : revue 7, S36).
+    await h.asHuman('owner').addRole('otherBot', IDS.roles.admin);
+    for (let i = 0; i < 3; i += 1) await h.asHuman('otherBot').addRole('member', IDS.roles.notif);
     await h.settle();
     assert.equal(roleOf().includes(IDS.roles.notif), false);
     mark = h.fake.messageLog.length;
     const callMark = h.fake.calls.length;
-    await h.asHuman('admin').addRole('member', IDS.roles.notif);
+    await h.asHuman('otherBot').addRole('member', IDS.roles.notif);
     await h.settle();
     assert.ok(roleOf().includes(IDS.roles.notif), '4ᵉ retrait en 10 min');
     assert.equal(calls(h, callMark, 'DELETE', new RegExp(`/members/${IDS.users.member}/roles/`)).length, 0);

@@ -3,6 +3,7 @@
 const { card, field, ICONS, status, subtext } = require('../utils/ui');
 const { resetSelectMenu } = require('../utils/components');
 const { hasForbiddenPermissions, reservedRoleReason } = require('../commands/roles/rolemenu');
+const { isRankBlocked } = require('../utils/memberRoles');
 
 /**
  * Gestionnaire du select menu de rôles auto-attribuables.
@@ -43,6 +44,9 @@ async function handle(interaction, client) {
   const added = [];
   const removed = [];
   const failed = [];
+  /** Ajouts refusés : membre du blrank (/secur blrank), qui ne peut recevoir aucun rôle. */
+  const refused = [];
+  let blocked = null; // lu une fois, au premier ajout
 
   for (const roleId of new Set(interaction.values)) {
     if (!menuRoles.has(roleId)) continue;
@@ -53,6 +57,10 @@ async function handle(interaction, client) {
     // Rôle de mute ou de vérification (menu publié avant qu'il le devienne) : ni ajouté ni retiré.
     if (!role || role.managed || role.position >= me.roles.highest.position || (!has && hasForbiddenPermissions(role)) || reservedRoleReason(client, interaction.guild, role)) {
       failed.push(roleId);
+      continue;
+    }
+    if (!has && (blocked ??= isRankBlocked(interaction.member))) {
+      refused.push(roleId);
       continue;
     }
     try {
@@ -69,11 +77,12 @@ async function handle(interaction, client) {
   }
 
   const mentions = (ids) => ids.map((r) => `<@&${r}>`).join(' ');
-  if (!added.length && !removed.length && !failed.length) {
+  if (!added.length && !removed.length && !failed.length && !refused.length) {
     await interaction.reply({ embeds: [status.note('Aucun changement : sélectionnez un rôle pour l\'obtenir ou le retirer.', 'Vos rôles')], ephemeral: true });
     return;
   }
-  const tone = failed.length && !added.length && !removed.length ? 'danger' : failed.length ? 'warning' : 'success';
+  const notDone = failed.length + refused.length;
+  const tone = notDone && !added.length && !removed.length ? 'danger' : notDone ? 'warning' : 'success';
   await interaction.reply({
     embeds: [
       card({
@@ -86,6 +95,7 @@ async function handle(interaction, client) {
           added.length ? field('➕', 'Ajoutés', mentions(added), false) : null,
           removed.length ? field('➖', 'Retirés', mentions(removed), false) : null,
           failed.length ? field(ICONS.error, 'Impossibles à modifier', `${mentions(failed)}\n${subtext('Prévenez le staff : rôle supprimé, trop haut ou devenu sensible.')}`, false) : null,
+          refused.length ? field(ICONS.error, 'Refusés', `${mentions(refused)}\n${subtext('Vous ne pouvez pas recevoir de nouveau rôle pour le moment. Contactez le staff.')}`, false) : null,
         ],
         timestamp: false,
       }),

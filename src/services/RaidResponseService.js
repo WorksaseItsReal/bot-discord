@@ -63,7 +63,9 @@ function describeState({ invitesDisabledUntil = null, dmsDisabledUntil = null } 
  *  - resume : échéances remises à null ;
  *  - status : guild.fetch() puis incidentsData ;
  *  - onWave : appelé par l'AntiRaid (vague d'arrivées), seulement si raidResponse.onWave, au plus
- *    une pause par serveur toutes les 10 min, jamais renouvelée au-delà de 24 h.
+ *    une pause par serveur toutes les 10 min, jamais renouvelée au-delà de 24 h : une SÉRIE de
+ *    ripostes (vagues successives tant que la pause précédente court) est plafonnée à son début
+ *    + 24 h − 1 min ; une nouvelle série ne démarre qu'après l'expiration de la précédente.
  * Les deux échéances sont toujours envoyées (celle qui ne change pas garde sa valeur actuelle).
  * Verrou par serveur : les appels d'un même serveur s'enchaînent. Aucun minuteur.
  */
@@ -76,7 +78,7 @@ class RaidResponseService {
     this.now = now;
     /** @type {Map<string, Promise<unknown>>} dernier appel en cours par serveur (verrou) */
     this.locks = new Map();
-    /** @type {Map<string, { at: number, text: string }>} dernière riposte de vague par serveur */
+    /** @type {Map<string, { at: number, since: number, until: number, text: string }>} dernière riposte de vague par serveur (since : début de la série) */
     this.waves = new Map();
   }
 
@@ -120,20 +122,25 @@ class RaidResponseService {
 
   /**
    * Suspend les invitations et/ou les MP pendant `hours` heures (1, 3, 6, 12 ou 24).
-   * Une échéance déjà plus lointaine est conservée (jamais raccourcie).
+   * Une échéance déjà plus lointaine est conservée (jamais raccourcie). `notAfter` (riposte de
+   * vague) : échéance visée plafonnée à cet instant ; rien à prolonger (plafond à moins d'une
+   * minute ou déjà atteint) : aucun appel.
    * @returns {Promise<{ invitesDisabledUntil: number|null, dmsDisabledUntil: number|null, previous: { invites: number|null, dms: number|null } }>}
    */
-  async pause(guild, { invites = true, dms = false, hours = DEFAULT_HOURS, actorId = null, reason = null } = {}) {
+  async pause(guild, { invites = true, dms = false, hours = DEFAULT_HOURS, actorId = null, reason = null, notAfter = Infinity } = {}) {
     if (!invites && !dms) throw new UserError('Choisissez au moins les invitations ou les messages privés.');
     this.assertCanManage(guild);
     return this.#withLock(guild.id, async () => {
       const now = this.now();
       const current = await this.#incidents(guild);
-      const target = pauseUntil(now, hours);
+      const capped = Math.min(pauseUntil(now, hours), notAfter);
+      const target = capped > now + MINUTE ? capped : 0;
       const curInv = future(current?.invitesDisabledUntil, now);
       const curDms = future(current?.dmsDisabledUntil, now);
-      const nextInv = invites ? Math.max(curInv ?? 0, target) : curInv;
-      const nextDms = dms ? Math.max(curDms ?? 0, target) : curDms;
+      const nextInv = invites && target ? Math.max(curInv ?? 0, target) : curInv;
+      const nextDms = dms && target ? Math.max(curDms ?? 0, target) : curDms;
+      // Riposte de vague sans rien à prolonger (plafond de la série atteint) : aucun appel.
+      if (Number.isFinite(notAfter) && nextInv === curInv && nextDms === curDms) return { invitesDisabledUntil: curInv, dmsDisabledUntil: curDms, previous: { invites: curInv, dms: curDms } };
       const data = await this.#put(guild, nextInv, nextDms);
       logger.info(`Incident ${guild.id} : invitations ${nextInv ? 'suspendues' : 'actives'}, MP ${nextDms ? 'suspendus' : 'actifs'}${actorId ? ` (par ${actorId})` : ''}${reason ? ` — ${reason}` : ''}.`);
       return {
@@ -197,13 +204,16 @@ class RaidResponseService {
     const now = this.now();
     const last = this.waves.get(guild.id);
     if (last && now - last.at < WAVE_COOLDOWN_MS) return { text: last.text };
+    // Série : elle se poursuit tant que la pause de la riposte précédente court (plafond since + 24 h).
+    const since = last && last.until > now ? last.since : now;
     // Réservé AVANT l'appel : deux vagues simultanées ne font qu'une pause.
-    const entry = { at: now, text: 'Suspension en cours…' };
+    const entry = { at: now, since, until: last?.until ?? 0, text: 'Suspension en cours…' };
     this.waves.delete(guild.id);
     this.waves.set(guild.id, entry);
     while (this.waves.size > MAX_TRACKED) this.waves.delete(this.waves.keys().next().value);
     try {
-      const res = await this.pause(guild, { invites: Boolean(cfg.invites), dms: Boolean(cfg.dms), hours: cfg.hours, reason: `vague de ${count} arrivées` });
+      const res = await this.pause(guild, { invites: Boolean(cfg.invites), dms: Boolean(cfg.dms), hours: cfg.hours, reason: `vague de ${count} arrivées`, notAfter: since + MAX_PAUSE_MS });
+      entry.until = Math.max(res.invitesDisabledUntil ?? 0, res.dmsDisabledUntil ?? 0);
       entry.text = describeState(res, this.now());
     } catch (err) {
       entry.text = `⚠️ Suspension impossible : ${translateError(err).message}`;

@@ -339,7 +339,7 @@ function rankedMember(w, guild, client, roleIds = []) {
   };
 }
 
-test('blrank : applyRoles saute les ajouts (skipped) et garde les retraits ; guildMemberUpdate retire le rôle gagné ; 4ᵉ retrait en 10 min → carte, aucun retrait', async () => {
+test('blrank : applyRoles saute les ajouts (skipped) et garde les retraits ; guildMemberUpdate retire le rôle gagné ; autre bot : 4ᵉ retrait en 10 min → carte, aucun retrait ; humain : toujours retiré', async () => {
   const { svc, repo, guild, client, titles, w } = world();
   const free = rankedMember(w, guild, client);
   const out0 = await applyRoles(free, { add: ['r1'] });
@@ -358,7 +358,10 @@ test('blrank : applyRoles saute les ajouts (skipped) et garde les retraits ; gui
     nm.roles.cache.set('100000000000000041', { id: '100000000000000041', managed: true, editable: true });
     return nm;
   };
-  w.auditEntries = [{ targetId: TARGET, executorId: MOD, createdTimestamp: Date.now(), changes: [{ key: '$add', new: [{ id: R }] }] }];
+  // Rôle rendu par un AUTRE bot : plafond « boucle » (3 retraits par 10 min).
+  const OTHER_BOT = '100000000000000018';
+  client.users = { cache: new Map([[OTHER_BOT, { id: OTHER_BOT, bot: true }], [MOD, { id: MOD, bot: false }]]) };
+  w.auditEntries = [{ targetId: TARGET, executorId: OTHER_BOT, createdTimestamp: Date.now(), changes: [{ key: '$add', new: [{ id: R }] }] }];
   for (let i = 0; i < 3; i += 1) {
     const nm = gainedMember();
     await svc.handleMemberUpdate(oldMember, nm);
@@ -366,7 +369,7 @@ test('blrank : applyRoles saute les ajouts (skipped) et garde les retraits ; gui
     w.now += MINUTE;
   }
   assert.equal(titles().filter((t) => t === 'Rôle retiré (blrank)').length, 3);
-  assert.match(JSON.stringify(json(w.logs.at(-1)[2]).fields), new RegExp(MOD), 'auteur non nommé');
+  assert.match(JSON.stringify(json(w.logs.at(-1)[2]).fields), new RegExp(OTHER_BOT), 'auteur non nommé');
   const fourth = gainedMember();
   await svc.handleMemberUpdate(oldMember, fourth);
   assert.deepEqual(fourth.removed, [], '4ᵉ retrait en 10 min');
@@ -379,10 +382,36 @@ test('blrank : applyRoles saute les ajouts (skipped) et garde les retraits ; gui
   const later = gainedMember();
   await svc.handleMemberUpdate(oldMember, later);
   assert.deepEqual(later.removed, [R]);
-  // Ancien membre partiel ou membre libre : rien.
+  // Rôle donné par un humain (ou par ce bot) : toujours retiré, hors plafond (revue 7, S36).
+  w.auditEntries = [{ targetId: TARGET, executorId: MOD, createdTimestamp: Date.now(), changes: [{ key: '$add', new: [{ id: R }] }] }];
+  for (let i = 0; i < 5; i += 1) {
+    const nm = gainedMember();
+    await svc.handleMemberUpdate(oldMember, nm);
+    assert.deepEqual(nm.removed, [R], `ajout humain n° ${i + 1} laissé`);
+  }
+  w.auditEntries = [{ targetId: TARGET, executorId: BOT, createdTimestamp: Date.now(), changes: [{ key: '$add', new: [{ id: R }] }] }];
+  const byBot = gainedMember();
+  await svc.handleMemberUpdate(oldMember, byBot);
+  assert.deepEqual(byBot.removed, [R], 'ajout de ce bot laissé');
+  // Rôle restrictif (Muted) : jamais retiré (revue 7, S35).
+  const MUTED = '100000000000000042';
+  guild.roles.cache.set(MUTED, { id: MUTED, name: 'Muted' });
+  client.services.config.update(G, { moderation: { mutedRoleId: MUTED } });
+  const muted = rankedMember(w, guild, client, ['r0']);
+  muted.roles.cache.set(MUTED, { id: MUTED, managed: false, editable: true });
+  await svc.handleMemberUpdate(oldMember, muted);
+  assert.deepEqual(muted.removed, [], 'rôle Muted retiré par le blrank');
+  assert.deepEqual([...svc.restrictiveRoleIds(guild)], [MUTED]);
+  // Ancien membre partiel : rôle ajouté récemment (journal d'audit) retiré, rôle déjà porté gardé (S37).
+  w.auditEntries = [{ targetId: TARGET, executorId: MOD, createdTimestamp: Date.now(), changes: [{ key: '$add', new: [{ id: R }] }] }];
   const partial = gainedMember();
   await svc.handleMemberUpdate({ partial: true }, partial);
-  assert.deepEqual(partial.removed, []);
+  assert.deepEqual(partial.removed, [R]);
+  // … sans ajout récent dans le journal : rien.
+  w.auditEntries = [{ targetId: TARGET, executorId: MOD, createdTimestamp: Date.now() - 60_000, changes: [{ key: '$add', new: [{ id: R }] }] }];
+  const stale = gainedMember();
+  await svc.handleMemberUpdate({ partial: true }, stale);
+  assert.deepEqual(stale.removed, []);
   assert.equal(svc.isRankBlocked(G, TARGET2), false);
   svc.removeRank(G, TARGET);
   assert.throws(() => svc.removeRank(G, TARGET), /pas dans le blrank/);
