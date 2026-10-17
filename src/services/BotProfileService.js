@@ -3,7 +3,7 @@
 const { PermissionFlagsBits } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { UserError } = require('../core/errors');
-const { fetchDiscordImage } = require('../utils/discordCdn');
+const { fetchDiscordImage, IMAGE_TYPES, MAX_IMAGE_BYTES } = require('../utils/discordCdn');
 const { effectivePresence, startPresenceRotation, validActivity } = require('../utils/presence');
 const { nameViolation, impersonationWord } = require('../utils/automod/names');
 const { findBadWord } = require('../utils/automod/words');
@@ -143,6 +143,18 @@ function validateUsername(input) {
   if (length < MIN_USERNAME || length > MAX_USERNAME) throw new UserError(`Le nom du bot fait de ${MIN_USERNAME} à ${MAX_USERNAME} caractères.`);
   if (/discord|```|[@#:]|^(everyone|here)$/i.test(name)) throw new UserError('Discord refuse ce nom (« discord », @, #, :, ``` , everyone et here sont interdits).');
   return name;
+}
+
+/**
+ * Pièce jointe image acceptable AVANT tout téléchargement : type annoncé (PNG, JPEG, GIF, WebP)
+ * et taille (8 Mo au plus). Le contenu réel est revérifié au téléchargement. Lève une UserError. Pur.
+ */
+function assertImageAttachment(attachment, label = 'Image') {
+  if (!attachment) throw new UserError(`${label} : joignez une image (PNG, JPEG, GIF ou WebP).`);
+  const type = String(attachment.contentType ?? '').split(';')[0].trim().toLowerCase();
+  if (!Object.values(IMAGE_TYPES).includes(type === 'image/jpg' ? 'image/jpeg' : type)) throw new UserError(`${label} refusée : PNG, JPEG, GIF ou WebP uniquement.`);
+  const size = Number(attachment.size);
+  if (size > MAX_IMAGE_BYTES) throw new UserError(`${label} trop lourde (${(size / 1024 / 1024).toFixed(1)} Mo) : ${MAX_IMAGE_BYTES / 1024 / 1024} Mo au plus.`);
 }
 
 /**
@@ -301,6 +313,7 @@ module.exports = {
   validateBio,
   validateUsername,
   translateProfileError,
+  assertImageAttachment,
   NAMED_COLORS,
   PRESENCE_KEY,
   MAX_NICK,

@@ -7,7 +7,7 @@ const { safeName } = require('../../utils/safeText');
 const { formatDuration } = require('../../utils/time');
 const { UserError } = require('../../core/errors');
 const { BOT_ACTIVITY_TYPES, TYPE_LABELS, STATUS_LABELS, MAX_TEXT, parseStreamUrl, cleanActivityText } = require('../../utils/presence');
-const { IMAGE_TYPES, MAX_IMAGE_BYTES } = require('../../utils/discordCdn');
+const { assertImageAttachment } = require('../../services/BotProfileService');
 const { createLogger } = require('../../core/logger');
 
 const logger = createLogger('bot-console');
@@ -58,14 +58,6 @@ function isOwnerContext(interaction, client) {
   } catch {
     return false;
   }
-}
-
-/** Pièce jointe image acceptable AVANT tout téléchargement (type annoncé, taille). Lève une UserError. */
-function assertImageAttachment(attachment) {
-  if (!attachment) throw new UserError('Joignez une image (PNG, JPEG, GIF ou WebP).');
-  const type = String(attachment.contentType ?? '').split(';')[0].trim().toLowerCase();
-  if (!Object.values(IMAGE_TYPES).includes(type === 'image/jpg' ? 'image/jpeg' : type)) throw new UserError('Image refusée : PNG, JPEG, GIF ou WebP uniquement.');
-  if (Number(attachment.size) > MAX_IMAGE_BYTES) throw new UserError(`Image trop lourde (${(Number(attachment.size) / 1024 / 1024).toFixed(1)} Mo) : ${MAX_IMAGE_BYTES / 1024 / 1024} Mo au plus.`);
 }
 
 /** Libellé lisible de l'activité affichée. */
