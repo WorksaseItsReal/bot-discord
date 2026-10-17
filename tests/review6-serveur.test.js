@@ -243,3 +243,52 @@ test('R92 : heures de pointe de la vue publique sans les salons privés (la gest
   const all = payloadText(statistiques.render(client, guild, { view: 'heures', period: 7, now: NOON, reader: statistiques.makeReader(guild, true) }));
   assert.match(all, /📨[^\n]*\*\*115\*\*/, `heures (gestion) : ${all.match(/📨[^\n]*/)?.[0]}`);
 });
+
+/* ------------------------------------------------------------------ */
+/* R95 : erreur passagère ≠ suppression définitive                      */
+/* ------------------------------------------------------------------ */
+
+const { ProjectRepository } = require('../src/database/repositories/ProjectRepository');
+const { ProjectService } = require('../src/services/ProjectService');
+const { TempVoiceRepository } = require('../src/database/repositories/TempVoiceRepository');
+const { TempVoiceService } = require('../src/services/TempVoiceService');
+
+const outage = async () => {
+  throw Object.assign(new Error('503 Service Unavailable'), { status: 503 });
+};
+const unknown = (code) => async () => {
+  throw Object.assign(new Error(`Unknown ${code}`), { code, status: 404 });
+};
+
+test('R95 : vocal temporaire : un 503 au démarrage ne fait pas oublier le salon ; 10003 oui', async () => {
+  const G = '100000000000000001';
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  const tempVoice = new TempVoiceRepository(db);
+  tempVoice.create('400000000000000099', G, '500000000000000001');
+  const tv = new TempVoiceService({ tempVoice, config });
+  const guild = { id: G, channels: { fetch: outage } };
+  const res = await tv.cleanup({ guilds: { cache: new Collection([[G, guild]]) } });
+  assert.ok(tempVoice.get('400000000000000099'), 'ligne supprimée après une erreur passagère');
+  assert.equal(res.dropped, 0);
+  guild.channels.fetch = unknown(10003);
+  const res2 = await tv.cleanup({ guilds: { cache: new Collection([[G, guild]]) } });
+  assert.equal(res2.dropped, 1);
+  assert.ok(!tempVoice.get('400000000000000099'));
+});
+
+test('R95 : fiche de projet : un 503 ne fait pas oublier la publication ; message inconnu (10008) oui', async () => {
+  const G = '100000000000000001';
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  const projects = new ProjectRepository(db);
+  const client = { channels: { fetch: outage } };
+  const svc = new ProjectService({ client, projects, config });
+  const p = projects.create({ guildId: G, ownerId: '500000000000000001', name: 'Site' });
+  projects.update(p.id, { channelId: '400000000000000001', messageId: '600000000000000001' });
+  await assert.rejects(svc.refreshPublished(p.id));
+  assert.equal(projects.get(p.id).messageId, '600000000000000001', 'publication oubliée après une erreur passagère');
+  client.channels.fetch = async () => ({ guild: { id: G }, messages: { fetch: unknown(10008) } });
+  await svc.refreshPublished(p.id);
+  assert.equal(projects.get(p.id).messageId, null);
+});

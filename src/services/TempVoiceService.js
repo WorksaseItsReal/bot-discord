@@ -501,7 +501,15 @@ class TempVoiceService {
         // Serveur indisponible (panne) ou quitté : on ne touche à rien, il peut revenir.
         continue;
       }
-      const channel = await guild.channels.fetch(record.channel_id).catch(() => null);
+      // Seul « salon inconnu » (10003) prouve la suppression : une erreur passagère (503, délai,
+      // limite de débit) laisse la ligne pour le prochain démarrage (jamais de vocal orphelin).
+      let channel;
+      try {
+        channel = await guild.channels.fetch(record.channel_id);
+      } catch (err) {
+        if (!isUnknownChannel(err)) continue;
+        channel = null;
+      }
       if (!channel) {
         this.tempVoice.delete(record.channel_id);
         this.renames.delete(record.channel_id);
