@@ -195,3 +195,42 @@ test('R43 : petites capitales « ᴀ », caractères de format invisibles et hom
   // Pas de faux positif : textes ordinaires, emojis composés et écritures non latines intacts.
   for (const t of ['quel connaisseur', 'cours de conduite', 'Ձեր անունը', '👨‍👩‍👧 famille', 'ελληνικά']) assert.equal(findBadWord(t, words), null, t);
 });
+
+// ---------------------------------------------------------------- R45 : listes blanches
+
+test('R45 : longue liste de domaines autorisés — analyse d\'un message rempli de liens rapide, résultat inchangé', () => {
+  const { AutoModService } = require('../src/services/AutoModService');
+  const { hostMatches } = require('../src/utils/automod/links');
+  const { isOfficial } = require('../src/utils/automod/phishing');
+  const svc = new AutoModService({ config: {}, logging: {}, moderation: {} });
+  const allowedDomains = Array.from({ length: 20000 }, (_, i) => `site${i}.com`);
+  const filters = { antiLink: { enabled: true, allowedDomains }, antiPhishing: { enabled: true, threshold: 3 }, antiHacked: { enabled: true, scamScore: 5 } };
+  const content = Array.from({ length: 400 }, (_, i) => `a${i}.ru`).join(' ').slice(0, 4000);
+  const message = { id: 'm1', guild: { id: 'g' }, author: { id: 'u', createdTimestamp: 0 }, channel: { id: 'c' }, content };
+  svc.inspect(message, filters, { temporal: false });
+  let best = Infinity;
+  for (let i = 0; i < 2; i++) {
+    const t0 = performance.now();
+    assert.equal(svc.inspect(message, filters, { temporal: false })?.filter, 'antiLink');
+    best = Math.min(best, performance.now() - t0);
+  }
+  assert.ok(best < 50, `inspect avec 20 000 domaines autorisés : ${best.toFixed(0)} ms`);
+  // Sémantique inchangée : égalité ou sous-domaine, jamais un suffixe trompeur.
+  assert.equal(hostMatches('cdn.site42.com', allowedDomains), true);
+  assert.equal(hostMatches('site42.com', allowedDomains), true);
+  assert.equal(hostMatches('site42.com.evil.ru', allowedDomains), false);
+  assert.equal(hostMatches('xsite42.com', allowedDomains), false);
+  assert.equal(hostMatches('youtu.be', ['https://www.youtu.be/']), true);
+  assert.equal(isOfficial('cdn.discordapp.com'), true);
+  assert.equal(isOfficial('discordapp.com.evil.ru'), false);
+  assert.equal(isOfficial('a.site7.com', allowedDomains), true);
+});
+
+test('R45 : extraction des liens bornée sur un texte piégé (étiquettes « 0«««…0 »)', () => {
+  const label = `0${'«'.repeat(58)}0`;
+  const evil = Array.from({ length: 70 }, () => label).join('.').slice(0, 4000);
+  extractLinks(evil);
+  const t0 = performance.now();
+  assert.deepEqual(extractLinks(evil), []);
+  assert.ok(performance.now() - t0 < 20, `extractLinks : ${(performance.now() - t0).toFixed(0)} ms`);
+});

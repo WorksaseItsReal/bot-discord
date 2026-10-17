@@ -20,8 +20,12 @@ const TLDS = new Set(
     .split(/\s+/),
 );
 
-/** URL avec protocole, ou domaine nu (www.x.y, x.tld/chemin). */
-const URL_RE = /(?<![\p{L}\p{N}@.])(?:(https?):\/\/)?((?:[a-z0-9¡-￿](?:[a-z0-9¡-￿-]{0,61}[a-z0-9¡-￿])?\.)+(xn--[a-z0-9-]{2,59}|[a-z¡-￿]{2,24}))(?::\d{2,5})?(\/[^\s<>()]*)?/giu;
+/**
+ * URL avec protocole, ou domaine nu (www.x.y, x.tld/chemin). Jamais commencée au milieu d'une
+ * étiquette (lettre, chiffre ou caractère non ASCII juste avant) : la correspondance la plus à
+ * gauche est la même, et un texte piégé n'est plus réessayé à chaque position.
+ */
+const URL_RE = /(?<![\p{L}\p{N}@.¡-￿])(?:(https?):\/\/)?((?:[a-z0-9¡-￿](?:[a-z0-9¡-￿-]{0,61}[a-z0-9¡-￿])?\.)+(xn--[a-z0-9-]{2,59}|[a-z¡-￿]{2,24}))(?::\d{2,5})?(\/[^\s<>()]*)?/giu;
 
 /**
  * Texte lu comme le navigateur (UTS 46) : pleine chasse ramenée à l'ASCII, « ． 。 ｡ » et
@@ -95,12 +99,30 @@ function extractLinks(text) {
   return out;
 }
 
-/** Domaine autorisé si égal à une entrée ou sous-domaine de celle-ci. */
+/** Domaines nettoyés d'une liste, en ensemble (mis en cache par référence de tableau : la configuration l'est aussi). */
+const domainSets = new WeakMap();
+function domainSet(domains) {
+  let set = domainSets.get(domains);
+  if (!set) {
+    set = new Set(domains.map((d) => String(d).toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/.*$/, '')).filter(Boolean));
+    domainSets.set(domains, set);
+  }
+  return set;
+}
+
+/**
+ * Domaine autorisé si égal à une entrée ou sous-domaine de celle-ci. Coût proportionnel au
+ * nombre de niveaux de l'hôte, pas à la longueur de la liste.
+ */
 function hostMatches(host, domains = []) {
-  return domains.some((d) => {
-    const clean = String(d).toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/.*$/, '');
-    return clean && (host === clean || host.endsWith(`.${clean}`));
-  });
+  if (!host || !Array.isArray(domains) || !domains.length) return false;
+  const set = domainSet(domains);
+  for (let h = host; ;) {
+    if (set.has(h)) return true;
+    const dot = h.indexOf('.');
+    if (dot < 0) return false;
+    h = h.slice(dot + 1);
+  }
 }
 
 /** Invitations Discord, y compris « discord . gg / code » et « discord(app).com/invite/ ». */

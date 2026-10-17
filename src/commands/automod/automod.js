@@ -824,9 +824,9 @@ function filterModal(cfg, key) {
 }
 
 const LIST_META = {
-  words: { title: 'Mots interdits', example: 'con, arnaque*, insulte' },
-  domains: { title: 'Domaines autorisés', example: 'youtube.com, twitch.tv' },
-  invites: { title: 'Invitations autorisées', example: 'discord.gg/partenaire' },
+  words: { title: 'Mots interdits', example: 'con, arnaque*, insulte', max: 1000, unit: 'mots' },
+  domains: { title: 'Domaines autorisés', example: 'youtube.com, twitch.tv', max: 500, unit: 'domaines' },
+  invites: { title: 'Invitations autorisées', example: 'discord.gg/partenaire', max: 500, unit: 'invitations' },
 };
 
 function listModal(kind) {
@@ -1280,7 +1280,10 @@ module.exports = {
       for (const v of remove.map(clean).filter(Boolean)) {
         if (set.delete(v)) removed += 1;
       }
-      if (kind === 'words' && set.size > 1000) throw new UserError('La liste est limitée à 1000 mots.');
+      // Plafond (taille de la configuration, coût de l'analyse) ; une liste déjà plus longue
+      // (ancienne configuration) peut toujours être réduite.
+      const { max, unit } = LIST_META[kind];
+      if (set.size > max && set.size > (current?.length ?? 0)) throw new UserError(`La liste est limitée à ${max} ${unit}.`);
       const list = [...set];
       const patch = kind === 'words'
         ? { badWords: added ? { words: list, enabled: true } : { words: list } } // un ajout active le filtre
@@ -1483,6 +1486,7 @@ module.exports = {
         if (!extractLinks(logMessageContent(interaction.message) ?? '').some((l) => l.host === domain)) throw new UserError('Ce domaine ne figure pas dans le message.');
         const list = cfg.filters?.antiLink?.allowedDomains ?? [];
         if (list.includes(domain)) throw new UserError(`${code(domain)} est déjà autorisé.`);
+        if (list.length >= LIST_META.domains.max) throw new UserError(`La liste est limitée à ${LIST_META.domains.max} domaines : retirez-en un (section Listes).`);
         client.services.config.update(interaction.guildId, { automod: { filters: { antiLink: { allowedDomains: [...list, domain] } } } });
         label = `Autorisé : ${domain}`;
       } else {

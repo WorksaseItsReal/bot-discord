@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractLinks } = require('./links');
+const { extractLinks, hostMatches } = require('./links');
 const { canonical, leet } = require('./normalize');
 
 /**
@@ -54,8 +54,10 @@ const SHORTENERS = ['bit.ly', 'tinyurl.com', 'cutt.ly', 'is.gd', 'rb.gy', 'short
 const BAIT = /\b(?:free\s*nitro|nitro\s*(?:free|gratuit|gift|for\s*free)|gratuit|free|gift|cadeau|giveaway|airdrop|claim|r[ée]clame[rz]?|gagn[ée]|won|steam\s*gift|crypto|nft|robux)\b|\d+\s*(?:usd|\$|€)(?!\w)/i;
 const URGENCY = /\b(?:first\s+\d+|premiers?\s+\d+|limited|limit[ée]e?|hurry|d[ée]p[êe]che[sz]?-?(?:toi|vous)|only\s*today|aujourd'?hui\s*seulement|expire[sd]?|before\s*it'?s\s*gone)\b/i;
 
+const OFFICIAL_AND_LEGIT = [...OFFICIAL, ...KNOWN_LEGIT];
+
 function isOfficial(host, extraAllowed = []) {
-  return [...OFFICIAL, ...KNOWN_LEGIT, ...extraAllowed].some((d) => host === d || host.endsWith(`.${d}`));
+  return hostMatches(host, OFFICIAL_AND_LEGIT) || hostMatches(host, extraAllowed);
 }
 
 /** Ramène une partie de domaine à sa forme « lue » : homoglyphes, leet, rn→m, cl→d, vv→w. */

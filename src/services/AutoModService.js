@@ -69,8 +69,8 @@ const BUILTIN_ALLOWED_HOSTS = ['discord.gg', 'discord.com', 'discordapp.com', 'd
 
 /** Liens non autorisés (hors liste blanche du serveur et hôtes Discord/Tenor). Pur. */
 function blockedLinks(links, antiLink = {}) {
-  const allowed = [...BUILTIN_ALLOWED_HOSTS, ...(antiLink.allowedDomains ?? [])];
-  return links.filter((l) => !hostMatches(l.host, allowed));
+  // Deux listes distinctes (jamais recopiées) : celle du serveur reste en cache d'un message à l'autre.
+  return links.filter((l) => !hostMatches(l.host, BUILTIN_ALLOWED_HOSTS) && !hostMatches(l.host, antiLink.allowedDomains ?? []));
 }
 
 /** Invitations non autorisées (hors liste blanche et invitation personnalisée du serveur). Pur. */

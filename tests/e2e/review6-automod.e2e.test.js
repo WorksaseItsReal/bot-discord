@@ -220,3 +220,35 @@ test('R44 : message publié via une application installée par le membre — ana
     await h.close();
   }
 });
+
+test('R45 : listes de domaines et d\'invitations autorisés plafonnées (retraits toujours possibles)', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const openList = async (kind) => {
+      const home = await h.slash('automod');
+      const lists = await h.click(h.messagesOf(home)[0], 'cmd:automod:nav', { values: ['lists'] });
+      return h.click(h.messagesOf(lists)[0], `cmd:automod:list:${kind}`);
+    };
+    const filters = () => h.client.services.config.get(h.guild.id).automod.filters;
+    h.configure({ automod: { filters: { antiLink: { allowedDomains: Array.from({ length: 499 }, (_, i) => `site${i}.com`) } } } });
+    let rec = await h.submitModal(await openList('domains'), { add: 'nouveau1.com\nnouveau2.com', remove: '' });
+    assert.equal(h.isError(rec), true, 'liste de domaines non plafonnée');
+    assert.match(h.replyText(rec), /500/);
+    assert.equal(filters().antiLink.allowedDomains.length, 499);
+    rec = await h.submitModal(await openList('domains'), { add: 'nouveau1.com', remove: '' });
+    assert.equal(h.isError(rec), false);
+    assert.equal(filters().antiLink.allowedDomains.length, 500);
+
+    // Liste déjà trop longue (ancienne configuration) : un retrait reste possible.
+    h.configure({ automod: { filters: { antiInvite: { allowedCodes: Array.from({ length: 600 }, (_, i) => `code${i}`) } } } });
+    rec = await h.submitModal(await openList('invites'), { add: 'encore', remove: '' });
+    assert.equal(h.isError(rec), true, 'liste d\'invitations non plafonnée');
+    rec = await h.submitModal(await openList('invites'), { add: '', remove: 'code1' });
+    assert.equal(h.isError(rec), false, 'retrait refusé sur une liste trop longue');
+    assert.equal(filters().antiInvite.allowedCodes.length, 599);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
