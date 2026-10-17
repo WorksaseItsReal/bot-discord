@@ -9,10 +9,11 @@ const {
   ChannelSelectMenuBuilder,
   RoleSelectMenuBuilder,
 } = require('discord.js');
-const { card, field, wide, ICONS, actionButton, buttonRows, ButtonStyle, subtext } = require('../../utils/ui');
+const { card, field, wide, ICONS, actionButton, buttonRows, ButtonStyle, subtext, userLine } = require('../../utils/ui');
 const { truncate, progressBar } = require('../../utils/embeds');
 const { LOG_CATEGORIES, CATEGORY_KEYS, LAYOUTS } = require('../../utils/logCatalog');
 const { planChannels } = require('../../services/LogSetupService');
+const { logCard, canAttach } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { UserError } = require('../../core/errors');
 
@@ -27,12 +28,89 @@ const STATUS = {
   missing: ['❌', 'Salon introuvable'],
   noperm: ['🔒', 'Je ne peux pas y écrire'],
   paused: ['⏸️', 'En pause'],
+  announcement: ['📢', 'Salon d\'annonces refusé'],
 };
 const TEXT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+/**
+ * Salons de logs : textuels uniquement. Les messages d'un salon d'annonces peuvent être publiés
+ * (automatiquement, par un bot) vers tous les serveurs abonnés : jamais de logs dedans.
+ */
+const LOG_TYPES = [ChannelType.GuildText];
+/** États qui empêchent les logs d'arriver (à corriger). */
+const BROKEN = new Set(['missing', 'noperm', 'announcement']);
 const MAX_IGNORED = 25;
+/**
+ * Salon de logs créé il y a moins de 10 min : le supprimer ne détruit (presque) aucun historique,
+ * il n'est pas signalé à l'AntiRaid (créer puis retirer aussitôt les salons ne sanctionne personne).
+ */
+const FRESH_CHANNEL_MS = 10 * 60_000;
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
 const full = (client, guildId) => client.services.config.get(guildId);
+
+/**
+ * Création, réparation, rôle staff : le bot crée des salons et pose des permissions en son nom.
+ * Comme /channel et /lock, il faut donc aussi « Gérer les salons » et « Gérer les rôles ».
+ */
+function manageGuard(interaction) {
+  guard(interaction);
+  requirePermission(interaction, 'ManageChannels');
+  requirePermission(interaction, 'ManageRoles');
+}
+
+/** Suppression des salons de logs (et de tout leur historique) : Administrateur ou propriétaire. */
+function removeGuard(interaction) {
+  guard(interaction);
+  if (interaction.guild?.ownerId === interaction.user.id) return;
+  requirePermission(interaction, 'Administrator');
+}
+
+/** Rôles donnés automatiquement par le bot (arrivée, vérification, niveaux, vocal, boost…). */
+function automaticRoles(cfg) {
+  const ids = [
+    ...(cfg.welcome?.autoRoles?.humans ?? []),
+    ...(cfg.welcome?.autoRoles?.bots ?? []),
+    cfg.welcome?.verification?.roleId,
+    ...(cfg.levels?.rewards ?? []).map((r) => r?.roleId),
+    cfg.birthdays?.roleId,
+    cfg.stats?.inactivity?.roleId,
+    cfg.automations?.voiceRole?.roleId,
+    ...(cfg.automations?.voiceRole?.channels ?? []).map((l) => l?.roleId),
+    cfg.automations?.boost?.roleId,
+    cfg.moderation?.mutedRoleId,
+  ];
+  return new Set(ids.filter(Boolean));
+}
+
+/**
+ * Rôle staff (lecture des salons de logs) : jamais @everyone, un rôle géré ou donné
+ * automatiquement, ni un rôle au niveau de l'auteur ou au-dessus (sauf propriétaire). Comme
+ * dans Discord, on ne peut ouvrir que ce que l'on voit soi-même : sans « Administrateur »,
+ * l'auteur doit lire les salons de logs existants.
+ */
+function assertStaffRole(interaction, client, id) {
+  const guild = interaction.guild;
+  if (!/^\d{17,20}$/.test(id) || id === guild.id) throw new UserError('Choisissez un rôle staff (pas @everyone).');
+  const role = guild.roles.cache.get(id);
+  if (!role) throw new UserError('Ce rôle est introuvable : il a peut-être été supprimé.');
+  if (role.managed) throw new UserError(`${role} est géré par une intégration (bot, Boost…) : choisissez un rôle de votre équipe.`);
+  const cfg = full(client, guild.id);
+  if (automaticRoles(cfg).has(id)) {
+    throw new UserError(`${role} est donné automatiquement (arrivée, vérification, niveaux, vocal…) : tous ceux qui le reçoivent liraient les logs. Choisissez un rôle de votre équipe.`);
+  }
+  const owner = guild.ownerId === interaction.user.id;
+  if (owner) return;
+  const member = interaction.member;
+  if (!member?.roles?.highest || role.comparePositionTo(member.roles.highest) >= 0) {
+    throw new UserError(`${role} est au niveau de votre rôle le plus haut ou au-dessus : choisissez un rôle placé en dessous.`);
+  }
+  if (interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return;
+  const existing = [cfg.logs?.categoryId, ...(cfg.logs?.createdChannels ?? [])].map((cid) => cid && guild.channels.cache.get(cid)).filter(Boolean);
+  const read = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
+  if (existing.some((ch) => !ch.permissionsFor?.(member)?.has(read))) {
+    throw new UserError('Vous ne voyez pas les salons de logs actuels : vous ne pouvez pas en ouvrir la lecture à un rôle. Demandez à un administrateur.');
+  }
+}
 
 /** État d'une catégorie : pause > salon. */
 function categoryState(client, guild, key) {
@@ -54,9 +132,9 @@ function repairable(client, guild) {
   });
 }
 
-/** Le salon est-il visible par @everyone (et non créé par le bot) ? */
+/** Le salon est-il visible par @everyone (salons créés par le bot compris : leurs permissions ont pu changer) ? */
 function isPublic(guild, cfg, channelId) {
-  if (!channelId || cfg.logs?.createdChannels?.includes(channelId)) return false;
+  if (!channelId) return false;
   const channel = guild.channels?.cache?.get(channelId);
   const everyone = guild.roles?.everyone;
   if (!channel?.permissionsFor || !everyone) return false;
@@ -99,14 +177,14 @@ function homeView(client, guild, notice) {
   const on = cfg.logs?.enabled !== false;
   const states = CATEGORY_KEYS.map((k) => [k, categoryState(client, guild, k)]);
   const active = states.filter(([, s]) => s === 'ok').length;
-  const problems = states.filter(([, s]) => s === 'missing' || s === 'noperm').length;
+  const problems = states.filter(([, s]) => BROKEN.has(s)).length;
   const lines = states.map(([k, s]) => {
     const meta = LOG_CATEGORIES[k];
     const [dot, label] = STATUS[s];
     const channel = cfg.logChannels?.[k] ? `<#${cfg.logChannels[k]}>` : '—';
     const events = enabledEvents(cfg, k).length;
     const total = Object.keys(meta.events).length;
-    return `${dot} ${meta.emoji} **${meta.label}** · ${s === 'unset' ? label : channel}${s === 'missing' || s === 'noperm' || s === 'paused' ? ` · *${label}*` : ''} · ${events}/${total} évén.`;
+    return `${dot} ${meta.emoji} **${meta.label}** · ${s === 'unset' ? label : channel}${BROKEN.has(s) || s === 'paused' ? ` · *${label}*` : ''} · ${events}/${total} évén.`;
   });
   return {
     embeds: [
@@ -119,7 +197,7 @@ function homeView(client, guild, notice) {
           notice ? `${notice}\n` : null,
           on ? '🟢 Les logs sont **actifs**.' : '🔴 Les logs sont **en pause** sur tout le serveur.',
           `\`${progressBar(active / CATEGORY_KEYS.length, 14)}\` **${active}** / ${CATEGORY_KEYS.length} catégories actives`,
-          problems ? `${ICONS.warning} **${problems}** catégorie(s) à réparer (salon supprimé ou permission manquante).` : null,
+          problems ? `${ICONS.warning} **${problems}** catégorie(s) à réparer (salon supprimé, permission manquante ou salon d'annonces).` : null,
           '',
           ...lines,
         ],
@@ -161,7 +239,7 @@ function categoryView(client, guild, key, notice) {
   const channelMenu = new ChannelSelectMenuBuilder()
     .setCustomId(`cmd:logs:channel:${key}`)
     .setPlaceholder('Choisir le salon de cette catégorie…')
-    .setChannelTypes(...TEXT_TYPES)
+    .setChannelTypes(...LOG_TYPES)
     .setMinValues(0)
     .setMaxValues(1);
   if (channelId && guild.channels?.cache?.has(channelId)) channelMenu.setDefaultChannels(channelId);
@@ -171,11 +249,12 @@ function categoryView(client, guild, key, notice) {
     missing: 'Le salon a été supprimé : choisissez-en un autre ou utilisez la création automatique.',
     noperm: 'Donnez-moi **Voir le salon**, **Envoyer des messages** et **Intégrer des liens** dans ce salon.',
     unset: 'Choisissez un salon ci-dessous pour activer cette catégorie.',
+    announcement: 'Ce salon est un salon d\'annonces : ses messages peuvent être publiés vers d\'autres serveurs, je n\'y envoie donc aucun log. Choisissez un salon textuel.',
   };
   return {
     embeds: [
       card({
-        tone: state === 'ok' ? 'success' : state === 'missing' || state === 'noperm' ? 'warning' : 'neutral',
+        tone: state === 'ok' ? 'success' : BROKEN.has(state) ? 'warning' : 'neutral',
         section: { emoji: '📋', label: 'Logs' },
         icon: meta.emoji,
         title: `Logs · ${meta.label}`,
@@ -184,6 +263,9 @@ function categoryView(client, guild, key, notice) {
           meta.description,
           hints[state] ? `\n${ICONS.info} ${hints[state]}` : null,
           isPublic(guild, cfg, channelId) ? `\n${ICONS.warning} **Ce salon est visible par @everyone** : les logs (messages supprimés, IP de raid, etc.) seront publics.` : null,
+          key === 'messages' && state === 'ok' && !canAttach(guild.channels.cache.get(channelId))
+            ? `\n${ICONS.warning} Il me manque **Joindre des fichiers** dans ce salon : les transcriptions des purges ne seront pas jointes.`
+            : null,
         ],
         fields: [
           field(ICONS.status, 'État', `${dot} ${label}`),
@@ -224,6 +306,9 @@ function setupView(client, guild, notice) {
   const plan = planChannels(layoutKey, selected);
   const staff = cfg.logs?.staffRoleId && guild.roles?.cache?.has(cfg.logs.staffRoleId) ? cfg.logs.staffRoleId : null;
   const existing = cfg.logs?.categoryId && guild.channels?.cache?.get(cfg.logs.categoryId);
+  // Rôle staff posé sur les salons existants, différent de celui choisi : appliqué au prochain « Créer ».
+  const applied = cfg.logs?.appliedStaffRoleId ?? null;
+  const pending = existing && applied && applied !== staff;
 
   const roleMenu = new RoleSelectMenuBuilder().setCustomId('cmd:logs:staff').setPlaceholder('Rôle staff qui pourra lire les logs (optionnel)').setMinValues(0).setMaxValues(1);
   if (staff) roleMenu.setDefaultRoles(staff);
@@ -242,6 +327,7 @@ function setupView(client, guild, notice) {
           '2. Choisissez le **rôle staff** qui pourra lire (sans écrire).',
           '3. Cliquez sur **Créer les salons**.',
           existing ? `\n${ICONS.info} Une catégorie de logs existe déjà (${existing}) : elle sera complétée, rien ne sera dupliqué.` : null,
+          pending ? `\n${ICONS.warning} Le rôle staff a changé : <@&${applied}> garde l'accès aux salons de logs jusqu'à ce que vous cliquiez sur **Créer les salons**.` : null,
         ],
         fields: [
           field(LAYOUTS[layoutKey].emoji, 'Disposition', LAYOUTS[layoutKey].label),
@@ -294,7 +380,7 @@ function confirmRemoveView(client, guild) {
           `Les **${channels.length}** salon(s) créés par le bot et leur historique seront **définitivement supprimés** :`,
           channels.map((id) => `<#${id}>`).join(' ') || '*Aucun salon trouvé.*',
           '',
-          subtext('Les salons que vous avez choisis vous-même ne sont pas touchés.'),
+          subtext('Les salons que vous avez choisis vous-même ne sont pas touchés. Chaque salon supprimé (sauf s\'il vient d\'être créé) compte comme une suppression de salon pour l\'AntiRaid.'),
         ],
       }),
     ],
@@ -361,6 +447,7 @@ async function sendTest(client, guild, key, actor) {
   const cfg = full(client, guild.id);
   const channel = cfg.logChannels?.[key] ? guild.channels.cache.get(cfg.logChannels[key]) : null;
   if (!channel) return cfg.logChannels?.[key] ? 'missing' : 'unset';
+  if (channel.type === ChannelType.GuildAnnouncement) return 'announcement';
   const meta = LOG_CATEGORIES[key];
   try {
     await channel.send({
@@ -412,7 +499,8 @@ module.exports = {
     },
     /** cmd:logs:go:<vue> */
     async go(interaction, client, [view]) {
-      guard(interaction);
+      if (view === 'confirmRemove') removeGuard(interaction);
+      else guard(interaction);
       await interaction.update(render(client, interaction.guild, view ?? 'home'));
     },
     /** cmd:logs:toggle:<on|off> — interrupteur global (valeur cible). */
@@ -430,7 +518,10 @@ module.exports = {
       if (id) {
         if (!/^\d{17,20}$/.test(id)) throw new UserError('Salon invalide.');
         const ch = interaction.guild.channels.cache.get(id);
-        if (!ch || !TEXT_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel du serveur.');
+        if (ch?.type === ChannelType.GuildAnnouncement) {
+          throw new UserError('Les salons d\'annonces ne sont pas acceptés : leurs messages peuvent être publiés vers d\'autres serveurs. Choisissez un salon textuel.');
+        }
+        if (!ch || !LOG_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel du serveur.');
       }
       client.services.config.update(interaction.guildId, { logChannels: { [key]: id } });
       const status = client.services.logging.channelStatus(interaction.guild, id);
@@ -491,15 +582,15 @@ module.exports = {
     },
     /** Rôle staff (lecture des salons créés). */
     async staff(interaction, client) {
-      guard(interaction);
+      manageGuard(interaction);
       const id = interaction.values?.[0] ?? null;
-      if (id && (!/^\d{17,20}$/.test(id) || id === interaction.guildId)) throw new UserError('Choisissez un rôle staff (pas @everyone).');
+      if (id) assertStaffRole(interaction, client, id);
       client.services.config.update(interaction.guildId, { logs: { staffRoleId: id } });
       await interaction.update(setupView(client, interaction.guild));
     },
     /** Création des salons. */
     async create(interaction, client) {
-      guard(interaction);
+      manageGuard(interaction);
       const cfg = full(client, interaction.guildId).logs;
       await interaction.deferUpdate();
       const result = await client.services.logSetup.create(interaction.guild, {
@@ -517,7 +608,7 @@ module.exports = {
     },
     /** Réparation : recrée les salons supprimés et rétablit les permissions des salons du bot. */
     async repair(interaction, client) {
-      guard(interaction);
+      manageGuard(interaction);
       const cfg = full(client, interaction.guildId).logs;
       const categories = repairable(client, interaction.guild);
       if (!categories.length) {
@@ -531,15 +622,41 @@ module.exports = {
         staffRoleId: cfg.staffRoleId,
         reason: `Salons de logs réparés par ${interaction.user.tag}`,
       });
-      const notice = `🛠️ **${categories.length}** catégorie(s) réparée(s)${result.created.length ? ` · ${result.created.length} salon(s) recréé(s)` : ''}.`;
+      // État relu après coup : une permission que je n'ai pas pu corriger n'est pas « réparée ».
+      const still = categories.filter((k) => BROKEN.has(categoryState(client, interaction.guild, k)));
+      const fixed = categories.length - still.length;
+      const notice = [
+        fixed ? `🛠️ **${fixed}** catégorie(s) réparée(s)${result.created.length ? ` · ${result.created.length} salon(s) recréé(s)` : ''}.` : null,
+        still.length
+          ? `${ICONS.error} Échec pour ${still.map((k) => `**${LOG_CATEGORIES[k].label}**`).join(', ')} : je ne peux pas corriger les permissions de ce salon (il me faut **Voir le salon** et **Gérer les rôles** dedans). Rétablissez-les à la main, ou supprimez le salon pour que je le recrée.`
+          : null,
+      ].filter(Boolean).join('\n');
       await interaction.editReply(render(client, interaction.guild, 'home', notice));
     },
     /** Suppression (après confirmation) des salons créés par le bot. */
     async remove(interaction, client) {
-      guard(interaction);
+      removeGuard(interaction);
       await interaction.deferUpdate();
-      const n = await client.services.logSetup.remove(interaction.guild, `Salons de logs supprimés par ${interaction.user.tag}`);
-      await interaction.editReply(render(client, interaction.guild, 'setup', `${ICONS.success} ${n} salon(s) de logs supprimé(s).`));
+      const guild = interaction.guild;
+      // Suppressions signées par le bot dans le journal d'audit : l'AUTEUR est signalé à l'AntiRaid
+      // après chaque salon supprimé, comme /channel supprimer (sauf salon tout juste créé).
+      const onDeleted = (channel) => {
+        if (Date.now() - (channel.createdTimestamp ?? 0) < FRESH_CHANNEL_MS) return null;
+        return client.services.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+      };
+      const n = await client.services.logSetup.remove(guild, `Salons de logs supprimés par ${interaction.user.tag}`, { onDeleted });
+      await interaction.editReply(render(client, guild, 'setup', `${ICONS.success} ${n} salon(s) de logs supprimé(s).`));
+      if (!n) return;
+      // Trace dans un salon de logs qui a survécu (les salons supprimés sont déjà débranchés).
+      await client.services.logging.send(guild.id, 'channels', logCard({
+        category: 'channels',
+        tone: 'danger',
+        icon: ICONS.delete,
+        title: 'Salons de logs supprimés',
+        description: `${interaction.user} a supprimé **${n}** salon(s) de logs créés par le bot, avec tout leur historique (/logs).`,
+        user: interaction.user,
+        fields: [field(ICONS.moderator, 'Par', userLine(interaction.user)), field(ICONS.count, 'Salons supprimés', `${n}`)],
+      }), undefined, { event: 'channelDelete' });
     },
     /** Salons ignorés (remplace la liste). */
     async ignore(interaction, client) {

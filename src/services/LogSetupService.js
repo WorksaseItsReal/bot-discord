@@ -8,6 +8,16 @@ const { createLogger } = require('../core/logger');
 
 const logger = createLogger('logs');
 const CATEGORY_NAME = '📋 Logs';
+/**
+ * Attente maximale d'un changement de sujet : Discord n'en autorise que 2 par 10 min et par salon,
+ * au-delà la requête attendrait jusqu'à 10 min (création bloquée, interaction expirée).
+ */
+const TOPIC_TIMEOUT_MS = 5_000;
+
+/** Sujet d'un salon de logs d'après TOUTES les catégories qu'il reçoit. Pur. */
+function topicOf(categories) {
+  return `Logs : ${CATEGORY_KEYS.filter((c) => categories.includes(c)).map((c) => LOG_CATEGORIES[c].label).join(', ')}. Salon géré par le bot.`.slice(0, 1024);
+}
 
 /**
  * Plan de création (pur, testé) : salons à créer et catégories de logs de chacun.
@@ -19,7 +29,7 @@ function planChannels(layoutKey, selected) {
   return layout.groups(valid).map((g) => ({
     name: channelName(g.emoji, g.name),
     categories: g.categories,
-    topic: `Logs : ${g.categories.map((c) => LOG_CATEGORIES[c].label).join(', ')}. Salon géré par le bot.`.slice(0, 1024),
+    topic: topicOf(g.categories),
   }));
 }
 
@@ -41,7 +51,7 @@ function overwrites(guild, staffRoleId) {
     { id: me.id, allow: BOT_ALLOW.filter(has) },
   ];
   if (staffRoleId && guild.roles.cache.has(staffRoleId)) {
-    list.push({ id: staffRoleId, allow: [P.ViewChannel, P.ReadMessageHistory], deny: STAFF_DENY.filter(has) });
+    list.push({ id: staffRoleId, allow: [P.ViewChannel, P.ReadMessageHistory].filter(has), deny: STAFF_DENY.filter(has) });
   }
   return list;
 }
@@ -65,6 +75,19 @@ class LogSetupService {
     this.config = config;
     /** Serveurs avec une création/suppression en cours (double clic). */
     this.busy = new Set();
+    this.topicTimeoutMs = TOPIC_TIMEOUT_MS;
+  }
+
+  /** Change le sujet seulement s'il diffère, sans attendre plus de `topicTimeoutMs` (limite de Discord). */
+  async #setTopic(channel, topic, reason) {
+    if (channel.topic === topic) return;
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(resolve, this.topicTimeoutMs);
+      timer.unref?.();
+    });
+    await Promise.race([Promise.resolve(channel.setTopic(topic, reason)).catch(() => {}), timeout]);
+    clearTimeout(timer);
   }
 
   assertCanCreate(guild) {
@@ -107,12 +130,27 @@ class LogSetupService {
     const perms = overwrites(guild, staffRoleId);
     const auditReason = reason ?? 'Création automatique des salons de logs';
     const known = new Set(cfg.createdChannels ?? []);
+    // Rôle staff réellement posé (null : aucun ou inconnu, anciennes versions) et rôle posé cette fois.
+    const staffNow = perms.some((o) => o.id === staffRoleId) ? staffRoleId : null;
+    const staffBefore = cfg.appliedStaffRoleId ?? null;
     // Chaque étape est enregistrée AUSSITÔT : un échec en cours de route ne laisse
     // aucun salon « orphelin », et une nouvelle tentative les réutilise.
     const remember = (patch) => this.config.update(guild.id, patch);
 
     let category = cfg.categoryId ? guild.channels.cache.get(cfg.categoryId) : null;
     if (category && category.type !== ChannelType.GuildCategory) category = null;
+    // Rôle staff changé ou retiré : l'ancien perd l'accès à TOUS les salons du bot (et à la
+    // catégorie), le nouveau l'obtient partout, même hors du plan (réparation partielle).
+    if (staffBefore !== staffNow) {
+      const staffEntry = perms.filter((o) => o.id === staffNow);
+      const owned = [category, ...[...known].map((id) => guild.channels.cache.get(id))].filter(Boolean);
+      for (const channel of owned) {
+        if (staffBefore && channel.permissionOverwrites?.cache?.has(staffBefore)) {
+          await channel.permissionOverwrites.delete(staffBefore, auditReason).catch(() => {});
+        }
+        await mergeOverwrites(channel, staffEntry, auditReason);
+      }
+    }
     if (category) {
       await mergeOverwrites(category, perms, auditReason);
     } else {
@@ -130,7 +168,9 @@ class LogSetupService {
       );
       if (channel) {
         if (channel.parentId !== category.id) await channel.setParent(category.id, { lockPermissions: false, reason: auditReason }).catch(() => {});
-        await channel.setTopic(item.topic, auditReason).catch(() => {});
+        // Sujet : toutes les catégories du salon (pas seulement celles de ce plan, ex. une réparation).
+        const mapped = Object.entries(this.config.get(guild.id).logChannels ?? {}).filter(([, id]) => id === channel.id).map(([k]) => k);
+        await this.#setTopic(channel, topicOf([...item.categories, ...mapped]), auditReason);
         await mergeOverwrites(channel, perms, auditReason);
         reused.push(channel);
       } else {
@@ -174,6 +214,7 @@ class LogSetupService {
         categoryId: category.id,
         createdChannels: [...known],
         staffRoleId: staffRoleId ?? null,
+        appliedStaffRoleId: staffNow,
         disabledCategories: (cfg.disabledCategories ?? []).filter((c) => !mapping[c]),
       },
     });
@@ -183,28 +224,44 @@ class LogSetupService {
 
   /**
    * Supprime les salons (et la catégorie) créés par le bot et débranche les logs concernés.
-   * @returns {Promise<number>} nombre de salons supprimés
+   * @param {{ onDeleted?: (channel: object) => unknown }} [opts] onDeleted : appelé après CHAQUE
+   *   salon supprimé (signalement AntiRaid de l'auteur), sans jamais interrompre la suppression.
+   * @returns {Promise<number>} nombre de salons supprimés (hors catégorie)
    */
-  async remove(guild, reason = 'Suppression des salons de logs') {
+  async remove(guild, reason = 'Suppression des salons de logs', { onDeleted } = {}) {
     return this.#exclusive(guild.id, async () => {
       this.assertCanCreate(guild);
       const full = this.config.get(guild.id);
       const ids = new Set(full.logs.createdChannels ?? []);
       let removed = 0;
       const failed = [];
+      const notify = async (channel) => {
+        try {
+          await onDeleted?.(channel);
+        } catch (err) {
+          logger.debug('Signalement d\'un salon de logs supprimé :', err?.message);
+        }
+      };
       for (const id of ids) {
         const channel = guild.channels.cache.get(id);
         if (!channel) continue; // déjà supprimé
         const ok = await channel.delete(reason).then(() => true, () => false);
-        if (ok) removed += 1;
-        else failed.push(id);
+        if (!ok) {
+          failed.push(id);
+          continue;
+        }
+        removed += 1;
+        await notify(channel);
       }
       // La catégorie n'est supprimée que si elle est vide (vos propres salons restent intacts).
       let categoryId = full.logs.categoryId;
       const category = categoryId ? guild.channels.cache.get(categoryId) : null;
       if (!category) categoryId = null;
       else if (!guild.channels.cache.some((c) => c.parentId === category.id)) {
-        if (await category.delete(reason).then(() => true, () => false)) categoryId = null;
+        if (await category.delete(reason).then(() => true, () => false)) {
+          categoryId = null;
+          await notify(category);
+        }
       }
       const gone = new Set([...ids].filter((id) => !failed.includes(id)));
       const unplug = Object.fromEntries(Object.entries(full.logChannels ?? {}).filter(([, id]) => gone.has(id)).map(([k]) => [k, null]));

@@ -3,7 +3,7 @@
 const { AttachmentBuilder, GuildVerificationLevel } = require('discord.js');
 const { truncate } = require('../utils/embeds');
 const { field, wide, ICONS, userLine, code } = require('../utils/ui');
-const { logCard } = require('../services/LoggingService');
+const { logCard, truncateContent, PRIVATE_CONTENT } = require('../services/LoggingService');
 const { discordTimestamp } = require('../utils/time');
 const { boostChange } = require('../services/AutomationService');
 
@@ -49,14 +49,16 @@ module.exports = [
     name: 'messageDeleteBulk',
     async execute(client, messages, channel) {
       if (!channel?.guild) return;
-      // Purge faite par le bot (quarantaine AutoMod…) : déjà journalisée par celui-ci.
-      if (client.services.logging.allSuppressed?.(messages.keys())) return;
+      // Purge faite par le bot (quarantaine AutoMod…) : déjà journalisée par celui-ci, sauf si les
+      // logs AutoMod ne partent pas (en pause, désactivés, débranchés) : journalisée ici.
+      const automodLogged = client.services.logging.wouldLog?.(channel.guild.id, 'automod', { event: 'automod', channelId: channel.id }) !== false;
+      if (automodLogged && client.services.logging.allSuppressed?.(messages.keys())) return;
       const list = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
       const authors = new Set(list.map((m) => m.author?.id).filter(Boolean));
       const preview = list
         .filter((m) => m.content)
         .slice(-10)
-        .map((m) => `**${m.author?.username ?? '?'}** : ${truncate(m.content.replace(/\n/g, ' '), 90)}`);
+        .map((m) => `**${m.author?.username ?? '?'}** : ${truncateContent(m.content.replace(/\n/g, ' '), 90)}`);
       const ctx = {
         event: 'messageBulkDelete',
         channelId: channel.id,
@@ -64,8 +66,11 @@ module.exports = [
         categoryId: channel.parent?.parentId ?? null,
       };
       if (!client.services.logging.wouldLog(channel.guild.id, 'messages', ctx)) return;
+      // Salon (ou fil) privé que certains lecteurs des logs ne voient pas : ni aperçu ni transcription.
+      const hidden = client.services.logging.hidesContent?.(channel.guild.id, 'messages', channel) ?? false;
+      if (hidden) preview.length = 0;
       // Transcription complète des messages en cache, jointe au log.
-      const transcript = list
+      const transcript = hidden ? '' : list
         .map((m) => `[${new Date(m.createdTimestamp).toISOString().replace('T', ' ').slice(0, 19)}] ${m.author?.tag ?? 'inconnu'} : ${m.content || '(sans texte)'}${m.attachments?.size ? ` [${m.attachments.size} pièce(s) jointe(s)]` : ''}`)
         .join('\n');
       ctx.files = transcript ? [new AttachmentBuilder(Buffer.from(transcript, 'utf8'), { name: `purge-${channel.id}-${Date.now()}.txt` })] : [];
@@ -80,8 +85,9 @@ module.exports = [
           field(ICONS.channel, 'Salon', `${channel}`),
           field(ICONS.count, 'Messages', `${messages.size}`),
           field(ICONS.members, 'Auteurs', `${authors.size}`),
-          preview.length ? wide(ICONS.list, 'Derniers messages en cache', truncate(preview.join('\n'), 1024)) : null,
+          preview.length ? wide(ICONS.list, 'Derniers messages en cache', truncateContent(preview.join('\n'), 1024)) : null,
           transcript ? wide('📄', 'Transcription', 'Fichier joint (messages encore en cache).') : null,
+          hidden ? wide('📄', 'Contenu', `${PRIVATE_CONTENT}\nAucune transcription jointe.`) : null,
         ],
       }), undefined, ctx);
     },
@@ -90,6 +96,8 @@ module.exports = [
     name: 'threadCreate',
     async execute(client, thread, newlyCreated) {
       if (!newlyCreated || !thread.guild) return;
+      // Fil d'un salon privé, ou fil privé, que certains lecteurs des logs ne voient pas : nom masqué.
+      const hidden = client.services.logging.hidesContent?.(thread.guild.id, 'channels', thread) ?? false;
       await send(client, thread.guild.id, 'channels', logCard({
         category: 'channels',
         tone: 'success',
@@ -98,7 +106,7 @@ module.exports = [
         description: `Nouveau fil ${thread} dans ${thread.parent ?? 'un salon'}.`,
         id: thread.id,
         fields: [
-          field('🧵', 'Fil', `${thread} · ${code(thread.name)}`),
+          field('🧵', 'Fil', hidden ? `${thread} · *nom masqué (fil privé)*` : `${thread} · ${code(thread.name)}`),
           field(ICONS.channel, 'Salon parent', thread.parent ? `${thread.parent}` : '—'),
           field(ICONS.user, 'Créé par', thread.ownerId ? `<@${thread.ownerId}>` : '—'),
         ],
@@ -109,12 +117,13 @@ module.exports = [
     name: 'threadDelete',
     async execute(client, thread) {
       if (!thread.guild) return;
+      const hidden = client.services.logging.hidesContent?.(thread.guild.id, 'channels', thread) ?? false;
       await send(client, thread.guild.id, 'channels', logCard({
         category: 'channels',
         tone: 'danger',
         icon: '🧵',
         title: 'Fil supprimé',
-        description: `Le fil **${truncate(thread.name, 100)}** a été supprimé.`,
+        description: hidden ? 'Un fil privé a été supprimé (nom masqué).' : `Le fil **${truncate(thread.name, 100)}** a été supprimé.`,
         id: thread.id,
         fields: [field(ICONS.channel, 'Salon parent', thread.parent ? `${thread.parent}` : '—'), field(ICONS.date, 'Créé', thread.createdTimestamp ? discordTimestamp(thread.createdTimestamp, 'R') : '—')],
       }), 'threadDelete');
