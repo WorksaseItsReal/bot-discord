@@ -186,3 +186,37 @@ test('R62 ModMail : archive impossible → conversation fermée, salon conservé
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R63
+
+test('R63 ModMail : accès perdu à un salon encore en cache → conversation fermée, nouvelle conversation, MP transmis', async () => {
+  const h = await createHarness({ botAdministrator: false });
+  try {
+    h.configureAll();
+    await h.userMessage({ as: 'target', channel: 'dm', content: 'Bonjour, j\'ai un souci' });
+    const first = [...h.fake.channels.values()].find((c) => c.name?.startsWith('modmail-'));
+    const oldThread = h.client.repositories.modmail.getByChannel(first.id);
+    // Un admin retire la surcharge du bot (synchronisation avec la catégorie…) : salon toujours en cache.
+    const updated = { ...first, permission_overwrites: first.permission_overwrites.filter((o) => o.id !== IDS.users.bot) };
+    h.fake.channels.set(first.id, updated);
+    h.fake.dispatchNow('CHANNEL_UPDATE', updated);
+    await h.settle();
+    assert.ok(h.client.channels.cache.has(first.id));
+
+    const dm = h.dmChannel('target');
+    const mark = h.fake.messageLog.length;
+    await h.userMessage({ as: 'target', channel: 'dm', content: 'Message après la perte d\'accès' });
+    await h.settle();
+    const replies = messagesIn(h, dm.id, mark).filter((m) => m.author.id === h.client.user.id);
+    assert.ok(!replies.some((m) => /non transmis/i.test(embedText(m))), `MP refusé : ${replies.map(embedText).join(' | ')}`);
+    const thread = h.client.repositories.modmail.getOpenByUser(IDS.users.target);
+    assert.ok(thread && thread.channel_id !== first.id, 'conversation toujours rattachée au salon inaccessible');
+    assert.equal(h.client.repositories.modmail.getByChannel(first.id).status, 'closed');
+    const relayed = messagesIn(h, thread.channel_id).map(embedText).join('\n');
+    assert.match(relayed, /Message après la perte d'accès/);
+    assert.match(relayed, new RegExp(`#${oldThread.id}`), 'le staff n\'est pas prévenu de la conversation précédente');
+    assert.ok(h.warnLogs().some((l) => /accès perdu/i.test(l)));
+  } finally {
+    await h.close();
+  }
+});

@@ -154,13 +154,20 @@ class ModmailService {
     }
   }
 
-  async #relay(message) {
+  /**
+   * @param {import('discord.js').Message} message
+   * @param {{ lost?: object|null }} [opts] lost : conversation précédente dont le salon est devenu
+   *   inaccessible au bot (signalée au staff dans la nouvelle conversation)
+   */
+  async #relay(message, { lost = null } = {}) {
     const userId = message.author.id;
     let guild = null;
     let channel = null;
+    /** Conversation précédente devenue inaccessible (signalée dans la carte d'ouverture). */
+    let previous = lost;
 
     // Conversation déjà ouverte : on la réutilise (si son salon existe encore).
-    const thread = this.modmail.getOpenByUser(userId);
+    const thread = lost ? null : this.modmail.getOpenByUser(userId);
     if (thread) {
       guild = this.client.guilds.cache.get(thread.guild_id) ?? null;
       channel = guild ? guild.channels.cache?.get?.(thread.channel_id) ?? (await guild.channels.fetch(thread.channel_id).catch(() => null)) : null;
@@ -175,6 +182,7 @@ class ModmailService {
             throw new Error(`Salon ModMail ${thread.channel_id} momentanément inaccessible (conversation #${thread.id}).`);
           }
           logger.warn(`ModMail : accès perdu au salon ${thread.channel_id} (conversation #${thread.id}), nouvelle conversation.`);
+          previous = thread;
         }
         this.modmail.close(thread.channel_id);
         guild = null;
@@ -228,7 +236,7 @@ class ModmailService {
         content: staffRoleId ? `<@&${staffRoleId}>` : undefined,
         // Le client n'autorise que les mentions d'utilisateurs par défaut : le rôle staff doit être explicite.
         allowedMentions: { roles: staffRoleId && staffRoleId !== guild.id ? [staffRoleId] : [] },
-        embeds: [this.#openingCard(message.author, member)],
+        embeds: [this.#openingCard(message.author, member, previous)],
         components: this.controls(),
       });
 
@@ -253,12 +261,22 @@ class ModmailService {
         .catch(() => {});
     }
 
-    await channel.send({ embeds: [this.#incomingCard(message)] });
+    try {
+      await channel.send({ embeds: [this.#incomingCard(message)] });
+    } catch (err) {
+      // Salon encore en cache mais devenu inaccessible au bot (surcharge retirée, Envoyer refusé) :
+      // sans issue, chaque MP échouerait indéfiniment. On ferme cette conversation et on en ouvre
+      // une nouvelle, où le staff est prévenu (une seule fois : jamais en boucle).
+      if (!thread || lost || (err?.code !== 50001 && err?.code !== 50013)) throw err;
+      logger.warn(`ModMail : accès perdu au salon ${thread.channel_id} (conversation #${thread.id}), nouvelle conversation.`);
+      this.modmail.close(thread.channel_id);
+      return this.#relay(message, { lost: thread });
+    }
     await message.react(ICONS.mail).catch(() => {});
   }
 
   /** Carte d'ouverture côté staff : qui écrit, depuis quand il est là. */
-  #openingCard(user, member) {
+  #openingCard(user, member, lost = null) {
     return card({
       tone: 'brand',
       section: 'tickets',
@@ -272,6 +290,9 @@ class ModmailService {
         field('📥', 'Arrivée', member?.joinedTimestamp ? discordTimestamp(member.joinedTimestamp, 'R') : '*Inconnue*'),
         field(ICONS.role, 'Rôle principal', member && member.roles?.highest && member.roles.highest.id !== member.guild?.id ? `${member.roles.highest}` : '—'),
         field(ICONS.status, 'Statut', '🟢 Ouverte'),
+        lost
+          ? wide(ICONS.warning, 'Conversation précédente', `La conversation #${lost.id} (<#${lost.channel_id}>) m'est devenue inaccessible : elle a été fermée sans archive.`)
+          : null,
         wide(ICONS.help, 'Répondre', 'Bouton **✉️ Répondre** ou `/modmail reply`. Fermez avec **🔒 Fermer** ou `/modmail close`.'),
       ],
       thumbnail: user.displayAvatarURL?.({ size: 256 }) ?? null,
