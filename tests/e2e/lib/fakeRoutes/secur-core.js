@@ -2,7 +2,8 @@
 
 /**
  * Routes simulées de Secur (SEC1) :
- *  - GET / PATCH / DELETE /webhooks/:id (audit 51 modification, 52 suppression) ;
+ *  - GET / PATCH / DELETE /webhooks/:id (audit 51 modification, 52 suppression) et DELETE
+ *    /webhooks/:id/:token (suppression avec le jeton, sans permission) ;
  *  (l'entrée d'audit 50 de POST /channels/:id/webhooks est posée par le cœur de fakeDiscord) ;
  *  - POST /guilds/:g/prune (audit 21, options.members_removed) : expulse les membres sans rôle.
  * Les entrées d'audit sont signées par l'acteur courant (fake.perform) ou par le bot.
@@ -30,11 +31,22 @@ module.exports = (fake, route, { error, audit }) => {
     return h;
   });
 
-  route('DELETE', '/webhooks/:id', function (p, call) {
-    const h = hook(p.id, call);
+  const remove = function (h, call) {
     this.webhooks.delete(h.id);
     audit(52, h.id, call, [{ key: 'name', old_value: h.name }, { key: 'channel_id', old_value: h.channel_id }, { key: 'type', old_value: h.type }]);
     this.dispatch('WEBHOOKS_UPDATE', { guild_id: this.guildId, channel_id: h.channel_id });
+  };
+
+  route('DELETE', '/webhooks/:id', function (p, call) {
+    remove.call(this, hook(p.id, call), call);
+  });
+
+  // Suppression avec le jeton (Webhook#delete d'un webhook relu avec son jeton) : aucune permission
+  // requise, comme Discord ; un jeton faux → 10015.
+  route('DELETE', '/webhooks/:id/:token', function (p, call) {
+    const h = hook(p.id, call);
+    if (h.token !== p.token) throw error(call, 404, 10015, 'Unknown Webhook');
+    remove.call(this, h, call);
   });
 
   route('POST', '/guilds/:guild/prune', function (p, call) {
