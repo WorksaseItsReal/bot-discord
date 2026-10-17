@@ -3,6 +3,192 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 Ce projet suit un versionnage sémantique.
 
+## [0.7.0] — Non publié — Sécurité type CrowBot, revue n° 6 et n° 7
+
+> Après la mise à jour : relancez `npm run deploy` (nouvelles commandes `/secur`, `/permissions`, sous-commandes
+> ajoutées ; `/bot` part sur `OWNER_GUILD_ID`), puis donnez au rôle du bot **Gérer les webhooks** et
+> **Mentionner @everyone** (ou réinvitez-le avec le lien de `/invite`). Secur est entièrement coupé par défaut.
+
+### Added
+- **Secur, anti-nuke à modules** (`/secur`, Administrateur ; migration #28). 20 modules, tous coupés par défaut :
+  - salons : création, suppression, modification (permissions et surcharges comprises), suppression de fils, webhooks ;
+  - rôles : création, suppression, modification, rôles sensibles attribués, rôles retirés en masse ;
+  - serveur : paramètres du serveur (images comprises, au mieux), emojis et autocollants ;
+  - membres : bannissements, débannissements, expulsions (prune compris), ajout de bots (l'inviteur est jugé),
+    déconnexions vocales, exclusions temporaires ;
+  - messages : mentions @everyone, purges de messages (20 messages au moins).
+- **Moteur de Secur** : chaque entrée du journal d'audit est comptée sur une fenêtre glissante calculée sur son
+  horodatage (un rejeu tardif ne déclenche rien) ; un incident = une sanction et une carte ; sanction au choix
+  (aucune, retrait des rôles, expulsion, bannissement), avec repli sur le retrait des rôles si l'expulsion ou le bannissement échoue ;
+  annulation par une file à priorités (500 tâches par serveur) protégée par un disjoncteur par objet ; salons et
+  rôles supprimés recréés depuis des instantanés (catégorie, permissions, membres, configuration et base rebranchées) ;
+  boutons « Rendre les rôles », « Débannir » et « Expulser ce bot » sur la carte d'incident.
+- **Préréglages et panneau** : `/secur on|max|off` (exposition affichée d'abord, « Appliquer » bloqué tant qu'un bot
+  aux permissions dangereuses n'est pas exempté), `/secur module`, `/secur statut` et `/secur panneau` (modules,
+  owners et bots de confiance, accès et alertes, exposition, simulation, journal des incidents, accès en attente).
+- **Hiérarchie de sécurité** : propriétaire › owners de sécurité (`/secur owner ajouter|retirer|liste`, nommés par
+  le propriétaire seul, 25 au plus) › bots de confiance (`/secur confiance ajouter|retirer|liste`, 25 au plus) ›
+  whitelist. Verrou (réserve `/whitelist add|remove` et les réglages de `/antiraid` aux owners), raid ping (aussi sur
+  l'alerte de vague d'arrivées de l'AntiRaid), MP plafonnés au propriétaire et aux owners, politique « bot auteur ».
+  Un rôle whitelisté donné par un non-owner reste **en attente** jusqu'à la décision d'un owner (carte Approuver /
+  Révoquer).
+- **Liste noire et blrank** (migration #30) : `/secur blacklist ajouter|retirer|liste|info` (banni même absent, rebanni
+  après tout débannissement, à son retour et au contrôle toutes les 6 h ; `/unban`, `/softban`, le bouton « Débannir »
+  et la fin d'un tempban refusés pour lui) et `/secur blrank ajouter|retirer|liste` (plus aucun rôle reçu).
+- **Riposte native de Discord** : `/lockdown suspendre|reprendre|riposte` et `/lockdown status` étendu (invitations
+  et/ou MP entre membres suspendus par les mesures d'incident de Discord, 24 h au plus, aussi en riposte automatique
+  à une vague d'arrivées).
+- **Audit de sécurité** : `/diagnostics` › « 🛡️ Audit de sécurité » (administrateurs), 14 contrôles notés de A à E,
+  corrections en un clic confirmées et journalisées ; groupe « Secur » (permissions requises par les modules actifs).
+- **Niveaux de permissions** `/permissions panneau|commande|niveau|verifier` (Administrateur) : rôles des niveaux 1 à 3,
+  rangs propriétaire › owners › niveaux (un administrateur vaut le niveau 3) ; délégation limitée à `/embed`, `/clear`,
+  `/slowmode` et `/pseudo`, journalisée ; mode strict qui restreint les autres commandes attribuées ; cibles
+  protégées par rang ; lecture des surcharges « Intégrations ».
+- **Outils d'administration** : `/channel renouveler` (recrée un salon vide à l'identique, données du bot reportées,
+  confirmation `RENOUVELER`, retour arrière complet si la suppression échoue), `/voice rassembler` (100 membres au plus,
+  bouton « Renvoyer chacun » pendant 10 min), `/membres liste:admins|moderateurs|bots|boosters|vocal|role`.
+- **Identité et parole du bot** (migration #29) : `/embed texte` (faire parler le bot : mentions explicites,
+  `notifier_tous` avec la permission native, AutoMod, 10 envois par minute et par serveur, log), `/settings theme`
+  (couleur des cartes du serveur, couleurs de sens intactes), `/settings profil` (pseudo, avatar, bannière et bio du
+  bot sur ce serveur), console `/bot` des propriétaires (nom, avatar, bannière, activité imposée, statut, rotation,
+  serveurs, quitter un serveur, infos).
+- **Communauté** : réactions automatiques par salon (`/communaute` › Réactions automatiques), ghostping d'arrivée
+  (`/bienvenue` › Ghostping), rôle soutien (`/automatisations` › Rôle soutien : tag du serveur, ou statut personnalisé
+  avec `PRESENCE_INTENT=on`).
+- **Logs** : 11 événements (51 au total) — `/embed texte`, salons renouvelés, incidents, réglages et accès en attente
+  de Secur, liste noire, mesures d'incident, permissions déléguées modifiées et utilisées, profil du bot, corrections
+  de l'audit.
+- Migrations #26 (index des clés étrangères et de `guild_id`, placée avant la #27 livrée en 0.6.0),
+  #28 (`security_incidents`, `security_grants`), #29 (`bot_settings`, globale), #30 (`security_blacklist`).
+
+### Changed
+- **Pré-blocage des destructions via le bot** : `/ban`, `/kick`, `/unban`, `/role`, `/massrole`, `/derank`,
+  `/backup restore`, la suppression des salons de `/logs` et de `/compteurs`, l'expulsion groupée de `/activite`,
+  `/channel` (creer, supprimer, cloner, renommer, sujet, nsfw, renouveler), `/emoji supprimer`, `/voice cleanup|kick|disconnect`,
+  `/clear` (lots d'au moins 20 messages par défaut), `/annonce` et `/embed texte` avec @everyone, `/unhide` et `/unlock` (refus
+  d'@everyone que le bot n'a pas posé) sont vérifiés par Secur et l'AntiRaid **avant** l'appel à Discord : une
+  opération qui atteindrait le seuil est refusée d'emblée au lieu de sanctionner son auteur au milieu. Trois
+  tentatives refusées en 10 min valent un incident.
+- **Alertes de sécurité hors filtres** : les alertes AntiRaid et Secur arrivent dans le salon d'alerte ou les logs
+  Sécurité même si `/logs` ou la catégorie est en pause ; repli en MP au propriétaire, puis dans le salon système.
+- Un module Secur actif prend le relais du seuil AntiRaid correspondant (salons, rôles, bannissements, expulsions,
+  anti-bot) ; les seuils Bannissements et Expulsions de `/antiraid` deviennent la limite héritée des modules Secur.
+- **`/bot` est une commande de serveur** : enregistrée uniquement sur `OWNER_GUILD_ID`, jamais globale ;
+  `npm run deploy` vérifie que le bot est sur ce serveur avant le premier envoi (`--skip-owner` pour ne déployer
+  que les commandes globales) ; `/help` ne la montre qu'aux propriétaires.
+- **Nouvelles variables d'environnement** : `OWNER_GUILD_ID`, `CDN_NETWORK`, `PRESENCE_INTENT`, `SECUR_TRUST_BOT_OWNERS`.
+  Intent privilégié `GuildPresences` demandé seulement avec `PRESENCE_INTENT=on`.
+- `/invite` et `/diagnostics` : **Gérer les webhooks** et **Mentionner @everyone** ajoutées (28 permissions).
+- Un rôle de la whitelist ou d'un niveau est refusé par les menus de rôles, la boutique, les récompenses de niveau,
+  les candidatures et les attributions automatiques, même s'il y était déjà configuré.
+- `/slowmode` contrôle « Gérer les salons » sur le salon visé ; supprimer les salons de `/logs` ou de `/compteurs`
+  exige « Gérer les salons » natif, sur le serveur et dans chaque salon.
+- Couper les logs, mettre en pause la catégorie Sécurité ou changer son salon, et tout changement de `/antiraid`
+  ou de `/whitelist`, sont inscrits au journal de sécurité (critiques : alerte et MP).
+- `/compteurs` indique « présences non mises en cache » quand `PRESENCE_INTENT` est actif.
+
+### Security
+- Un niveau de `/permissions` ne permet jamais une commande qui protège une action sensible (sanction, rôles,
+  administration, webhooks, mention de masse) sans la permission Discord qu'elle déclare ; le mode strict s'applique
+  à l'action elle-même (boutons, escalade de `/warn`, expulsion de `/activite`, menus contextuels « Sanctions du
+  membre » et « Note de modération ») ; couper le mode strict exige le rang du palier le plus exigeant attribué.
+- Une commande déléguée exercée par un bouton, un menu ou un formulaire est journalisée (« Utilisations de
+  permissions déléguées »), avec la mention du composant.
+- `/activite`, `/role remove` (et le bouton Retirer) et `/pseudo` respectent les cibles protégées par rang ; un
+  pseudo posé par un membre qui n'est pas staff passe par le filtre des pseudos de l'AutoMod.
+- Une annonce @everyone que Secur n'autorise plus à l'échéance est désactivée au lieu d'être publiée.
+- Relever le seuil Bannissements ou Expulsions de `/antiraid` quand le module Secur correspondant en hérite exige le
+  niveau owner (journalisé comme critique).
+- Alerte critique, hors filtres et en MP au propriétaire, quand le bot perd « Voir les logs du serveur », « Gérer
+  les rôles », « Gérer les salons », « Bannir » ou « Expulser » alors que Secur ou l'AntiRaid protège le serveur.
+- `/channel renouveler` refuse avant la confirmation les surcharges qui accordent ou refusent une permission que le
+  bot n'a pas, ou « Gérer les permissions » sans bot Administrateur ; Secur ne recopie plus ce droit dans un salon
+  recréé sans être Administrateur.
+- Blrank : les menus de rôles refusent l'ajout ; le plafond « boucle » (3 retraits en 10 min) ne vise plus qu'un autre bot.
+- Téléchargements limités au CDN de Discord (`cdn.discordapp.com`, `media.discordapp.net`, https, revalidés à chaque
+  redirection, 8 Mo, signature d'image vérifiée, `CDN_NETWORK=off`) ; aucune chaîne n'est plus confiée à la lecture
+  d'image de discord.js (pas de lecture de fichier local).
+- `/voice` contrôle les droits de l'auteur dans le salon vocal visé (R94, couvert par un test de régression).
+
+### Fixed (revue n° 6 : 112 correctifs)
+- **Cœur et données** (14) : une fermeture définitive de la passerelle (4004, 4011, 4014) arrête le bot en code 1 et
+  `/healthz` exige des shards connectées ; un serveur quitté depuis 30 jours est purgé entièrement en une transaction
+  (rappels livrés en MP), y compris ceux quittés pendant un arrêt ; AFK et alertes des membres partis hors ligne
+  effacés ; sanctions, verrous et rôles temporaires échus pendant une absence levés au retour, levées en échec
+  vérifiées, espacées, plafonnées et signalées après 24 h ; tirages de giveaways hors du scheduler ; `/embed`
+  acquitte avant de publier ; exception synchrone d'un écouteur isolée ; composants refusés si le bot a quitté le
+  serveur ; cooldown non contournable ; arrêt borné pendant une sauvegarde et `.partial` nettoyés.
+- **Modération** (15) : lockdown étendu aux conférences et salons média, surcharges de rôle qui autorisent l'écriture
+  neutralisées puis rendues, bot sans Administrateur qui garde ses salons ; `/hide` sérialisé et appliqué aux salons
+  synchronisés d'une catégorie ; états de verrouillage purgés au départ du bot, statut lu sur Discord ; rôle Muted
+  complet (conférences, médias, fils, partage d'écran, demande de parole) et créé une seule fois ; sanction échue non
+  levée impossible à supprimer ; escalade de `/warn` sérialisée par membre ; `/derank` et `/massrole remove` closent
+  les rôles temporaires ; retirer le rôle Muted via le bot lève le mute ; menus de rôles sans permissions Create*,
+  statistiques, rôle de mute ni rôle de vérification.
+- **AntiRaid** (10) : comptes récents et bots comptés dans la vague même si leur sanction échoue, échecs signalés,
+  alertes d'arrivée regroupées ; alerte critique perdue relayée en MP au propriétaire, sinon dans le salon système ;
+  rôles gérés jamais whitelistés ; suppressions via `/channel` et `/role` toujours signalées ; « Rôles retirés »
+  honnête quand l'auteur garde des outils de nuke ; réglages et whitelist journalisés ; auteur parti banni par
+  identifiant ; bot qui supprime ses propres salons épargné ; état oublié au départ du bot ; plus de lecture d'audit
+  pour les bans externes sans log Modération.
+- **AutoMod** (14) : mots interdits composés sans gel (7 s → moins de 10 ms) ; liens lus comme le navigateur (`?@`,
+  points idéographiques, `%2e`, adresses IP, hôtes et invitations encodés) ; normalisation étendue (« ᴀ », caractères
+  de format, homoglyphes arméniens et grecs) ; messages d'applications installées par le membre et sondages
+  analysés ; listes blanches plafonnées à 500 ; quarantaine levée sans rendre les rôles échus ; AutoMod natif sans
+  doublons et retiré quand l'AutoMod est coupé ; doubles clics sans effet sur « Bannir », « Lever la quarantaine »
+  et « Faux positif ».
+- **Logs** (11) : `/logs` exige « Gérer les salons » et « Gérer les rôles » pour créer, réparer ou choisir le rôle
+  staff (rôle contrôlé), suppression réservée aux administrateurs et signalée à l'AntiRaid ; contenu des salons
+  privés masqué dans un salon de logs plus lu ; jamais de logs dans un salon d'annonces ; purge journalisée sans
+  transcription si « Joindre des fichiers » manque ; l'ancien rôle staff perd l'accès ; file d'envoi par salon,
+  sécurité prioritaire ; message supprimé par l'AutoMod journalisé si les logs AutoMod sont en pause ; spoilers
+  jamais coupés ; « Réparer » honnête ; sujet des salons réécrit seulement s'il change.
+- **Tickets, ModMail, candidatures** (14) : salon jamais supprimé sans archive, salon de transcripts public refusé ;
+  ModMail : nouvelle conversation si le salon devient inaccessible, choix du serveur, messages transférés et toutes
+  les pièces jointes relayés ; un transcript à la fois (15 s par membre) ; tickets fantômes réconciliés ; prise en
+  charge refusée pendant la fermeture et sur son propre ticket ; candidatures traitées selon les permissions du
+  serveur, entretien clos par l'équipe ; publication refusée dans un salon où l'auteur ne peut pas écrire ;
+  double clic sur « Publier » sans doublon.
+- **Communauté** (18) : starboard limité aux salons que voient tous les lecteurs du starboard ; rappels jamais publiés
+  là où l'auteur ne peut pas écrire, ni après son départ ; `/suggestion`, `/reminder`, `/sondage` et `/projet` passent
+  l'AutoMod ; « Mentionner @everyone » vérifié dans le salon des annonces ; vérification en mode retrait : arrivées
+  hors ligne verrouillées, « Me vérifier » ne lève plus un derank, un mute, un timeout ni une quarantaine ;
+  récompenses de niveau limitées à la hiérarchie de l'admin, rendues au retour, jamais sensibles ; pseudos jamais en
+  lien masqué ; codes d'invitation privés ; tirage des giveaways en O(n), reroll anti-double clic, `/giveaway create`
+  acquitté avant publication ; alertes des fils privés bornées ; ping du staff des signalements plafonné ; liens
+  masqués neutralisés dans les extraits d'alertes.
+- **Serveur** (16) : `/backup restore` associe par identifiant, signale les homonymes et relit les membres hors cache ;
+  rôle temporaire prolongé pendant son expiration conservé ; `/activite` compte les salons ignorés des logs ; rôle
+  vocal ou de boost devenu sensible retiré ; « Tout effacer » des statistiques par lots ; `/emoji renommer` acquitté,
+  `/emoji info` discret sur les autres serveurs ; `/statistiques` publique sans fils privés ; `/serverinfo` masque
+  les catégories privées ; une erreur passagère n'oublie plus un vocal temporaire ni une fiche de projet ; achat
+  refusé si le prix a changé ; `/automatisations` exige les droits de l'auteur dans les salons ajoutés ; flux
+  dédupliqués par lien ; verrous de `/jeu` propres à chaque serveur.
+
+### Fixed (revue n° 7)
+- **Secur et AntiRaid, moteur** : vague d'arrivées comptée sur l'heure d'arrivée fixée par Discord (un rejeu après
+  reconnexion n'est plus un raid) ; salons supprimés par leur créateur exemptés même après un redémarrage ; rôles
+  gérés supprimés (bot expulsé) et bots de confiance jamais sanctionnés ; un derank qui laisse un outil de nuke via
+  une surcharge passe à l'expulsion ; refus à fenêtre vide sans escalade ; un incident « alerte seule » n'est plus
+  contagieux, les actions restées sous le seuil sont reprises quand l'auteur est sanctionné ; un accès de whitelist
+  en attente ne s'active plus jamais tout seul ; le disjoncteur suspend un objet, plus le module entier ; une
+  expulsion impossible se replie sur le retrait des rôles ; les actions faites via le bot sont annulables ; file
+  pleine : la tâche la moins prioritaire est évincée ; « Débannir » refuse un blacklisté ; membres partiels relus.
+- **Secur, modules** : restauration `/backup` pendant la file d'annulation sans doublons ; transfert de propriété
+  ignoré ; mémoire des déconnexions vocales propre à chaque serveur, déplacements plus comptés ; disjoncteur fondé
+  sur l'identifiant d'origine (homonymes) ; modifications successives annulées en bits sur l'état relu, champs
+  rendus à leur valeur d'origine ; rôle recréé jamais rendu à l'auteur sanctionné ; « rôles retirés » ignoré sur
+  la cible d'un incident ouvert ; références en base d'un rôle recréé reportées (rôles temporaires, anniversaires,
+  boutique, giveaways…) ; mémoires portées à 30 min ; salon recréé dans sa catégorie.
+- **Liste noire et riposte** : le blrank ne retire plus le rôle Muted ni le rôle « non vérifié » ; un membre hors
+  cache après un redémarrage perd aussi le rôle ajouté ; une série de ripostes automatiques n'est jamais renouvelée
+  au-delà de 24 h.
+- **Divers** : le formulaire `/embed create` fonctionne en délégation ; `/channel renouveler` et la restauration
+  Secur reportent les salons bloqués des alertes de mots-clés et les règles AutoMod natives de Discord (salon exempté,
+  salon d'alerte) ; restreindre une commande de configuration (`/automod`) ne bloque plus les boutons de modération
+  qui ne dépendent pas de sa permission ; rôle soutien relu sur la liste complète des membres (cache froid) ;
+  présence imposée par `/bot` réappliquée après une reconnexion complète à la passerelle.
+
 ## [0.6.0] — Non publié — Nouvelles fonctionnalités, revue n° 4
 
 ### Added
