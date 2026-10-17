@@ -22,7 +22,11 @@ const { permissionLabel } = require('./permissionNames');
  * cours, ou composant dont le customId commence par « cmd:<commande>: »).
  */
 
-/** Symbole posé sur l'interaction par preflight quand l'accès passe par une délégation. */
+/**
+ * Symbole posé sur l'interaction quand l'accès passe par une délégation : par preflight (commande
+ * slash), ou par hasPermission / memberCanIn quand elle autorise l'action d'un composant « cmd: ».
+ * interactionCreate journalise alors l'utilisation (« permissionUse ») après l'exécution.
+ */
 const GRANT = Symbol.for('gadget.grant');
 
 /**
@@ -170,6 +174,16 @@ function grantOf(interaction) {
 }
 
 /**
+ * La délégation `grant` couvre-t-elle `bits` ? Si oui, elle vient d'autoriser l'action : mémorisée
+ * sur l'interaction (composant « cmd: ») pour le log « permissionUse » d'interactionCreate.
+ */
+function grantCovers(interaction, grant, bits) {
+  if (!grant || (grant.flags & bits) !== bits) return false;
+  if (!interaction[GRANT]) interaction[GRANT] = grant;
+  return true;
+}
+
+/**
  * L'auteur a-t-il la permission (nom de flag ou bits) ? Native, sinon par la délégation de SA
  * commande. Administrateur n'est jamais délégué.
  */
@@ -178,8 +192,7 @@ function hasPermission(interaction, flag) {
   if (bits == null || bits === 0n) return false;
   if (interaction?.memberPermissions?.has?.(bits)) return true;
   if ((bits & NEVER_DELEGATED_BITS) !== 0n) return false;
-  const grant = grantOf(interaction);
-  return Boolean(grant && (grant.flags & bits) === bits);
+  return grantCovers(interaction, grantOf(interaction), bits);
 }
 
 /**
@@ -194,8 +207,7 @@ function memberCanIn(interaction, channel, perms) {
   if (!native?.has?.(PermissionFlagsBits.ViewChannel)) return false;
   const missing = bits & ~(native?.bitfield ?? 0n);
   if ((missing & NEVER_DELEGATED_BITS) !== 0n) return false;
-  const grant = grantOf(interaction);
-  return Boolean(grant && (grant.flags & missing) === missing);
+  return grantCovers(interaction, grantOf(interaction), missing);
 }
 
 /** Message du mode strict. */

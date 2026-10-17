@@ -160,6 +160,9 @@ async function handleComponent(client, interaction) {
       throw new UserError('Je dois être membre de ce serveur pour exécuter cette action. Invitez-moi avec `/invite`.');
     }
     await handler.execute(interaction, client);
+    // Action autorisée par une délégation (/permissions, mémorisée par utils/access.js) :
+    // journalisée APRÈS la réponse, comme pour la commande slash.
+    if (interaction[GRANT]) await client.services.permissions?.logUse?.(interaction, interaction[GRANT]);
   } catch (err) {
     await reportError(client, interaction, err, `composant ${handler.id}`);
   }
