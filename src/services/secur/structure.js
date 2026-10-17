@@ -723,6 +723,26 @@ function incidentOf(ctx) {
   return null;
 }
 
+/**
+ * Incident Secur encore ouvert dont `userId` est l'auteur (moteur SEC1), ou null. Lecture seule :
+ * un incident expiré n'est jamais retiré d'ici.
+ */
+function openIncidentOf(ctx, guildId, userId) {
+  const state = ctx?.service?.open?.get?.(`${guildId}:${userId}`);
+  if (!state) return null;
+  const now = typeof ctx.service.now === 'function' ? ctx.service.now() : Date.now();
+  return now <= state.expiresAt ? state : null;
+}
+
+/**
+ * Auteur d'un incident ouvert à sanctionner (sanction visée au moins le derank) : une recréation ne
+ * doit rien lui rendre (rôle, surcharge membre), sinon elle défait sa sanction.
+ */
+function sanctionedIncidentOf(ctx, guildId, userId) {
+  const state = openIncidentOf(ctx, guildId, userId);
+  return state && S.PUNISH_ORDER.indexOf(state.target) >= S.PUNISH_ORDER.indexOf('derank') ? state : null;
+}
+
 const summaries = new WeakMap();
 /**
  * Ligne de synthèse d'un incident (une par `key`, mise à jour sur place) : les annulations
@@ -875,6 +895,8 @@ module.exports = {
   isLenient,
   takeBudget,
   incidentOf,
+  openIncidentOf,
+  sanctionedIncidentOf,
   noteSummary,
   chainChanges,
   chainMatches,

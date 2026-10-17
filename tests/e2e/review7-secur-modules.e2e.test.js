@@ -406,3 +406,32 @@ test('S11 : #staff ouvert à @everyone puis surcharge retouchée aussitôt → r
     await h.close();
   }
 });
+
+/* -------------------------------------------------------------------- */
+/* S18 : rôle recréé rendu à l'auteur de l'incident                        */
+/* -------------------------------------------------------------------- */
+
+for (const botAdministrator of [true, false]) {
+  test(`S18 (bot ${botAdministrator ? '' : 'non '}administrateur) : l'auteur dérangé qui a supprimé « Modérateur » ne le récupère pas ; « Restaurer » pourra le rendre`, async () => {
+    const h = await createHarness({ botAdministrator });
+    try {
+      h.configureAll();
+      await h.asHuman('owner').addRole('admin', IDS.roles.mod);
+      await h.settle();
+      h.configure({ secur: { modules: { roleDelete: { mode: 'on' } } } });
+      await h.asHuman('admin').deleteRole(IDS.roles.mod);
+      await settleUndo(h, 3);
+      const recreated = [...h.fake.roles.values()].find((r) => r.name === 'Modérateur');
+      assert.ok(recreated, 'précondition : rôle recréé');
+      const [inc] = incidents(h);
+      assert.equal(inc.punishment, 'derank', 'précondition : auteur dérangé');
+      assert.equal(rolesOf(h, IDS.users.admin).includes(recreated.id), false, 'rôle recréé rendu à l\'auteur dérangé');
+      assert.equal(h.guild.members.cache.get(IDS.users.admin).permissions.has(P.BanMembers), false, 'l\'auteur a récupéré Bannir');
+      assert.ok((inc.removed_roles ?? []).includes(recreated.id), 'rôle recréé absent des rôles à rendre');
+      // Les autres porteurs le récupèrent.
+      assert.ok(rolesOf(h, IDS.users.mod).includes(recreated.id), 'modérateur privé du rôle recréé');
+    } finally {
+      await h.close();
+    }
+  });
+}

@@ -104,7 +104,9 @@ async function recreate(guild, snap, ctx, store, executorId) {
     }
   }
   const mask = St.botMask(guild);
-  const overwrites = St.mapOverwrites(snap.overwrites, (id, type) => (type === 0 ? St.resolveRoleId(guild, ctx, store, id) : guild.members?.cache?.has?.(id) || guild.client?.users?.cache?.has?.(id) ? id : null), mask);
+  // Surcharges membre : jamais rendues à l'auteur d'un incident à sanctionner (sanction défaite).
+  const memberTarget = (id) => (St.sanctionedIncidentOf(ctx, guild.id, id) ? null : guild.members?.cache?.has?.(id) || guild.client?.users?.cache?.has?.(id) ? id : null);
+  const overwrites = St.mapOverwrites(snap.overwrites, (id, type) => (type === 0 ? St.resolveRoleId(guild, ctx, store, id) : memberTarget(id)), mask);
   const options = St.buildChannelCreate(snap, {
     community: Boolean(guild.features?.includes?.('COMMUNITY')),
     maximumBitrate: guild.maximumBitrate ?? 96_000,

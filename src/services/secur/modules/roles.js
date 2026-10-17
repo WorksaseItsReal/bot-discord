@@ -106,11 +106,19 @@ async function recreate(guild, snap, ctx, store) {
   ctx.idMap?.set(snap.id, role.id);
   store.setRemap(guild.id, snap.id, role.id);
 
-  // Membres (cache, 250 au plus, un par un).
+  // Membres (cache, 250 au plus, un par un). L'auteur d'un incident à sanctionner n'en reçoit
+  // rien (sa sanction serait défaite) : le rôle rejoint ceux que « Restaurer » pourra lui rendre.
   let members = 0;
+  let withheld = 0;
   for (const id of (snap.members ?? []).slice(0, St.MAX_ROLE_MEMBERS_RESTORED)) {
     const member = guild.members.cache.get(id);
     if (!member || member.roles.cache.has(role.id)) continue;
+    const incident = St.sanctionedIncidentOf(ctx, guild.id, id);
+    if (incident) {
+      incident.removedRoles = [...new Set([...(incident.removedRoles ?? []), role.id])];
+      withheld += 1;
+      continue;
+    }
     const res = await applyRoles(member, { add: [role.id] }, REASON);
     if (res.added.length) members += 1;
   }
@@ -146,7 +154,8 @@ async function recreate(guild, snap, ctx, store) {
     d.overwrites = (d.overwrites ?? 0) + overwrites;
     d.refs = (d.refs ?? 0) + configRefs;
     d.lost = (d.lost ?? 0) + (!twin && !botAdmin && St.toBig(snap.permissions) !== options.permissions ? 1 : 0);
-  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs})${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
+    d.withheld = (d.withheld ?? 0) + withheld;
+  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs})${d.withheld ? ` — ${d.withheld} attribution(s) retenue(s) pour l'auteur sanctionné` : ''}${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
   return { ok: true };
 }
 
