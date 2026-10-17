@@ -34,7 +34,7 @@ class TicketRatingRepository {
               COUNT(rating) AS rated,
               AVG(rating) AS avg_rating,
               AVG(CASE WHEN claimed_at IS NOT NULL AND opened_at IS NOT NULL AND claimed_at >= opened_at THEN claimed_at - opened_at END) AS avg_claim_ms
-         FROM ticket_ratings WHERE guild_id = ? AND closed_at >= ? AND claimed_by IS NOT NULL
+         FROM ticket_ratings WHERE guild_id = ? AND closed_at >= ? AND claimed_by IS NOT NULL AND claimed_by != user_id
         GROUP BY claimed_by
         ORDER BY tickets DESC, avg_rating DESC, claimed_by ASC
         LIMIT ?`,
@@ -43,7 +43,7 @@ class TicketRatingRepository {
     // /modstats : tickets FERMÉS pris en charge (la ligne « tickets » est supprimée à la fermeture).
     this.claimedStatsStmt = db.prepare(
       `SELECT claimed_by, COUNT(*) AS n FROM ticket_ratings
-       WHERE guild_id = @guildId AND claimed_by IS NOT NULL AND COALESCE(claimed_at, opened_at, closed_at) >= @since
+       WHERE guild_id = @guildId AND claimed_by IS NOT NULL AND claimed_by != user_id AND COALESCE(claimed_at, opened_at, closed_at) >= @since
          AND (@mod IS NULL OR claimed_by = @mod)
        GROUP BY claimed_by`,
     );
@@ -86,7 +86,10 @@ class TicketRatingRepository {
     };
   }
 
-  /** Par membre du staff ayant pris en charge : tickets, notes, délai moyen de prise en charge. */
+  /**
+   * Par membre du staff ayant pris en charge : tickets, notes, délai moyen de prise en charge
+   * (sans les tickets pris en charge par leur propre auteur : auto-notation).
+   */
   byStaff(guildId, since = 0, limit = 10) {
     return this.byStaffStmt.all(guildId, since, limit).map((r) => ({
       staffId: r.staff_id,

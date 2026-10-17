@@ -163,3 +163,22 @@ test('R71 carte de candidature : lien d\'entretien seulement si son salon existe
   assert.ok(ids(live).some((x) => /400000000000000003/.test(x ?? '')));
   assert.ok(!ids(live).includes('cmd:candidatures:interview:3'));
 });
+
+// ---------------------------------------------------------------- R73
+
+test('R73 statistiques : un ticket pris en charge par son propre auteur n\'est pas compté au staff', () => {
+  const { TicketRatingRepository } = require('../src/database/repositories/TicketRatingRepository');
+  const { db } = memoryDb();
+  const repo = new TicketRatingRepository(db);
+  const G = '100000000000000009';
+  const MOD = '500000000000000002';
+  repo.recordClosure({ ticketId: 1, guildId: G, userId: MOD, claimedBy: MOD, openedAt: 1, claimedAt: 2, closedAt: 3 });
+  repo.rate(1, MOD, 5);
+  repo.recordClosure({ ticketId: 2, guildId: G, userId: USER, claimedBy: MOD, openedAt: 1, claimedAt: 2, closedAt: 3 });
+  repo.rate(2, USER, 2);
+  const staff = repo.byStaff(G, 0);
+  assert.equal(staff.length, 1);
+  assert.equal(staff[0].tickets, 1, 'ticket auto-pris en charge compté');
+  assert.equal(staff[0].avgRating, 2, 'auto-notation comptée');
+  assert.deepEqual(repo.claimedStats(G, { since: 0 }), [{ claimed_by: MOD, n: 1 }]);
+});

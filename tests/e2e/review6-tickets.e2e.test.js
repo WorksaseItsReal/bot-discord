@@ -569,3 +569,21 @@ test('R72 prise en charge pendant les 5 s de fermeture : refusée, instantané c
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R73
+
+test('R73 un membre du staff ne prend pas en charge son propre ticket', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const { channelId, welcome } = await openTicket(h, 'mod');
+    const claim = await h.click(welcome, 'ticket:claim', { as: 'mod' });
+    assert.ok(h.isError(claim), 'prise en charge de son propre ticket acceptée');
+    assert.equal(h.client.repositories.tickets.getByChannel(channelId).claimed_by, null);
+    const other = await h.click(h.message(welcome.id), 'ticket:claim', { as: 'admin' });
+    assert.ok(!h.isError(other), h.replyText(other));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
