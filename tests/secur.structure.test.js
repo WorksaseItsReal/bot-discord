@@ -460,3 +460,32 @@ test('écouteurs : prepend sur les suppressions et channelUpdate ; rien capturé
   // Client minimal (autres tests de guildDelete) : aucune erreur.
   assert.doesNotThrow(() => by.guildDelete.execute({ services: {} }, { id: 'g1' }));
 });
+
+test('rôle géré du bot : permissions retirées → comptées d\'emblée, non annulables ; permissions données → jamais comptées', async () => {
+  const cfg = clone(defaultGuildConfig);
+  cfg.secur.modules.roleUpdate.mode = 'on';
+  const client = makeClient({ cfg });
+  const botRole = { id: 'br', name: 'Inspecteur Gadget', managed: true, tags: { botId: 'bot' }, permissions: bits(P.Administrator) };
+  const guild = makeGuild({ roles: [botRole] });
+  const lost = byKey.roleUpdate.classify({ action: 31, targetId: 'br', executorId: 'u1', changes: [{ key: 'permissions', old: String(P.Administrator), new: '0' }] }, guild, ctxFor(client, 'roleUpdate', cfg));
+  assert.equal(lost.weight, S.effectiveLimit(cfg, 'roleUpdate'));
+  assert.equal(lost.record.noUndo, true);
+  const res = await byKey.roleUpdate.undo(guild, lost.record, ctxFor(client, 'roleUpdate', cfg, { idMap: new Map() }));
+  assert.equal(res.ok, false);
+  assert.match(res.note, /mon rôle .* non annulable/);
+  assert.equal(byKey.roleUpdate.classify({ action: 31, targetId: 'br', executorId: 'u1', changes: [{ key: 'permissions', old: '0', new: String(P.Administrator) }] }, guild, ctxFor(client, 'roleUpdate', cfg)), null);
+});
+
+test('annulations d\'actions faites via le bot (reportBotAction : { targetId, viaBot }) : aucune exception, rien d\'inventé', async () => {
+  const client = makeClient();
+  const guild = makeGuild({ me: { permissions: { has: () => true } } });
+  guild.channels.create = async () => assert.fail('salon recréé sans instantané');
+  guild.roles.create = async () => assert.fail('rôle recréé sans instantané');
+  const record = { targetId: 'x', viaBot: true };
+  for (const key of ['channelCreate', 'channelDelete', 'channelUpdate', 'roleCreate', 'roleDelete', 'roleUpdate', 'roleAdd', 'roleRemove', 'webhook', 'serverUpdate', 'expressions']) {
+    const res = await byKey[key].undo(guild, record, ctxFor(client, key, undefined, { idMap: new Map() }));
+    assert.equal(typeof res?.ok, 'boolean', `${key} : résultat invalide`);
+    assert.equal(typeof byKey[key].targetKey(record), 'string');
+    assert.equal(typeof byKey[key].describe(record), 'string');
+  }
+});

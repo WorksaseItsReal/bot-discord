@@ -214,8 +214,11 @@ const roleUpdate = {
     const perms = (entry.changes ?? []).find((c) => c?.key === 'permissions');
     // Rôle géré du bot privé de permissions : on ne peut pas l'annuler (hiérarchie), mais l'auteur
     // est sanctionné tout de suite.
-    if (botId && role?.tags?.botId === botId && perms && St.gainedBits(perms.new, perms.old) !== 0n) {
-      return { weight: S.effectiveLimit(ctx.cfg, 'roleUpdate'), record: { roleId: id, name: role.name, changes: [perms], botRole: true, noUndo: true } };
+    if (botId && role?.tags?.botId === botId) {
+      if (perms && St.gainedBits(perms.new, perms.old) !== 0n) {
+        return { weight: S.effectiveLimit(ctx.cfg, 'roleUpdate'), record: { roleId: id, name: role.name, changes: [perms], botRole: true, noUndo: true } };
+      }
+      return null; // permissions DONNÉES à ce bot (réglage par un admin) : jamais comptées
     }
     const changes = St.filterRoleChanges(entry.changes, { lenient: St.isLenient(ctx, 'roleUpdate', 'dangerousOnly') });
     if (!changes.length) return null;
@@ -223,7 +226,8 @@ const roleUpdate = {
     return { weight: 1, record: { roleId: id, name: role?.name ?? null, changes, noUndo } };
   },
   async undo(guild, record, ctx) {
-    const role = guild.roles?.cache?.get?.(record?.roleId);
+    if (!record?.roleId) return { ok: false }; // action faite via le bot (reportBotAction) : rien à relire
+    const role = guild.roles.cache.get(record.roleId);
     const label = `@${role?.name ?? record?.name ?? record?.roleId}`;
     if (!role) return { ok: false, note: `Rôle ${label} : il n'existe plus.` };
     if (record.noUndo || !editable(guild, role)) {
