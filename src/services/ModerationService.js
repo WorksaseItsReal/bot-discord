@@ -16,16 +16,26 @@ const logger = createLogger('moderation');
 /** Durée pendant laquelle une action du bot est reconnue dans les événements Discord (anti-doublon de logs). */
 const BOT_ACTION_TTL_MS = 15_000;
 
-/** Refus posés par le rôle Muted, selon le type de salon. */
 /** Rattrapage en arrière-plan des refus du rôle Muted : au plus une fois par période. */
 const MUTED_RESYNC_MS = 10 * 60 * 1000;
 
+/**
+ * Refus posés par le rôle Muted, selon le type de salon. Créer un fil publie son nom dans le
+ * salon : refusé aussi. En vocal et en conférence : parler, partager son écran et demander la
+ * parole. Les salons médias fonctionnent comme les forums (SendMessages = créer un post). Les
+ * refus manquants sont posés par le rattrapage (syncMutedRole).
+ */
 const MUTE_DENIES = {
-  [ChannelType.GuildText]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
-  [ChannelType.GuildAnnouncement]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildText]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads'],
+  [ChannelType.GuildAnnouncement]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads', 'CreatePublicThreads'],
   [ChannelType.GuildForum]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
-  [ChannelType.GuildVoice]: ['SendMessages', 'AddReactions', 'Speak'],
-  [ChannelType.GuildCategory]: ['SendMessages', 'AddReactions', 'Speak', 'SendMessagesInThreads'],
+  [ChannelType.GuildMedia]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildVoice]: ['SendMessages', 'AddReactions', 'Speak', 'Stream'],
+  [ChannelType.GuildStageVoice]: ['SendMessages', 'AddReactions', 'Speak', 'Stream', 'RequestToSpeak'],
+  [ChannelType.GuildCategory]: [
+    'SendMessages', 'AddReactions', 'Speak', 'Stream', 'RequestToSpeak',
+    'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads',
+  ],
 };
 
 /**
@@ -462,10 +472,14 @@ class ModerationService {
       if (!denies || !channel.permissionOverwrites) continue;
       const perms = me ? channel.permissionsFor?.(me) : null;
       if (!perms?.has?.(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.ManageRoles)) continue;
+      // Discord refuse qu'un bot pose un refus qu'il n'a pas lui-même sur le serveur (demander la
+      // parole, partager son écran…) : la surcharge entière serait rejetée. Seules ses permissions
+      // sont donc refusées, le reste du salon est quand même couvert.
+      const wanted = denies.filter((p) => !me.permissions?.has || me.permissions.has(PermissionFlagsBits[p]));
       const ow = channel.permissionOverwrites.cache.get(role.id);
-      if (ow && denies.every((p) => ow.deny?.has?.(PermissionFlagsBits[p]))) continue;
+      if (!wanted.length || (ow && wanted.every((p) => ow.deny?.has?.(PermissionFlagsBits[p])))) continue;
       const ok = await channel.permissionOverwrites
-        .edit(role, Object.fromEntries(denies.map((p) => [p, false])), { reason: 'Configuration mute' })
+        .edit(role, Object.fromEntries(wanted.map((p) => [p, false])), { reason: 'Configuration mute' })
         .then(() => true, () => false);
       if (ok) edited += 1;
     }

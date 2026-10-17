@@ -319,3 +319,27 @@ test('R23 /hide sur une catégorie masque aussi ses salons synchronisés ; /unhi
     await h.close();
   }
 });
+
+test('R16 rôle Muted : conférences et salons média couverts, création de fils, parole demandée et partage d\'écran refusés', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const media = await addMedia(h);
+    const rec = await h.slash('mute', [opt('membre', 6, IDS.users.target), opt('raison', 3, 'spam')], { as: 'admin' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    const target = IDS.users.target;
+    const denied = [
+      [IDS.channels.general, ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads']],
+      [IDS.channels.announcements, ['SendMessages', 'CreatePublicThreads']],
+      [IDS.channels.stage, ['SendMessages', 'Speak', 'RequestToSpeak', 'AddReactions']],
+      [IDS.channels.voice, ['SendMessages', 'Speak', 'Stream']],
+      [media, ['SendMessages', 'SendMessagesInThreads', 'AddReactions']],
+    ];
+    for (const [channel, flags] of denied) {
+      for (const flag of flags) assert.equal(can(h, target, channel, P[flag]), false, `${flag} encore permis dans ${channel}`);
+    }
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

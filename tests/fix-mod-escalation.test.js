@@ -150,7 +150,7 @@ test('syncMutedRole ne réécrit pas un overwrite déjà en place (ensureMutedRo
     },
   });
   const F = PermissionFlagsBits;
-  const done = channel('a', ChannelType.GuildText, F.SendMessages | F.AddReactions | F.SendMessagesInThreads);
+  const done = channel('a', ChannelType.GuildText, F.SendMessages | F.AddReactions | F.SendMessagesInThreads | F.CreatePublicThreads | F.CreatePrivateThreads);
   const partial = channel('b', ChannelType.GuildText, F.SendMessages);
   const fresh = channel('c', ChannelType.GuildVoice, null);
   const guild = { id: 'g1', members: { me: { id: 'bot' } }, roles: { cache: new Map([['muted', role]]) }, channels: { cache: new Map([['a', done], ['b', partial], ['c', fresh]]) } };
@@ -159,7 +159,7 @@ test('syncMutedRole ne réécrit pas un overwrite déjà en place (ensureMutedRo
   assert.equal(await env.moderation.ensureMutedRole(guild), role);
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(edits.map(([id]) => id), ['b', 'c']);
-  assert.deepEqual(Object.keys(edits[1][1]).sort(), ['AddReactions', 'SendMessages', 'Speak']);
+  assert.deepEqual(Object.keys(edits[1][1]).sort(), ['AddReactions', 'SendMessages', 'Speak', 'Stream']); // revue 6 : Stream
   await env.moderation.ensureMutedRole(guild);
   await new Promise((r) => setImmediate(r));
   assert.equal(edits.length, 2, 'pas de nouveau parcours dans la fenêtre de 10 min');
