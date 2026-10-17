@@ -253,3 +253,39 @@ test('S37 : membre du blrank hors cache (ancien membre partiel) — le rôle ajo
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* S39 — riposte automatique plafonnée à 24 h                           */
+/* ------------------------------------------------------------------ */
+
+test('S39 : /lockdown riposte (MP seuls, 24 h) puis une vague toutes les 6 h — MP jamais suspendus au-delà de t0 + 24 h ; nouvelle série après l\'expiration', async () => {
+  const HOUR = 3_600_000;
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow() + offset;
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const rip = await h.slash('lockdown', [{ name: 'riposte', type: 1, options: [opt('actif', 5, true), opt('invitations', 5, false), opt('messages_prives', 5, true), opt('duree', 4, 24)] }]);
+    assert.ok(!h.isError(rip), h.replyText(rip));
+    assert.match(h.messagesOf(rip)[0].embeds[0].description, /jamais renouvelée au-delà de 24 h/);
+    const puts = () => h.fake.calls.filter((c) => c.method === 'PUT' && /\/incident-actions$/.test(c.route)).length;
+    const dmsUntil = () => Date.parse(h.fake.guild.incidents_data?.dms_disabled_until ?? '') || 0;
+    const t0 = Date.now();
+    for (let k = 0; k <= 4; k += 1) {
+      offset = k * 6 * HOUR;
+      h.client.services.antiraid.joinAlertAt.clear();
+      for (let i = 0; i < 3; i += 1) await h.memberJoin(h.addUser(`V${k}r${i}`, { ageDays: 400 }));
+      await h.settle();
+      if (k < 4) assert.ok(dmsUntil() <= t0 + 24 * HOUR, `vague ${k} : MP suspendus jusqu'à t0+${((dmsUntil() - t0) / HOUR).toFixed(2)} h`);
+    }
+    // Vagues 1 à 3 : rien à prolonger (plafond de la série atteint) ; vague 4 (t0 + 24 h, pause expirée) : nouvelle série.
+    assert.equal(puts(), 2, 'renouvellements au-delà du plafond');
+    assert.ok(dmsUntil() > t0 + 24 * HOUR, 'aucune nouvelle série après l\'expiration');
+    assert.equal(h.fake.guild.incidents_data?.invites_disabled_until ?? null, null);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+    Date.now = realNow;
+  }
+});
