@@ -189,7 +189,7 @@ function setLevelRoles(client, interaction, n, wanted) {
   const removed = current.filter((id) => !next.includes(id));
   if (!added.length && !removed.length) return { changed: false, refused, lines };
   client.services.config.update(guild.id, { permissions: { levels: { [`l${n}`]: { roles: next } } } });
-  const name = svc(client).levelName(guild.id, n);
+  const name = escapeMarkdown(svc(client).levelName(guild.id, n));
   if (added.length) lines.push(`${name} : + ${added.map((id) => `<@&${id}>`).join(', ')}`);
   if (removed.length) lines.push(`${name} : − ${removed.map((id) => `<@&${id}>`).join(', ')}`);
   return { changed: true, refused, lines };
