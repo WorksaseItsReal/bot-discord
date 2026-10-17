@@ -296,3 +296,20 @@ test('R36 : préréglage Strict, un bot de tickets qui ferme ses tickets n\'est 
     await h.close();
   }
 });
+
+test('R112 : bans / débans externes sans log Modération → aucune lecture du journal d\'audit', async () => {
+  const h = await createHarness(); // aucun salon de logs configuré
+  try {
+    const users = Array.from({ length: 20 }, (_, i) => h.addUser(`Raider${i}`));
+    const before = h.fake.calls.length;
+    for (const u of users) h.fake.dispatchNow('GUILD_BAN_ADD', { guild_id: h.guild.id, user: u });
+    await h.settle({ timeout: 5_000 });
+    for (const u of users) h.fake.dispatchNow('GUILD_BAN_REMOVE', { guild_id: h.guild.id, user: u });
+    await h.settle({ timeout: 5_000 });
+    const audit = h.fake.calls.slice(before).filter((c) => c.method === 'GET' && /audit-logs$/.test(c.route)).length;
+    assert.equal(audit, 0, `${audit} lectures du journal d'audit inutiles`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

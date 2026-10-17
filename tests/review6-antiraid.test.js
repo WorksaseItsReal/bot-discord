@@ -464,3 +464,37 @@ test('R37 : serveur quitté → état mémoire de l\'AntiRaid oublié (guildDele
   for (const hd of handlers) await hd.execute(client, { id: G, available: false });
   assert.equal(s.recentJoiners.has(G), true);
 });
+
+// ---------------------------------------------------------------- R112
+
+test('R112 : ban / déban externe sans log Modération → aucune lecture du journal d\'audit', async () => {
+  const reads = [];
+  const sent = [];
+  let wouldLog = false;
+  const guild = {
+    id: G,
+    members: { me: { permissions: new PermissionsBitField(PermissionsBitField.All) } },
+    fetchAuditLogs: async (q) => { reads.push(q.type); return { entries: new Collection() }; },
+  };
+  const client = {
+    user: { id: 'bot' },
+    services: {
+      moderation: { isRecentBotAction: () => false, clearTempbans: () => {} },
+      logging: { wouldLog: () => wouldLog, send: async (...a) => sent.push(a) },
+    },
+  };
+  const user = { id: '500000000000000123', toString: () => '<@500000000000000123>', displayAvatarURL: () => null };
+  const add = banEvents.find((e) => e.name === 'guildBanAdd');
+  const remove = banEvents.find((e) => e.name === 'guildBanRemove');
+  for (let i = 0; i < 5; i += 1) {
+    await add.execute(client, { guild, user, reason: null });
+    await remove.execute(client, { guild, user });
+  }
+  assert.equal(reads.length, 0, `${reads.length} lectures du journal d'audit pour rien`);
+  // Log Modération actif : l'auteur est bien cherché, la carte part.
+  wouldLog = true;
+  await add.execute(client, { guild, user, reason: 'raid' });
+  await remove.execute(client, { guild, user });
+  assert.deepEqual(reads, [AuditLogEvent.MemberBanAdd, AuditLogEvent.MemberBanRemove]);
+  assert.equal(sent.length, 2);
+});

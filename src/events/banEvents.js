@@ -30,6 +30,8 @@ module.exports = [
     name: 'guildBanAdd',
     async execute(client, ban) {
       if (client.services.moderation?.isRecentBotAction?.('ban', ban.guild.id, ban.user.id)) return;
+      // Pas de lecture du journal d'audit si ce log n'est pas envoyé (raid : des centaines de bans).
+      if (client.services.logging?.wouldLog?.(ban.guild.id, 'moderation', { event: 'manualBan' }) === false) return;
       const executor = await fetchExecutor(ban.guild, AuditLogEvent.MemberBanAdd, ban.user.id);
       if (executor && executor === client.user?.id) return;
       await client.services.logging.send(
@@ -56,6 +58,7 @@ module.exports = [
       // Débannissement (commande, scheduler ou manuel) : plus aucun ban temporaire actif.
       client.services.moderation?.clearTempbans(ban.guild.id, ban.user.id);
       if (client.services.moderation?.isRecentBotAction?.('unban', ban.guild.id, ban.user.id)) return;
+      if (client.services.logging?.wouldLog?.(ban.guild.id, 'moderation', { event: 'manualBan' }) === false) return;
       const executor = await fetchExecutor(ban.guild, AuditLogEvent.MemberBanRemove, ban.user.id);
       if (executor && executor === client.user?.id) return;
       await client.services.logging.send(
