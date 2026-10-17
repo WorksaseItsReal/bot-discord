@@ -310,9 +310,9 @@ class SecurService {
     const incKey = `${guild.id}:${executorId}`;
     let state = this.#openIncident(incKey, now);
     // Sous le seuil de son module, l'action ne rejoint un incident ouvert (et n'est annulée) que si
-    // celui-ci traite l'auteur en attaquant (sanction ≠ aucune) : un incident « alerte seule »
-    // (@everyone…) n'est pas contagieux.
-    if (!triggered && (!state || rank(state.target) === 0)) return Promise.resolve(null);
+    // celui-ci traite l'auteur en attaquant (sanction ≠ aucune) ou si ce module a déjà déclenché
+    // l'incident : un incident « alerte seule » (@everyone…) n'est pas contagieux.
+    if (!triggered && (!state || (rank(state.target) === 0 && !state.modules.has(key)))) return Promise.resolve(null);
     let list = [entry];
     if (triggered) {
       const consumed = new Set(best.list);

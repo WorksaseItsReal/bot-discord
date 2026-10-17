@@ -52,9 +52,9 @@ async function warnLost(client, guild, before, after) {
   });
 }
 
-/** Permissions du serveur du bot, avec `role` dans l'état `permissions` (rôle modifié). */
-function botBits(guild, me, role, permissions) {
-  let bits = guild.roles?.everyone?.permissions?.bitfield ?? 0n;
+/** Permissions du serveur du bot (rôles, @everyone compris), avec `role` dans l'état `permissions`. */
+function botBits(me, role, permissions) {
+  let bits = 0n;
   for (const r of me.roles.cache.values()) bits |= r.id === role.id ? permissions : r.permissions.bitfield;
   return bits;
 }
@@ -81,7 +81,7 @@ module.exports = [
       const guild = newRole?.guild;
       const me = guild?.members?.me;
       if (!me?.roles?.cache?.has?.(newRole.id) || oldRole.permissions.bitfield === newRole.permissions.bitfield) return;
-      await warnLost(client, guild, botBits(guild, me, newRole, oldRole.permissions.bitfield), botBits(guild, me, newRole, newRole.permissions.bitfield));
+      await warnLost(client, guild, botBits(me, newRole, oldRole.permissions.bitfield), botBits(me, newRole, newRole.permissions.bitfield));
     },
   },
   {

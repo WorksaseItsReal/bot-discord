@@ -232,6 +232,7 @@ const opt = (name, type, value) => ({ name, type, value });
 const sub = (name, options = []) => [{ name, type: 1, options }];
 const incidentsOf = (h) => h.client.repositories.securityIncidents.recent(h.guild.id, 20);
 const hasRole = (h, userId, roleId) => Boolean(h.fake.members.get(userId)?.roles?.includes(roleId));
+const channelNames = (h) => [...h.fake.channels.values()].map((c) => c.name);
 const drain = async (h) => {
   await h.settle();
   await new Promise((r) => setTimeout(r, 200));
@@ -299,6 +300,21 @@ test('S10 : un @everyone (sanction « aucune ») ouvre un incident ; un retrait 
     await drain(h);
     assert.equal(hasRole(h, IDS.users.mod, IDS.roles.mod), false, 'retrait légitime (1 sur 3) annulé par contagion d\'un incident sans sanction');
     assert.ok(hasRole(h, IDS.users.admin, IDS.roles.admin), 'auteur sanctionné');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S10 (témoin) : module « alerte seule » déjà déclenché — ses actions suivantes sous le seuil restent annulées', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { channelDelete: { mode: 'on', punish: 'none', limit: 2, windowSeconds: 60 } });
+    const names = ['rules', 'announcements', 'staff'].map((k) => h.fake.channels.get(IDS.channels[k]).name);
+    for (const key of ['rules', 'announcements', 'staff']) await h.asHuman('admin').deleteChannel(IDS.channels[key]);
+    await drain(h);
+    assert.equal(incidentsOf(h).length, 1);
+    assert.deepEqual(names.map((n) => channelNames(h).includes(n)), [true, true, true], '3ᵉ suppression (sous le seuil, même module) non annulée');
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
@@ -469,7 +485,6 @@ async function viaBotDelete(h, key) {
   await h.confirm(rec);
   await h.settle();
 }
-const channelNames = (h) => [...h.fake.channels.values()].map((c) => c.name);
 
 test('S25 : /channel supprimer ×2 puis 1 suppression manuelle → les 3 salons sont recréés', async () => {
   const h = await createHarness();
