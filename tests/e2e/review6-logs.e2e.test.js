@@ -199,7 +199,7 @@ test('R28 : suppression par un administrateur signalée à l\'AntiRaid (chaque s
     const moderation = h.client.services.moderation;
     const original = moderation.reportDestructiveAction.bind(moderation);
     moderation.reportDestructiveAction = async (guild, user, type, opts) => {
-      reports.push({ user: user.id, type });
+      reports.push({ user: user.id, type, count: opts?.count ?? 1 });
       return original(guild, user, type, opts);
     };
     const remove = async () => {
@@ -213,7 +213,8 @@ test('R28 : suppression par un administrateur signalée à l\'AntiRaid (chaque s
     const mark = h.fake.messageLog.length;
     await remove();
     for (const id of [...ids, category]) assert.ok(!h.fake.channels.has(id), `salon ${id} toujours là`);
-    assert.equal(reports.length, 4, 'chaque salon supprimé (et la catégorie) doit être signalé à l\'AntiRaid');
+    // SEC5 : pré-contrôle des N suppressions, puis UN rapport de N après succès.
+    assert.equal(reports.reduce((n, r) => n + r.count, 0), 4, 'chaque salon supprimé (et la catégorie) doit être signalé à l\'AntiRaid');
     assert.ok(reports.every((r) => r.user === IDS.users.admin && r.type === 'channelDelete'));
     const card = botPostsIn(h, mark, IDS.channels.modLog).find((m) => /Salons de logs supprimés/.test(m.embeds[0].title ?? ''));
     assert.ok(card, 'aucune carte « Salons de logs supprimés » dans le salon survivant');

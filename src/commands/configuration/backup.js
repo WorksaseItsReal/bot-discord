@@ -8,6 +8,7 @@ const { paginate } = require('../../utils/pagination');
 const { card, field, wide, subtext, bullets, code, ICONS, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 const { MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS } = require('../../services/BackupService');
+const { MODULE_KEYS, SECUR_MODULES, LEVEL_LABELS, isExempt, moduleMode } = require('../../utils/secur');
 
 /** Rappel des quotas (comptés séparément). */
 const QUOTA_TEXT = `${MAX_MANUAL_BACKUPS} manuelles + ${MAX_AUTO_BACKUPS} automatiques`;
@@ -92,12 +93,44 @@ function infoView(b) {
 }
 
 /**
+ * Pré-contrôle Secur d'une restauration : elle recrée rôles et salons (et, avec « permissions »,
+ * réécrit des surcharges) au nom du bot, donc hors de la détection. Si un module Secur « salons »
+ * ou « rôles » est actif, l'auteur doit en être EXEMPTÉ (niveau suffisant pour le mode du module).
+ * Refus : UserError + log « Restauration bloquée » (catégorie Sécurité).
+ */
+function assertRestoreAllowed(interaction) {
+  const client = interaction.client;
+  const secur = client?.services?.secur;
+  const guild = interaction.guild;
+  if (!secur?.covers || !guild?.id) return;
+  const active = MODULE_KEYS.filter((k) => (k.startsWith('channel') || k.startsWith('role')) && secur.covers(guild.id, k));
+  if (!active.length) return;
+  const cfg = client.services.config.get(guild.id);
+  const member = interaction.member?.roles?.cache ? interaction.member : guild.members?.cache?.get?.(interaction.user.id) ?? null;
+  const level = secur.levelOf(guild, interaction.user.id, member, Boolean(interaction.user.bot));
+  const blocking = active.filter((k) => !isExempt(level, moduleMode(cfg, k)));
+  if (!blocking.length) return;
+  const labels = blocking.map((k) => SECUR_MODULES[k].label).join(', ');
+  Promise.resolve(client.services.logging?.send?.(guild.id, 'security', card({
+    tone: 'warning',
+    section: 'security',
+    icon: ICONS.lock,
+    title: 'Restauration bloquée par la sécurité',
+    description: `<@${interaction.user.id}> a tenté une restauration de sauvegarde (/backup restore) alors que des modules Secur sont actifs : rien n'a été fait.`,
+    fields: [field(ICONS.user, 'Auteur', `<@${interaction.user.id}>`), field(ICONS.shield, 'Niveau', LEVEL_LABELS[level] ?? level), wide('🧩', 'Modules actifs', truncate(labels, 1000))],
+    footer: `ID : ${interaction.user.id}`,
+  }), undefined, { event: 'secur' })).catch(() => {});
+  throw new UserError(`Restauration bloquée par la sécurité : les modules Secur ${labels} sont actifs et vous n'en êtes pas exempté (niveau : ${LEVEL_LABELS[level] ?? level}). Demandez à un owner (/secur).`);
+}
+
+/**
  * Restauration (après confirmation) puis carte de résultat en suivi.
  * @param {{ syncPermissions?: boolean }} [opts] rétablir aussi les permissions des salons existants
  */
 async function runRestore(interaction, backup, id, { syncPermissions = false } = {}) {
   const b = backup.get(interaction.guild.id, id);
   if (backup.isRestoring?.(interaction.guild.id)) throw new UserError('Une restauration est déjà en cours sur ce serveur : attendez qu\'elle se termine.');
+  assertRestoreAllowed(interaction);
   const ok = await confirm(interaction, {
     description: [
       `Restaurer **${truncate(b.name, 100)}** (${code(b.id)})${syncPermissions ? ' **avec les permissions des salons existants**' : ''} ?`,
@@ -108,6 +141,8 @@ async function runRestore(interaction, backup, id, { syncPermissions = false } =
     timeout: 45_000,
   });
   if (!ok) return;
+  // Revérifié après la confirmation (45 s) : un module a pu être activé entre-temps.
+  assertRestoreAllowed(interaction);
   const res = await backup.restore(interaction.guild, id, { syncPermissions });
   await interaction.followUp({ embeds: [restoreResultCard(b, res)], ephemeral: true });
 }
@@ -193,6 +228,7 @@ module.exports = {
   composition,
   restoreResultCard,
   restoreWarning,
+  assertRestoreAllowed,
   data: new SlashCommandBuilder()
     .setName('backup')
     .setDescription('Sauvegarde/restauration de la structure du serveur.')

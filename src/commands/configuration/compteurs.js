@@ -14,6 +14,7 @@ const { discordTimestamp } = require('../../utils/time');
 const { requirePermission } = require('../../services/ModerationService');
 const {
   COUNTER_TYPES,
+  COUNTER_KEYS,
   CATEGORY_NAME,
   availableTypes,
   hasPresenceIntent,
@@ -38,6 +39,53 @@ const channelGuard = (interaction) => {
   requirePermission(interaction, 'ManageChannels');
 };
 const svc = (client) => client.services.counters;
+/**
+ * Salon compteur créé il y a moins de 10 min : le supprimer n'est pas compté par la sécurité
+ * (créer puis retirer aussitôt les compteurs ne sanctionne personne), comme pour /logs.
+ */
+const FRESH_CHANNEL_MS = 10 * 60_000;
+
+/**
+ * Salons qu'une suppression viserait : le salon de `type`, ou tous les compteurs plus la catégorie
+ * si elle deviendrait vide. `counted` : ceux qui comptent pour la sécurité (hors salons récents).
+ */
+function deletionPlan(client, guild, type = null, now = Date.now()) {
+  const cfg = svc(client).cfg(guild.id);
+  const ids = (type ? [type] : COUNTER_KEYS).map((k) => cfg.counters?.[k]?.channelId).filter(Boolean);
+  const channels = [...new Set(ids)].map((id) => guild.channels.cache.get(id)).filter(Boolean);
+  if (!type) {
+    const category = cfg.categoryId ? guild.channels.cache.get(cfg.categoryId) : null;
+    const set = new Set(channels.map((c) => c.id));
+    if (category && !guild.channels.cache.some((c) => c.parentId === category.id && !set.has(c.id))) channels.push(category);
+  }
+  return { channels, counted: channels.filter((c) => now - (c.createdTimestamp ?? 0) >= FRESH_CHANNEL_MS) };
+}
+
+/**
+ * Supprimer des salons via le bot : « Gérer les salons » NATIF (permissions Discord réelles, jamais
+ * une délégation) au niveau du serveur ET dans chaque salon visé, sinon refus sans suppression
+ * partielle ; puis pré-contrôle Secur / AntiRaid des N suppressions (refus d'emblée au seuil).
+ */
+function assertCanDelete(interaction, client, plan) {
+  const flag = PermissionFlagsBits.ManageChannels;
+  const member = interaction.member;
+  const guildLevel = member?.permissions?.has ? member.permissions.has(flag) : Boolean(interaction.memberPermissions?.has?.(flag));
+  if (!guildLevel) throw new UserError('Supprimer des salons demande la permission **Gérer les salons** (donnée par vos rôles, au niveau du serveur) : aucun salon n\'a été supprimé.');
+  const denied = plan.channels.filter((ch) => !ch.permissionsFor?.(member)?.has?.(flag));
+  if (denied.length) throw new UserError(`Il vous manque **Gérer les salons** dans ${denied.map((ch) => `<#${ch.id}>`).join(', ')} : aucun salon n'a été supprimé.`);
+  if (plan.counted.length) client.services.secur?.assertAllowed?.(interaction, 'channelDelete', { count: plan.counted.length });
+}
+
+/** Rapport APRÈS succès des salons réellement supprimés (au nom de l'auteur, best-effort). */
+async function reportDeleted(interaction, client, plan) {
+  const count = plan.counted.filter((c) => !interaction.guild.channels.cache.has(c.id)).length;
+  if (!count) return;
+  try {
+    await client.services.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'channelDelete', { count });
+  } catch {
+    /* la détection ne fait jamais échouer l'action déjà faite */
+  }
+}
 
 /** État affiché d'un compteur : on · noperm · off. */
 function counterState(client, guild, type) {
@@ -103,7 +151,11 @@ function homeView(client, guild, notice) {
           noperm ? `\n🔒 Je ne peux pas renommer **${noperm}** salon(s) : donnez-moi **Voir le salon**, **Se connecter** et **Gérer les salons** dans ces salons.` : null,
           '',
           ...lines,
-          !hasPresenceIntent(client) ? `\n${subtext('« En ligne » n\'est pas proposé : l\'intent GuildPresences n\'est pas activé sur ce bot.')}` : null,
+          !hasPresenceIntent(client)
+            ? `\n${subtext(client?.presenceCacheDisabled
+              ? '« En ligne » n\'est pas proposé : présences non mises en cache sur ce bot (PRESENCE_INTENT sert seulement au rôle soutien).'
+              : '« En ligne » n\'est pas proposé : l\'intent GuildPresences n\'est pas activé sur ce bot.')}`
+            : null,
         ],
         fields: [
           field(ICONS.count, 'Actifs', `${active} / ${types.length}`),
@@ -224,6 +276,7 @@ module.exports = {
   cooldown: 3_000,
   render,
   updateNotice,
+  deletionPlan,
   data: new SlashCommandBuilder()
     .setName('compteurs')
     .setDescription('Ouvre le tableau de bord des compteurs de statistiques (salons vocaux).')
@@ -270,6 +323,9 @@ module.exports = {
         await interaction.update(counterView(client, interaction.guild, type));
         return;
       }
+      // Désactiver supprime le salon : mêmes règles que « Tout supprimer ».
+      const plan = state === 'off' ? deletionPlan(client, interaction.guild, type) : null;
+      if (plan) assertCanDelete(interaction, client, plan);
       await interaction.deferUpdate();
       let notice;
       if (state === 'on') {
@@ -280,6 +336,7 @@ module.exports = {
         notice = `${ICONS.success} Compteur **${COUNTER_TYPES[type].label}** désactivé : son salon a été supprimé (le modèle est conservé).`;
       }
       await interaction.editReply(counterView(client, interaction.guild, type, notice));
+      if (plan) await reportDeleted(interaction, client, plan);
     },
     /** cmd:compteurs:edit:<type> — ouvre le formulaire du modèle de nom. */
     async edit(interaction, client, [type]) {
@@ -318,6 +375,8 @@ module.exports = {
     /** Suppression (après confirmation) de tous les compteurs. */
     async remove(interaction, client) {
       channelGuard(interaction);
+      const plan = deletionPlan(client, interaction.guild);
+      assertCanDelete(interaction, client, plan);
       await interaction.deferUpdate();
       const { removed, failed } = await svc(client).removeAll(interaction.guild, `Compteurs supprimés par ${interaction.user.tag}`);
       const notice = [
@@ -325,6 +384,7 @@ module.exports = {
         failed.length ? `${ICONS.warning} Impossible de supprimer : ${failed.map((t) => `**${COUNTER_TYPES[t].label}**`).join(', ')} (permission **Gérer les salons** manquante dans ces salons).` : null,
       ].filter(Boolean).join('\n');
       await interaction.editReply(render(client, interaction.guild, 'home', notice));
+      await reportDeleted(interaction, client, plan);
     },
   },
 };

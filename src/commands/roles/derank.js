@@ -6,6 +6,7 @@ const { card, field, wide, ICONS, userLine, status } = require('../../utils/ui')
 const { assertCanModerate } = require('../../utils/permissions');
 const { confirm } = require('../../utils/confirmation');
 const { UserError } = require('../../core/errors');
+const { isSensitiveRole } = require('../../utils/secur');
 
 module.exports = {
   category: 'roles',
@@ -36,12 +37,22 @@ module.exports = {
     if (!removable.size) {
       return interaction.reply({ embeds: [status.note(`${user} n'a aucun rôle que je puisse retirer.`, 'Rien à retirer')], ephemeral: true });
     }
+    // Retrait d'un rôle SENSIBLE (staff : permission dangereuse, whitelist, niveau ≥ 2) signé par le
+    // bot : pré-contrôlé au nom de l'auteur (refus d'emblée au seuil), avant la confirmation puis
+    // juste avant le retrait, et rapporté après succès.
+    const cfg = client?.services?.config?.get(interaction.guild.id) ?? {};
+    const perms = client?.services?.permissions;
+    const levelOf = typeof perms?.levelOf === 'function' ? (g, r) => perms.levelOf(g, r) : undefined;
+    const sensitive = removable.some((r) => isSensitiveRole(r, cfg, { levelOf }));
+    const preCheck = () => client?.services?.secur?.assertAllowed?.(interaction, 'roleRemove', { count: 1 });
+    if (sensitive) preCheck();
     if (client?.services?.config?.get(interaction.guild.id)?.moderation?.confirmDangerous) {
       const ok = await confirm(interaction, {
         description: `Retirer **${removable.size}** rôle${removable.size > 1 ? 's' : ''} à ${user} ?`,
         confirmLabel: 'Dérank',
       });
       if (!ok) return undefined;
+      if (sensitive) preCheck();
     }
     // Raison du journal d'audit : 512 caractères au plus (au-delà, Discord refuse la requête).
     await member.roles.remove(removable, truncate(reason || `Derank par ${interaction.user.tag}`, 500));
@@ -69,6 +80,7 @@ module.exports = {
     const payload = { embeds: [embed('roles')] };
     // Après confirmation, la carte remplace la demande (éphémère). Réponse d'abord (délai de 3 s), log ensuite.
     const response = interaction.replied || interaction.deferred ? await interaction.editReply(payload) : await interaction.reply(payload);
+    if (sensitive) await client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'roleRemove', { count: 1, targetId: member.id })?.catch?.(() => {});
     await client?.services?.logging?.send?.(interaction.guild.id, 'moderation', embed('moderation'), undefined, { event: 'sanction' })?.catch?.(() => {});
     return response;
   },
