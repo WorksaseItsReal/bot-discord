@@ -7,6 +7,12 @@
  */
 const PRESENCE_CHANNEL = '0';
 
+/**
+ * Heures de pointe : un message d'un salon NON visible par @everyone est compté à l'heure
+ * `PRIVATE_HOUR + h` (sans migration) ; la vue publique ne lit que 0 à 23, la gestion tout (h % 100).
+ */
+const PRIVATE_HOUR = 100;
+
 /** Liste de salons retenus → paramètre JSON (null : tous les salons). Pur. */
 function allowOf(channels) {
   return Array.isArray(channels) ? JSON.stringify(channels.map(String)) : null;
@@ -130,7 +136,8 @@ class ActivityRepository {
        WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY user_id HAVING SUM(voice_seconds) > 0 ORDER BY voice DESC, user_id LIMIT @limit`,
     );
     this.hourlyStmt = db.prepare(
-      'SELECT hour, SUM(messages) AS messages FROM activity_hourly WHERE guild_id = ? AND day >= ? GROUP BY hour ORDER BY hour',
+      `SELECT hour % ${PRIVATE_HOUR} AS hour, SUM(messages) AS messages FROM activity_hourly
+       WHERE guild_id = @guildId AND day >= @fromDay AND (@all = 1 OR hour < ${PRIVATE_HOUR}) GROUP BY hour % ${PRIVATE_HOUR} ORDER BY 1`,
     );
     this.flowsStmt = db.prepare('SELECT day, joins, leaves FROM member_flow_daily WHERE guild_id = ? AND day >= ? ORDER BY day');
 
@@ -276,8 +283,9 @@ class ActivityRepository {
     return this.topVoiceMembersStmt.all({ guildId, fromDay, limit, allow: allowOf(channels) });
   }
 
-  hourly(guildId, fromDay) {
-    return this.hourlyStmt.all(guildId, fromDay);
+  /** @param {{ publicOnly?: boolean }} [opts] publicOnly : salons visibles par @everyone seulement */
+  hourly(guildId, fromDay, { publicOnly = false } = {}) {
+    return this.hourlyStmt.all({ guildId, fromDay, all: publicOnly ? 0 : 1 });
   }
 
   flows(guildId, fromDay) {
@@ -321,4 +329,4 @@ class ActivityRepository {
   }
 }
 
-module.exports = { ActivityRepository, PRESENCE_CHANNEL };
+module.exports = { ActivityRepository, PRESENCE_CHANNEL, PRIVATE_HOUR };

@@ -183,3 +183,63 @@ test('R111 : purge quotidienne (conservation réduite) par lots, sans figer le b
   assert.ok(result > 2_900, `lignes purgées : ${result}`);
   assert.equal(repo.db.prepare('SELECT COUNT(*) AS n FROM activity_daily WHERE guild_id = ? AND day < ?').get(G, '2026-10-11').n, 0);
 });
+
+/* ------------------------------------------------------------------ */
+/* R92 : /statistiques publique (fils privés, heures de pointe)         */
+/* ------------------------------------------------------------------ */
+
+const { PermissionsBitField, PermissionFlagsBits: PF } = require('discord.js');
+const statistiques = require('../src/commands/information/statistiques');
+
+function privateStatsSetup() {
+  const G = '100000000000000001';
+  const GEN = '400000000000000001';
+  const STAFF = '400000000000000003';
+  const PT = '400000000000000007';
+  const NOON = Date.parse('2026-10-09T12:00:00Z');
+  const everyone = { id: G };
+  const visible = (yes) => () => new PermissionsBitField(yes ? PF.ViewChannel : 0n);
+  const general = { id: GEN, parentId: null, type: ChannelType.GuildText, isThread: () => false, permissionsFor: visible(true), toString: () => `<#${GEN}>` };
+  const staff = { id: STAFF, parentId: null, type: ChannelType.GuildText, isThread: () => false, permissionsFor: visible(false), toString: () => `<#${STAFF}>` };
+  const privThread = { id: PT, parentId: GEN, parent: general, type: ChannelType.PrivateThread, isThread: () => true, permissionsFor: visible(true) };
+  const guild = { id: G, name: 'Test', memberCount: 2, roles: { everyone, cache: new Collection([[G, everyone]]) }, channels: { cache: new Collection([[GEN, general], [STAFF, staff], [PT, privThread]]) }, members: { cache: new Collection() }, voiceStates: { cache: new Collection() }, iconURL: () => null };
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  const repo = new ActivityRepository(db);
+  const client = { guilds: { cache: new Collection([[G, guild]]) }, isReady: () => true };
+  const activity = new ActivityService({ client, activity: repo, config, clock: () => NOON });
+  client.services = { config, activity };
+  config.update(G, { stats: { public: true } });
+  const msg = (author, channel, n) => {
+    for (let i = 0; i < n; i += 1) activity.recordMessage({ guild, author: { id: author, bot: false }, channel, channelId: channel.id, createdTimestamp: NOON - 3_600_000 });
+  };
+  return { G, GEN, STAFF, PT, NOON, guild, client, repo, msg, general, staff, privThread };
+}
+
+const payloadText = (p) => p.embeds.map((e) => {
+  const j = e.toJSON ? e.toJSON() : e;
+  return [j.description, ...(j.fields ?? []).map((f) => `${f.name}: ${f.value}`)].join('\n');
+}).join('\n');
+
+test('R92 : un fil privé n\'est pas crédité à son salon parent public (vue publique)', () => {
+  const { client, guild, msg, privThread, general, NOON, PT, repo, G } = privateStatsSetup();
+  msg('500000000000000001', privThread, 40);
+  msg('500000000000000002', general, 5);
+  const reader = statistiques.makeReader(guild, false);
+  const members = payloadText(statistiques.render(client, guild, { view: 'membres', period: 7, now: NOON, reader }));
+  assert.doesNotMatch(members, /500000000000000001/, 'auteur du fil privé classé dans la vue publique');
+  assert.doesNotMatch(members, /\*\*40\*\* msg/);
+  // La gestion voit le fil sous son propre identifiant.
+  assert.ok(repo.topChannels(G, '2000-01-01').some((c) => c.channel_id === PT));
+});
+
+test('R92 : heures de pointe de la vue publique sans les salons privés (la gestion voit tout)', () => {
+  const { client, guild, msg, general, staff, privThread, NOON } = privateStatsSetup();
+  msg('500000000000000002', general, 5);
+  msg('500000000000000002', staff, 70);
+  msg('500000000000000001', privThread, 40);
+  const pub = payloadText(statistiques.render(client, guild, { view: 'heures', period: 7, now: NOON, reader: statistiques.makeReader(guild, false) }));
+  assert.match(pub, /📨[^\n]*\*\*5\*\*/, `heures publiques : ${pub.match(/📨[^\n]*/)?.[0]}`);
+  const all = payloadText(statistiques.render(client, guild, { view: 'heures', period: 7, now: NOON, reader: statistiques.makeReader(guild, true) }));
+  assert.match(all, /📨[^\n]*\*\*115\*\*/, `heures (gestion) : ${all.match(/📨[^\n]*/)?.[0]}`);
+});

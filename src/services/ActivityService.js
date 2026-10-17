@@ -1,8 +1,9 @@
 'use strict';
 
+const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { DAY_MS, dayKey, dayStart, addDays } = require('../utils/activity');
-const { PRESENCE_CHANNEL } = require('../database/repositories/ActivityRepository');
+const { PRESENCE_CHANNEL, PRIVATE_HOUR } = require('../database/repositories/ActivityRepository');
 
 const logger = createLogger('activity');
 
@@ -45,6 +46,19 @@ function isIgnoredChannel(channel, ignored = []) {
   if (!channel || !ignored?.length) return false;
   const set = new Set(ignored);
   return [channel.id, channel.parentId, channel.parent?.parentId].some((id) => id && set.has(id));
+}
+
+/**
+ * Salon visible par @everyone ? (fil privé : jamais ; fil public : selon son salon ; inconnu : oui).
+ * Sert aux heures de pointe de la vue publique, qui n'ont pas de dimension « salon ». Pur.
+ */
+function isPublicChannel(guild, channel) {
+  if (!channel) return true;
+  if (channel.type === ChannelType.PrivateThread) return false;
+  const base = channel.isThread?.() ? channel.parent : channel;
+  const everyone = guild?.roles?.everyone ?? guild?.roles?.cache?.get?.(guild?.id);
+  const perms = everyone && base?.permissionsFor?.(everyone);
+  return perms?.has ? perms.has(PermissionFlagsBits.ViewChannel) : true;
 }
 
 /** Tampon → lot pour ActivityRepository#applyBatch. Pur. */
@@ -281,13 +295,16 @@ class ActivityService {
       this.#markPresence(guildId, message.author.id, message.createdTimestamp || this.clock());
       return false;
     }
-    // Un fil (ou un post de forum) compte pour son salon.
-    const channelId = channel?.isThread?.() ? channel.parentId ?? message.channelId : message.channelId;
+    // Un fil (ou un post de forum) compte pour son salon, SAUF un fil privé : compté sous son
+    // propre identifiant (jamais crédité à un salon parent public, ni visible de la vue publique).
+    const privateThread = channel?.type === ChannelType.PrivateThread;
+    const channelId = channel?.isThread?.() && !privateThread ? channel.parentId ?? message.channelId : message.channelId;
     const at = message.createdTimestamp || this.clock();
     const day = dayKey(at);
     this.#ensure(guildId);
     inc(this.buffer.messages, `${guildId}|${day}|${channelId}|${message.author.id}`, 1);
-    inc(this.buffer.hours, `${guildId}|${day}|${new Date(at).getUTCHours()}`, 1);
+    const hour = new Date(at).getUTCHours() + (isPublicChannel(message.guild, channel) ? 0 : PRIVATE_HOUR);
+    inc(this.buffer.hours, `${guildId}|${day}|${hour}`, 1);
     if (bufferSize(this.buffer) > MAX_BUFFER_KEYS) this.flush();
     return true;
   }
@@ -561,4 +578,4 @@ class ActivityService {
   }
 }
 
-module.exports = { ActivityService, retentionDays, isIgnoredChannel, toBatch, RETENTION, DM_GAP_MS, FLUSH_INTERVAL_MS, GAP_MS, HEARTBEAT_MS, VIEW_CACHE_TTL_MS, VIEW_COOLDOWN_MS };
+module.exports = { ActivityService, retentionDays, isIgnoredChannel, isPublicChannel, toBatch, RETENTION, DM_GAP_MS, FLUSH_INTERVAL_MS, GAP_MS, HEARTBEAT_MS, VIEW_CACHE_TTL_MS, VIEW_COOLDOWN_MS };

@@ -287,8 +287,9 @@ function membersView(client, guild, period, now, manager, reader) {
 function hoursView(client, guild, period, now, manager, reader) {
   const from = A.addDays(A.dayKey(now), -(period - 1));
   const values = Array.from({ length: 24 }, () => 0);
-  // Heures de pointe : compteurs par heure, sans dimension salon (aucun salon n'y est nommé).
-  const rows = viewData(client, guild, reader, `heures:${period}:${A.dayKey(now)}`, () => client.services.activity.read().hourly(guild.id, from));
+  // Heures de pointe : compteurs par heure (aucun salon n'y est nommé) ; la vue publique ne
+  // compte que les messages des salons visibles par @everyone.
+  const rows = viewData(client, guild, reader, `heures:${period}:${A.dayKey(now)}`, () => client.services.activity.read().hourly(guild.id, from, { publicOnly: !reader.manager }));
   for (const r of rows) if (r.hour >= 0 && r.hour < 24) values[r.hour] = Number(r.messages) || 0;
   const total = values.reduce((a, b) => a + b, 0);
   const peak = values.reduce((b, v, h) => (v > values[b] ? h : b), 0);
