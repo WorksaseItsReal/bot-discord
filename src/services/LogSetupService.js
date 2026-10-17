@@ -8,6 +8,16 @@ const { createLogger } = require('../core/logger');
 
 const logger = createLogger('logs');
 const CATEGORY_NAME = '📋 Logs';
+/**
+ * Attente maximale d'un changement de sujet : Discord n'en autorise que 2 par 10 min et par salon,
+ * au-delà la requête attendrait jusqu'à 10 min (création bloquée, interaction expirée).
+ */
+const TOPIC_TIMEOUT_MS = 5_000;
+
+/** Sujet d'un salon de logs d'après TOUTES les catégories qu'il reçoit. Pur. */
+function topicOf(categories) {
+  return `Logs : ${CATEGORY_KEYS.filter((c) => categories.includes(c)).map((c) => LOG_CATEGORIES[c].label).join(', ')}. Salon géré par le bot.`.slice(0, 1024);
+}
 
 /**
  * Plan de création (pur, testé) : salons à créer et catégories de logs de chacun.
@@ -19,7 +29,7 @@ function planChannels(layoutKey, selected) {
   return layout.groups(valid).map((g) => ({
     name: channelName(g.emoji, g.name),
     categories: g.categories,
-    topic: `Logs : ${g.categories.map((c) => LOG_CATEGORIES[c].label).join(', ')}. Salon géré par le bot.`.slice(0, 1024),
+    topic: topicOf(g.categories),
   }));
 }
 
@@ -65,6 +75,19 @@ class LogSetupService {
     this.config = config;
     /** Serveurs avec une création/suppression en cours (double clic). */
     this.busy = new Set();
+    this.topicTimeoutMs = TOPIC_TIMEOUT_MS;
+  }
+
+  /** Change le sujet seulement s'il diffère, sans attendre plus de `topicTimeoutMs` (limite de Discord). */
+  async #setTopic(channel, topic, reason) {
+    if (channel.topic === topic) return;
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(resolve, this.topicTimeoutMs);
+      timer.unref?.();
+    });
+    await Promise.race([Promise.resolve(channel.setTopic(topic, reason)).catch(() => {}), timeout]);
+    clearTimeout(timer);
   }
 
   assertCanCreate(guild) {
@@ -145,7 +168,9 @@ class LogSetupService {
       );
       if (channel) {
         if (channel.parentId !== category.id) await channel.setParent(category.id, { lockPermissions: false, reason: auditReason }).catch(() => {});
-        await channel.setTopic(item.topic, auditReason).catch(() => {});
+        // Sujet : toutes les catégories du salon (pas seulement celles de ce plan, ex. une réparation).
+        const mapped = Object.entries(this.config.get(guild.id).logChannels ?? {}).filter(([, id]) => id === channel.id).map(([k]) => k);
+        await this.#setTopic(channel, topicOf([...item.categories, ...mapped]), auditReason);
         await mergeOverwrites(channel, perms, auditReason);
         reused.push(channel);
       } else {

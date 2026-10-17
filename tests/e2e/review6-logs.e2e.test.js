@@ -651,3 +651,63 @@ test('R59 : « Réparer » n\'annonce pas une réparation qui a échoué', async
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R60
+
+test('R60 : sujet des salons réécrit seulement s\'il change (complet), sans bloquer sur la limite de Discord', async () => {
+  const h = await createHarness();
+  try {
+    const panel = await panelOf(h, 'admin');
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    await h.click(panel, 'cmd:logs:layout', { as: 'admin', values: ['grouped'] });
+    await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    const cfg = h.client.services.config.get(h.guild.id);
+    const shared = cfg.logChannels.automod;
+    assert.equal(cfg.logChannels.moderation, shared);
+    const topic0 = h.fake.channels.get(shared).topic;
+    assert.match(topic0, /Modération.*Sécurité.*AutoMod|Modération.*AutoMod/);
+    const topicPatches = (mark) => h.fake.calls.slice(mark).filter((c) => c.method === 'PATCH' && /^\/channels\/\d+$/.test(c.route) && c.body && 'topic' in c.body);
+
+    // Nouveau clic sans changement : aucun sujet réécrit (limite Discord : 2 modifications / 10 min).
+    let mark = h.fake.calls.length;
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    assert.deepEqual(topicPatches(mark).map((c) => c.route), []);
+
+    // Création limitée à AutoMod : le salon partagé garde le sujet de toutes ses catégories.
+    mark = h.fake.calls.length;
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    await h.click(panel, 'cmd:logs:setupcats', { as: 'admin', values: ['automod'] });
+    await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    assert.deepEqual(topicPatches(mark).map((c) => c.route), []);
+    assert.equal(h.fake.channels.get(shared).topic, topic0);
+
+    // Sujet modifié à la main + limite de Discord atteinte : la création n'attend pas la fin du délai.
+    const raw = h.fake.channels.get(shared);
+    raw.topic = 'modifié à la main';
+    h.fake.dispatchNow('CHANNEL_UPDATE', raw, 'sujet modifié');
+    await h.settle();
+    h.client.services.logSetup.topicTimeoutMs = 50;
+    h.fake.inject({ method: 'PATCH', route: `/channels/${shared}` }, { status: 429, retryAfter: 1_500 });
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    // Durée de la création elle-même (le harnais, lui, attend la fin de toutes les requêtes).
+    const svc = h.client.services.logSetup;
+    const create = svc.create.bind(svc);
+    let took = null;
+    svc.create = async (...args) => {
+      const start = Date.now();
+      try {
+        return await create(...args);
+      } finally {
+        took = Date.now() - start;
+      }
+    };
+    const r = await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    assert.ok(took !== null && took < 1_000, `création bloquée ${took} ms par la limite de Discord`);
+    assert.ok(!h.isError(r), h.replyText(r));
+    await h.settle({ timeout: 3_000 });
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
