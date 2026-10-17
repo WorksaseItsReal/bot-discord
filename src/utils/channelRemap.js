@@ -39,6 +39,8 @@ const COLUMNS = Object.freeze({
   'reports.card_channel_id': 'history',
   'applications.card_channel_id': 'history',
   'sanctions.log_channel_id': 'history',
+  'security_incidents.alert_channel_id': 'history',
+  'security_grants.card_channel_id': 'history',
 });
 
 /** Colonnes de message remises à NULL quand le salon est reporté (le message n'existe plus). */
