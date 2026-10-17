@@ -21,7 +21,7 @@ module.exports = {
   category: 'moderation',
   data: new SlashCommandBuilder()
     .setName('lockall')
-    .setDescription('Verrouille tous les salons écrits du serveur (texte, annonces, forums, vocaux).')
+    .setDescription('Verrouille tous les salons écrits du serveur (texte, annonces, forums, médias, vocaux).')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction, client) {

@@ -5,7 +5,7 @@ const { discordTimestamp, formatDuration, MAX_DURATION_MS } = require('../utils/
 const { field, ICONS, code } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { logCard } = require('./LoggingService');
-const { normalizeLock, SCOPES } = require('./LockdownService');
+const { normalizeLock, lockData, SCOPES } = require('./LockdownService');
 const { UserError } = require('../core/errors');
 
 const logger = createLogger('timedlocks');
@@ -161,7 +161,7 @@ class TimedLockService {
     // Lockdown en cours : le salon reste verrouillé et sera restauré avec le lockdown.
     if (lockdown.status(guild) > 0) {
       const state = normalizeLock(saved.data);
-      lockdown.locks.save(guild.id, channel.id, { v: 2, scope: SCOPES.lockdown, perms: state.perms });
+      lockdown.locks.save(guild.id, channel.id, lockData({ ...state, scope: SCOPES.lockdown }));
       this.repo.close(row.id, 'lockdown');
       await this.#log(guild, row, channel, `La durée du verrouillage de ${channel} est écoulée, mais un **lockdown** est en cours : le salon sera déverrouillé avec lui.`);
       return;

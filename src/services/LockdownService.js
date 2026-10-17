@@ -1,6 +1,6 @@
 'use strict';
 
-const { PermissionFlagsBits, ChannelType, PermissionOverwrites } = require('discord.js');
+const { PermissionFlagsBits, ChannelType, PermissionOverwrites, OverwriteType } = require('discord.js');
 const { card, field, wide, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { snowflake } = require('../utils/buttonGuard');
@@ -9,7 +9,7 @@ const { UserError } = require('../core/errors');
 
 /** Présentation des actions sur un salon (lock, unlock, hide, unhide). */
 const CHANNEL_ACTIONS = {
-  lock: { tone: 'caution', icon: ICONS.lock, title: 'Salon verrouillé', text: (c) => `${c} est désormais en lecture seule pour @everyone.` },
+  lock: { tone: 'caution', icon: ICONS.lock, title: 'Salon verrouillé', text: (c) => `${c} est désormais en lecture seule pour les membres.` },
   unlock: { tone: 'success', icon: ICONS.unlock, title: 'Salon déverrouillé', text: (c) => `Tout le monde peut de nouveau écrire dans ${c}.` },
   hide: { tone: 'caution', icon: ICONS.hidden, title: 'Salon masqué', text: (c) => `${c} n'est plus visible par @everyone.` },
   unhide: { tone: 'success', icon: ICONS.visible, title: 'Salon visible', text: (c) => `${c} est de nouveau visible par @everyone.` },
@@ -70,8 +70,19 @@ const LOCK_PERMS = {
   [ChannelType.GuildAnnouncement]: ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads'],
   [ChannelType.GuildForum]: ['SendMessages', 'SendMessagesInThreads'], // SendMessages = créer un post
   [ChannelType.GuildVoice]: ['SendMessages'], // salon textuel intégré au vocal
+  [ChannelType.GuildStageVoice]: ['SendMessages'], // chat de la conférence
+  [ChannelType.GuildMedia]: ['SendMessages', 'SendMessagesInThreads'], // comme un forum : SendMessages = créer un post
 };
 const DEFAULT_LOCK_PERMS = ['SendMessages'];
+/**
+ * Permissions qui font d'un rôle un rôle de modération (sur le serveur ou dans la surcharge du
+ * salon) : sa surcharge n'est jamais neutralisée par un verrouillage.
+ */
+const STAFF_PERMISSIONS = [
+  PermissionFlagsBits.Administrator, PermissionFlagsBits.ManageGuild, PermissionFlagsBits.ManageChannels,
+  PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ModerateMembers,
+  PermissionFlagsBits.KickMembers, PermissionFlagsBits.BanMembers,
+];
 /** Types de salons verrouillés par lockall / lockdown. */
 const LOCKABLE_TYPES = new Set(Object.keys(LOCK_PERMS).map(Number));
 /** Parallélisme des opérations de masse (lockall / unlockall). */
@@ -146,8 +157,127 @@ async function editEveryone(channel, perms, reason) {
 }
 
 function normalizeLock(data) {
-  if (data?.perms) return { scope: data.scope, perms: { ...data.perms } };
-  return { scope: data?.scope, perms: { SendMessages: bitToState(data?.allow, data?.deny) } };
+  const others = data?.others ? JSON.parse(JSON.stringify(data.others)) : {};
+  if (data?.perms) return { scope: data.scope, perms: { ...data.perms }, others };
+  return { scope: data?.scope, perms: { SendMessages: bitToState(data?.allow, data?.deny) }, others };
+}
+
+/** Ligne à sauvegarder pour un état normalisé (`others` omis s'il est vide). */
+function lockData(state) {
+  const data = { v: 2, scope: state.scope, perms: state.perms };
+  if (state.others && Object.keys(state.others).length) data.others = state.others;
+  return data;
+}
+
+/**
+ * Modifie une surcharge (rôle ou membre) autre que @everyone et met le cache à jour tout de
+ * suite (même raison que editEveryone).
+ */
+async function editOverwrite(channel, id, type, perms, reason) {
+  const existing = channel.permissionOverwrites.cache?.get?.(id);
+  await channel.permissionOverwrites.edit(id, perms, { reason, type });
+  try {
+    if (typeof channel.permissionOverwrites._add !== 'function') return;
+    const { allow, deny } = PermissionOverwrites.resolveOverwriteOptions(perms, existing ?? {});
+    channel.permissionOverwrites._add({ id, type, allow: allow.bitfield.toString(), deny: deny.bitfield.toString() });
+  } catch {
+    // cache non mis à jour : l'événement de la passerelle le fera
+  }
+}
+
+/**
+ * Surcharges de RÔLE qui autorisent une permission verrouillée : elles l'emportent sur le refus
+ * posé à @everyone (rôle « Membre », rôle automatique donné aux arrivants pendant un raid…).
+ * Le verrouillage les neutralise. Épargnés : rôles de modération (permissions du rôle ou de sa
+ * surcharge), rôles du bot et rôles gérés d'autres bots.
+ * @returns {Array<{ id: string, type: number, perms: Record<string, null> }>}
+ */
+function roleBypasses(channel, perms) {
+  const guild = channel.guild;
+  const me = guild.members?.me;
+  const out = [];
+  for (const [id, ow] of channel.permissionOverwrites.cache ?? []) {
+    if (ow?.type !== OverwriteType.Role || id === guild.roles.everyone.id) continue;
+    const allowed = perms.filter((p) => overwriteState(ow, p) === true);
+    if (!allowed.length) continue;
+    const role = guild.roles.cache?.get(id);
+    if (!role || role.tags?.botId || me?.roles?.cache?.has(id)) continue;
+    const owAllow = BigInt(ow.allow?.bitfield ?? 0n);
+    if (STAFF_PERMISSIONS.some((f) => role.permissions?.has?.(f) || (owAllow & f) === f)) continue;
+    out.push({ id, type: OverwriteType.Role, perms: Object.fromEntries(allowed.map((p) => [p, null])) });
+  }
+  return out;
+}
+
+/**
+ * Surcharge MEMBRE du bot qui lui garde les permissions qu'un refus à @everyone lui retirerait
+ * (bot sans Administrateur et sans surcharge propre) : sans elle, un lockdown le priverait de ses
+ * salons de logs et d'alerte, et /hide de la vue du salon (plus de /unhide possible). Seules les
+ * permissions que le bot a DÉJÀ dans ce salon sont gardées.
+ * @returns {Array<{ id: string, type: number, created: boolean, perms: Record<string, true> }>}
+ */
+function botKeeps(channel, flags) {
+  const me = channel.guild.members?.me;
+  const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
+  if (!perms || perms.has(PermissionFlagsBits.Administrator)) return [];
+  const own = channel.permissionOverwrites.cache?.get?.(me.id);
+  const byRole = (flag) => [...(me.roles?.cache?.keys?.() ?? [])].some((id) => id !== channel.guild.roles.everyone.id && overwriteState(channel.permissionOverwrites.cache.get(id), flag) === true);
+  const keep = flags.filter((f) => perms.has(PermissionFlagsBits[f]) && overwriteState(own, f) !== true && !byRole(f));
+  if (!keep.length) return [];
+  return [{ id: me.id, type: OverwriteType.Member, created: !own, perms: Object.fromEntries(keep.map((f) => [f, true])) }];
+}
+
+/**
+ * Mémorise, pour chaque surcharge à modifier, l'état d'ORIGINE (`was`) et la valeur posée par
+ * le bot (`set`) de chaque permission. Un état déjà mémorisé (second verrouillage) est conservé.
+ * @returns {object} les seules entrées nouvellement mémorisées (même forme que `others`)
+ */
+function rememberOthers(others, plan, channel) {
+  const fresh = {};
+  for (const item of plan) {
+    const current = channel.permissionOverwrites.cache?.get?.(item.id);
+    const entry = (others[item.id] ??= { type: item.type, perms: {} });
+    if (item.created && !Object.keys(entry.perms).length) entry.created = true;
+    for (const [flag, set] of Object.entries(item.perms)) {
+      if (flag in entry.perms) continue;
+      entry.perms[flag] = { was: overwriteState(current, flag), set };
+      fresh[item.id] ??= { type: item.type, perms: {}, ...(entry.created ? { created: true } : {}) };
+      fresh[item.id].perms[flag] = entry.perms[flag];
+    }
+  }
+  return fresh;
+}
+
+/** Applique les surcharges prévues (best-effort : un échec n'annule pas le verrouillage). */
+async function applyOthers(channel, plan, reason) {
+  for (const item of plan) {
+    await editOverwrite(channel, item.id, item.type, item.perms, reason).catch(() => {});
+  }
+}
+
+/**
+ * Restaure les surcharges mémorisées. Une permission n'est restaurée que si elle porte ENCORE
+ * la valeur posée par le bot : une décision prise à la main entre-temps est respectée. Une
+ * surcharge supprimée entre-temps n'est pas recréée ; celle que le bot avait créée (garde du
+ * bot) est supprimée si elle redevient neutre.
+ */
+async function restoreOthers(channel, others, reason) {
+  for (const [id, entry] of Object.entries(others ?? {})) {
+    const ow = channel.permissionOverwrites.cache?.get?.(id);
+    if (!ow) continue;
+    const back = {};
+    for (const [flag, { was, set }] of Object.entries(entry.perms ?? {})) {
+      if (overwriteState(ow, flag) === set) back[flag] = was;
+    }
+    if (!Object.keys(back).length) continue;
+    const { allow, deny } = PermissionOverwrites.resolveOverwriteOptions(back, { allow: BigInt(ow.allow?.bitfield ?? 0n), deny: BigInt(ow.deny?.bitfield ?? 0n) });
+    if (entry.created && allow.bitfield === 0n && deny.bitfield === 0n && typeof channel.permissionOverwrites.delete === 'function') {
+      await channel.permissionOverwrites.delete(id, reason);
+      channel.permissionOverwrites.cache?.delete?.(id);
+      continue;
+    }
+    await editOverwrite(channel, id, entry.type, back, reason);
+  }
 }
 
 /** Ligne prise en compte par lockdown status / unlockall / lockdown disable. */
@@ -253,23 +383,31 @@ class LockdownService {
     const everyone = channel.guild.roles.everyone;
     const perms = lockPermsFor(channel);
     const saved = this.locks.get(channel.guild.id, channel.id);
-    const state = saved ? normalizeLock(saved.data) : { scope, perms: {} };
+    const state = saved ? normalizeLock(saved.data) : { scope, perms: {}, others: {} };
     const current = channel.permissionOverwrites.cache.get(everyone.id);
     const missing = perms.filter((p) => !(p in state.perms));
     const promote = Boolean(saved) && scope === SCOPES.manual && (state.scope ?? SCOPES.lockdown) !== SCOPES.manual;
     if (promote) state.scope = SCOPES.manual;
-    if (!saved || missing.length || promote) {
+    // Garde du bot (avant le refus : il ne pourrait plus s'accorder une permission perdue) et
+    // surcharges de rôle qui contourneraient le refus posé à @everyone.
+    const keep = botKeeps(channel, perms);
+    const bypass = roleBypasses(channel, perms);
+    const fresh = rememberOthers(state.others, [...keep, ...bypass], channel);
+    if (!saved || missing.length || promote || Object.keys(fresh).length) {
       for (const p of missing) state.perms[p] = overwriteState(current, p);
-      this.locks.save(channel.guild.id, channel.id, { v: 2, scope: state.scope, perms: state.perms });
+      this.locks.save(channel.guild.id, channel.id, lockData(state));
     }
+    await applyOthers(channel, keep, reason);
     try {
       await editEveryone(channel, Object.fromEntries(perms.map((p) => [p, false])), reason);
     } catch (err) {
       // Salon non verrouillé : on n'en garde pas une trace qui fausserait le statut du lockdown.
+      await restoreOthers(channel, fresh, reason).catch(() => {});
       if (!saved) this.locks.delete(channel.guild.id, channel.id);
-      else if (promote) this.locks.save(channel.guild.id, channel.id, saved.data);
+      else this.locks.save(channel.guild.id, channel.id, saved.data);
       throw err;
     }
+    await applyOthers(channel, bypass, reason);
     if (timer === undefined || !this.timed) return null;
     if (timer === null) {
       this.#cancelTimer(channel.guild.id, 'lock', channel.id, 'replaced');
@@ -297,7 +435,9 @@ class LockdownService {
       if (onlyIf && !onlyIf()) return false;
       const saved = this.locks.get(channel.guild.id, channel.id);
       if (saved) {
-        await restoreEveryone(channel, normalizeLock(saved.data).perms, reason);
+        const state = normalizeLock(saved.data);
+        await restoreEveryone(channel, state.perms, reason);
+        await restoreOthers(channel, state.others, reason);
         this.locks.delete(channel.guild.id, channel.id);
       } else {
         await restoreEveryone(channel, { SendMessages: null }, reason);
@@ -344,8 +484,8 @@ class LockdownService {
   }
 
   /**
-   * Verrouille tous les salons où l'on peut écrire (textuels, annonces, forums,
-   * texte des vocaux), par lots de 5.
+   * Verrouille tous les salons où l'on peut écrire (textuels, annonces, forums, médias,
+   * texte des vocaux et des conférences), par lots de 5.
    * @param {{ log?: boolean, wait?: boolean }} [opts] log=false : l'appelant publie sa propre carte (AntiRaid) ;
    *   wait : attendre un verrouillage / une levée en cours au lieu de refuser (AntiRaid)
    */
@@ -459,6 +599,7 @@ module.exports = {
   channelForButton,
   channelForCommand,
   normalizeLock,
+  lockData,
   lockPermsFor,
   CHANNEL_ACTIONS,
   LOCK_PERMS,
