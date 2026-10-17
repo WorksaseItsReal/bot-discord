@@ -26,7 +26,8 @@ test('/secur statut : administrateur (embed, actualiser, exploration) ; membre r
     assert.ok(reply.flags & EPHEMERAL, 'statut public');
     assert.match(reply.embeds[0].title, /Secur · statut/);
     const modules = reply.embeds[0].fields.filter((f) => /Modules/.test(f.name)).map((f) => f.value).join('\n');
-    assert.equal((modules.match(/non disponible/g) ?? []).length, 18, 'registre livré vide : 18 modules « non disponible »');
+    const loaded = h.client.services.secur.registry.modules.size;
+    assert.equal((modules.match(/non disponible/g) ?? []).length, 18 - loaded, 'module non chargé : « non disponible »');
     await explore(h, rec, { budget: 10 });
     const denied = await h.slash('secur', secur(), { as: 'member' });
     assert.ok(h.isError(denied), 'membre sans Administrateur');
@@ -123,7 +124,7 @@ test('pré-contrôle : /ban d\'un admin non exempté à la limite → refus en e
     assert.ok(h.fake.members.has(target.id));
 
     // Module Secur « ban » (limite 2) : le 1er ban passe et est compté, le 2e est refusé.
-    h.client.services.secur.registry.register({ key: 'ban', auditTypes: [22], classify: () => ({ weight: 1, record: null }) });
+    if (!h.client.services.secur.registry.has('ban')) h.client.services.secur.registry.register({ key: 'ban', auditTypes: [22], classify: () => ({ weight: 1, record: null }) });
     h.configure({ secur: { modules: { ban: { mode: 'on', limit: 2 } } } });
     const first = await h.slash('ban', [{ name: 'membre', type: 6, value: target.id }], { as: 'admin' });
     assert.ok(!h.isError(first), h.replyText(first));
