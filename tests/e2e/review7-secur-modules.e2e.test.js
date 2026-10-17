@@ -435,3 +435,45 @@ for (const botAdministrator of [true, false]) {
     }
   });
 }
+
+/* -------------------------------------------------------------------- */
+/* S22 : roleRemove pendant un incident ouvert de la cible                 */
+/* -------------------------------------------------------------------- */
+
+async function spammerSetup(h) {
+  h.configureAll();
+  for (const key of ['gamer', 'notif']) {
+    const role = h.fake.roles.get(IDS.roles[key]);
+    role.permissions = (BigInt(role.permissions) | P.KickMembers | P.MentionEveryone).toString();
+    h.fake.dispatchNow('GUILD_ROLE_UPDATE', { guild_id: h.guild.id, role });
+  }
+  const m = h.fake.members.get(IDS.users.member);
+  m.roles = [...new Set([...m.roles, IDS.roles.mod, IDS.roles.notif, IDS.roles.gamer])];
+  h.fake.dispatchNow('GUILD_MEMBER_UPDATE', { guild_id: h.guild.id, ...m });
+  await h.settle();
+}
+
+const S22_CASES = [
+  { label: 'mode on, admin non whitelisté, 3 retraits', removed: ['mod', 'notif', 'gamer'], cfg: { secur: { modules: { everyone: { mode: 'on' }, roleRemove: { mode: 'on' } } } } },
+  { label: 'préréglage max, admin whitelisté, 2 retraits', removed: ['mod', 'notif'], cfg: { whitelist: { users: [IDS.users.admin] }, secur: { modules: presetPatch('max', defaultGuildConfig.secur.modules) } } },
+];
+
+for (const c of S22_CASES) {
+  test(`S22 (${c.label}) : un admin retire ses rôles à l'auteur d'un incident en cours → ni rendus à l'auteur, ni admin dérangé`, async () => {
+    const h = await createHarness();
+    try {
+      await spammerSetup(h);
+      h.configure(c.cfg);
+      await h.userMessage({ as: 'member', channel: 'general', content: '@everyone venez voir mon serveur' });
+      await h.settle();
+      assert.ok(h.client.services.secur.open.has(`${h.guild.id}:${IDS.users.member}`), 'précondition : incident ouvert pour l\'auteur du @everyone');
+      for (const key of c.removed) await h.asHuman('admin').removeRole('member', IDS.roles[key]);
+      await settleUndo(h, 3);
+      for (const key of c.removed) assert.equal(rolesOf(h, IDS.users.member).includes(IDS.roles[key]), false, `rôle ${key} rendu à l'auteur de l'incident`);
+      assert.ok(rolesOf(h, IDS.users.admin).includes(IDS.roles.admin), 'admin dérangé pour avoir neutralisé l\'auteur');
+      assert.equal(h.client.services.secur.open.has(`${h.guild.id}:${IDS.users.admin}`), false, 'incident ouvert contre l\'admin');
+    } finally {
+      await h.close();
+    }
+  });
+}

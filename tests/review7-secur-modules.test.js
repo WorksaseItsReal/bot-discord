@@ -100,3 +100,23 @@ test('S11 : chaîne de modifications d\'un champ par un même auteur — origine
   assert.equal(c3.old, 'nuked');
   assert.equal(St.chainMatches(store, G, 'channel:1', c1, 'propre'), false, 'valeur d\'un autre auteur prise pour celle de la chaîne');
 });
+
+// ---------------------------------------------------------------- S22
+
+test('S22 : roleRemove ignore la cible d\'un incident ouvert ; incident expiré ou absent → compté', () => {
+  const roleRemove = require('../src/services/secur/modules/roles').find((m) => m.key === 'roleRemove');
+  const G = '300000000000000040';
+  const T = '300000000000000041';
+  const ROLE = '300000000000000042';
+  const role = { id: ROLE, managed: false, permissions: { any: () => true }, position: 1 };
+  const guild = { id: G, ownerId: '1', roles: { cache: new Map([[ROLE, role]]) } };
+  const entry = { targetId: T, executorId: '300000000000000043', changes: [{ key: '$remove', new: [{ id: ROLE }] }] };
+  let now = 1_000;
+  const open = new Map([[`${G}:${T}`, { expiresAt: 61_000 }]]);
+  const ctx = { client: { user: { id: '9' } }, cfg: {}, service: { open, now: () => now } };
+  assert.equal(roleRemove.classify(entry, guild, ctx), null, 'cible d\'un incident ouvert comptée');
+  now = 62_000;
+  assert.ok(roleRemove.classify(entry, guild, ctx), 'incident expiré : retrait non compté');
+  open.clear();
+  assert.ok(roleRemove.classify(entry, guild, ctx));
+});

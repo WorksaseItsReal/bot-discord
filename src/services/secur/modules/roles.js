@@ -345,6 +345,9 @@ const roleRemove = {
       // Rôles retirés AU BOT : alerte prioritaire et sanction d'emblée.
       return { weight: S.effectiveLimit(ctx.cfg, 'roleRemove'), record: { targetId, roles: removed, bot: true } };
     }
+    // Cible auteur d'un incident Secur en cours : un responsable la neutralise à la main. Ni compté
+    // (le responsable n'est pas dérangé), ni annulé (l'auteur n'est pas réarmé).
+    if (St.openIncidentOf(ctx, guild.id, targetId)) return null;
     const opts = levelOpts(ctx);
     const roles = removed.filter((id) => {
       const role = guild.roles?.cache?.get?.(id);
@@ -353,8 +356,13 @@ const roleRemove = {
     if (!roles.length) return null;
     return { weight: 1, record: { targetId, roles } };
   },
-  async undo(guild, record) {
+  async undo(guild, record, ctx) {
     if (!record?.roles?.length) return { ok: false };
+    // Incident ouvert pour la cible depuis le classement : rien ne lui est rendu.
+    if (!record.bot && St.openIncidentOf(ctx, guild.id, record.targetId)) {
+      St.noteSummary(ctx, `remove:${record.targetId}`, () => {}, () => `Rôles retirés à <@${record.targetId}> non rendus : il est l'auteur d'un incident Secur en cours.`);
+      return { ok: true };
+    }
     const member = record.bot ? guild.members?.me : guild.members?.cache?.get?.(record.targetId) ?? (await guild.members?.fetch?.(record.targetId).catch(() => null));
     if (!member) return { ok: false, note: `<@${record.targetId}> a quitté le serveur : rôles non rendus.` };
     const roles = record.roles.filter((id) => guild.roles.cache.has(id) && !member.roles.cache.has(id));
