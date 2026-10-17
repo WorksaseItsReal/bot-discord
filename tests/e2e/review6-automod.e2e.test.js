@@ -290,3 +290,38 @@ test('R46 : AutoMod natif — double « Synchroniser » sans doublon, doublon ex
     await h.close();
   }
 });
+
+/** Confirmation éphémère « Bannir » (cmd:automod:qbanok) d'une quarantaine. */
+function banConfirmMessage(h, userId) {
+  return h.fake.buildMessage({
+    channelId: IDS.channels.logs,
+    body: { embeds: [{ title: 'Confirmer le bannissement', description: `Bannir <@${userId}> ?` }], components: [{ type: 1, components: [{ type: 2, style: 4, label: 'Bannir', custom_id: `cmd:automod:qbanok:${userId}` }] }] },
+    flags: 64,
+  });
+}
+
+test('R51 : double clic sur « Bannir » d\'une quarantaine — un seul ban, l\'AntiRaid ne dépouille pas le modérateur', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ antiraid: { enabled: true, banThreshold: 5, destructiveWindowSeconds: 10, punishExecutor: 'strip' } });
+  h.fake.latency = 2;
+  try {
+    const victims = ['Pirate1', 'Pirate2', 'Pirate3'].map((n) => h.addUser(n, { ageDays: 900 }).id);
+    for (const id of victims) {
+      const msg = banConfirmMessage(h, id);
+      await Promise.all([1, 2].map(() => h.click(msg, `cmd:automod:qbanok:${id}`, { as: 'mod' })));
+      await h.settle();
+    }
+    const bans = () => h.client.database.db.prepare("SELECT COUNT(*) AS n FROM sanctions WHERE type = 'ban' AND moderator_id = ?").get(IDS.users.mod).n;
+    assert.equal(bans(), 3, `sanctions « ban » enregistrées : ${bans()}`);
+    assert.equal(h.fake.members.get(IDS.users.mod).roles.includes(IDS.roles.mod), true, 'rôles du modérateur retirés par l\'AntiRaid');
+    // Clic tardif sur une confirmation restée ouverte : déjà banni, rien de plus.
+    const late = await h.click(banConfirmMessage(h, victims[0]), `cmd:automod:qbanok:${victims[0]}`, { as: 'mod' });
+    assert.match(h.replyText(late), /déjà banni/i);
+    assert.equal(bans(), 3);
+    assert.equal(h.fake.calls.filter((c) => c.method === 'PUT' && c.route.endsWith(`/bans/${victims[0]}`)).length, 1);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

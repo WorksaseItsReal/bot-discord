@@ -1122,6 +1122,18 @@ async function restoreRoles(interaction, userId, roleIds, reason) {
   return { ok: !aboveMod.length && !aboveBot.length && !refused.length, lines: lines.length ? lines : ['Aucun rôle à rendre.'] };
 }
 
+/** Actions de bouton en cours (`action:serveur:membre`) : un double clic (ou deux modérateurs) n'agit qu'une fois. */
+const pending = new Set();
+async function exclusiveAction(key, fn) {
+  if (pending.has(key)) throw new UserError('Cette action est déjà en cours.');
+  pending.add(key);
+  try {
+    return await fn();
+  } finally {
+    pending.delete(key);
+  }
+}
+
 // ---------------------------------------------------------------- commande
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
@@ -1596,24 +1608,35 @@ module.exports = {
     async qbanok(interaction, client, [rawUserId, rawLogId]) {
       requirePermission(interaction, 'BanMembers');
       const userId = snowflake(rawUserId, 'membre');
-      await interaction.deferUpdate();
-      const user = await client.users.fetch(userId).catch(() => null);
-      if (!user) throw new UserError('Utilisateur introuvable.');
-      // Absent du serveur seulement sur « Unknown Member » : une erreur passagère ne doit pas
-      // faire sauter la vérification de hiérarchie.
-      const member = await interaction.guild.members.fetch(userId).catch((err) => {
-        if (err?.code === UNKNOWN_MEMBER) return null;
-        throw new UserError('Impossible de vérifier ce membre pour le moment (erreur Discord) : réessayez dans un instant.');
-      });
-      const res = await client.services.moderation.ban(interaction.guild, user, interaction.member, 'Compte piraté (quarantaine AutoMod)', { deleteMessageSeconds: 3600, targetMember: member ?? undefined });
-      await interaction.editReply({ embeds: [status.ok(`${userLine(user)} est banni${res?.id ? ` · sanction #${res.id}` : ''}.`, 'Membre banni')], components: [] });
-      // Fige le bouton « Bannir » du log d'origine (best-effort).
-      if (/^\d{17,20}$/.test(rawLogId ?? '')) {
-        const log = await interaction.channel?.messages?.fetch(rawLogId).catch(() => null);
-        if (log && log.author?.id === client.user?.id) {
-          await log.edit({ components: settleComponents(log, `cmd:automod:qban:${userId}`, `Banni par ${interaction.user.username}`) }).catch(() => {});
+      // Double clic : un second ban compterait double pour l'AntiRaid (seuil « bans en masse »).
+      return exclusiveAction(`qban:${interaction.guildId}:${userId}`, async () => {
+        await interaction.deferUpdate();
+        const user = await client.users.fetch(userId).catch(() => null);
+        if (!user) throw new UserError('Utilisateur introuvable.');
+        // Fige le bouton « Bannir » du log d'origine (best-effort).
+        const settleLog = async () => {
+          if (!/^\d{17,20}$/.test(rawLogId ?? '')) return;
+          const log = await interaction.channel?.messages?.fetch(rawLogId).catch(() => null);
+          if (log && log.author?.id === client.user?.id) {
+            await log.edit({ components: settleComponents(log, `cmd:automod:qban:${userId}`, `Banni par ${interaction.user.username}`) }).catch(() => {});
+          }
+        };
+        // Déjà banni (confirmation restée ouverte, autre modérateur) : rien de plus (ni sanction ni compteur).
+        const existing = await interaction.guild.bans.fetch({ user: userId, force: true }).catch(() => null);
+        if (existing?.user?.id === userId) {
+          await interaction.editReply({ embeds: [status.warn(`${userLine(user)} est déjà banni. Rien n'a été modifié.`)], components: [] });
+          return settleLog();
         }
-      }
+        // Absent du serveur seulement sur « Unknown Member » : une erreur passagère ne doit pas
+        // faire sauter la vérification de hiérarchie.
+        const member = await interaction.guild.members.fetch(userId).catch((err) => {
+          if (err?.code === UNKNOWN_MEMBER) return null;
+          throw new UserError('Impossible de vérifier ce membre pour le moment (erreur Discord) : réessayez dans un instant.');
+        });
+        const res = await client.services.moderation.ban(interaction.guild, user, interaction.member, 'Compte piraté (quarantaine AutoMod)', { deleteMessageSeconds: 3600, targetMember: member ?? undefined });
+        await interaction.editReply({ embeds: [status.ok(`${userLine(user)} est banni${res?.id ? ` · sanction #${res.id}` : ''}.`, 'Membre banni')], components: [] });
+        return settleLog();
+      });
     },
     /** cmd:automod:qcancel — annule le bannissement. */
     async qcancel(interaction) {
