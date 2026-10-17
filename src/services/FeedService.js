@@ -36,6 +36,29 @@ const USER_AGENT = `InspecteurGadget/${require('../../package.json').version} (b
 const ACCEPT = 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5';
 
 /**
+ * Clé de déduplication par LIEN (en plus de l'identifiant) : un flux dont les guid changent à
+ * chaque lecture ne republie pas ses articles. Hôte en minuscules, http → https, sans fragment,
+ * sans paramètres utm_*, sans « / » final. Pur.
+ * @returns {string|null}
+ */
+function linkKey(link) {
+  const safe = safeHttpUrl(link);
+  if (!safe) return null;
+  try {
+    const url = new URL(safe);
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) if (/^utm_/i.test(key)) url.searchParams.delete(key);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    return `lien:https://${url.host}${path}${url.search}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Clés d'un article (identifiant, lien normalisé) : vu si l'une d'elles l'est. Pur. */
+const itemKeys = (item) => [item.id, linkKey(item.link)].filter(Boolean);
+
+/**
  * Message publié pour un article : carte (titre, extrait ≤ 300, lien http(s), image), bouton
  * lien, mention du rôle avec allowedMentions explicite (jamais @everyone). Pur.
  */
@@ -257,11 +280,18 @@ class FeedService {
     const meta = { etag: result.etag, lastModified: result.lastModified, title: truncate(result.feed.title, 200), now };
     const items = result.feed.items;
     if (!fresh.synced) {
-      this.repo.markSeen(fresh.id, items.map((i) => i.id), now);
+      this.repo.markSeen(fresh.id, items.flatMap(itemKeys), now);
       this.repo.recordSuccess(fresh.id, { ...meta, synced: true });
       return 'synced';
     }
-    const unseen = items.filter((i) => !this.repo.isSeen(fresh.id, i.id));
+    // Nouveauté : ni son identifiant ni son lien déjà vus (ni vus plus haut dans cette lecture).
+    const thisPoll = new Set();
+    const unseen = items.filter((i) => {
+      const keys = itemKeys(i);
+      const seen = keys.some((k) => thisPoll.has(k) || this.repo.isSeen(fresh.id, k));
+      for (const k of keys) thisPoll.add(k);
+      return !seen;
+    });
     const toPost = unseen.filter((i) => matchesFilter(i, fresh.filter)).slice(0, MAX_POSTS_PER_POLL).reverse();
     if (toPost.length) {
       const issue = channelIssue(guild, fresh.channel_id);
@@ -269,24 +299,25 @@ class FeedService {
     }
     // Articles filtrés, au-delà du plafond ou déjà vus : mémorisés sans être publiés.
     const pending = new Set(toPost.map((i) => i.id));
-    this.repo.markSeen(fresh.id, items.filter((i) => !pending.has(i.id)).map((i) => i.id), now);
+    this.repo.markSeen(fresh.id, items.filter((i) => !pending.has(i.id)).flatMap(itemKeys), now);
     let posted = 0;
     for (const item of toPost) {
       if (this.stopped) break;
       try {
-        await this.publish(guild, fresh, item, result.feed);
+        // Une seule mention du rôle par lecture (le premier article publié).
+        await this.publish(guild, fresh, item, result.feed, { mention: posted === 0 });
       } catch (err) {
         if (err?.code === INVALID_FORM_BODY) {
           // Article refusé par Discord (contenu invalide) : ignoré, les suivants sont publiés.
           // Sinon il bloquait tout le flux, puis le désactivait à la 10e lecture.
           logger.warn(`Flux #${fresh.id} (serveur ${fresh.guild_id}) : article ${JSON.stringify(truncate(item.title || item.id, 80))} refusé par Discord, ignoré —`, err?.message ?? err);
-          this.repo.markSeen(fresh.id, [item.id], now);
+          this.repo.markSeen(fresh.id, itemKeys(item), now);
           continue;
         }
         // Les articles restants seront retentés à la prochaine lecture.
         return this.#fail(guild, fresh, `publication impossible : ${describeError(err)}`, now);
       }
-      this.repo.markSeen(fresh.id, [item.id], now);
+      this.repo.markSeen(fresh.id, itemKeys(item), now);
       this.repo.recordPosted(fresh.id);
       posted += 1;
     }
@@ -294,11 +325,14 @@ class FeedService {
     return posted ? 'posted' : 'unchanged';
   }
 
-  /** Publie un article dans le salon du flux. */
-  async publish(guild, row, item, feed) {
+  /**
+   * Publie un article dans le salon du flux.
+   * @param {{ mention?: boolean }} [opts] mention : mentionner le rôle du flux (une fois par lecture)
+   */
+  async publish(guild, row, item, feed, { mention = true } = {}) {
     const channel = guild.channels.cache.get(row.channel_id);
     // Jamais @everyone : un rôle disparu ou égal au serveur n'est pas mentionné.
-    let roleId = row.role_id && row.role_id !== guild.id && guild.roles.cache.has(row.role_id) ? row.role_id : null;
+    let roleId = mention && row.role_id && row.role_id !== guild.id && guild.roles.cache.has(row.role_id) ? row.role_id : null;
     if (roleId) {
       // Revérifié à chaque publication (comme les annonces programmées) : rôle non mentionnable
       // et auteur parti ou sans « Mentionner @everyone » dans ce salon → publié sans mention.
@@ -360,6 +394,7 @@ class FeedService {
 module.exports = {
   FeedService,
   itemPayload,
+  linkKey,
   describeError,
   POLL_INTERVAL_MS,
   MAX_FEEDS_PER_GUILD,

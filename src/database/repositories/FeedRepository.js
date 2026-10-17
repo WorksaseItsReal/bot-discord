@@ -1,7 +1,8 @@
 'use strict';
 
 /** Articles mémorisés au plus par flux (déduplication). */
-const MAX_SEEN_PER_FEED = 200;
+/** Clés vues gardées par flux (identifiant ET lien normalisé de chaque article : 2 par article). */
+const MAX_SEEN_PER_FEED = 400;
 
 /**
  * Flux RSS / Atom / YouTube (/flux) et articles déjà vus (déduplication par guid).
@@ -124,7 +125,7 @@ class FeedRepository {
 
   /**
    * Marque des articles comme vus (ceux déjà connus sont « rafraîchis » : un article encore
-   * présent dans le flux n'est jamais oublié), puis ne garde que les 200 plus récents.
+   * présent dans le flux n'est jamais oublié), puis ne garde que les MAX_SEEN_PER_FEED clés les plus récentes.
    */
   markSeen(feedId, guids, now = Date.now()) {
     if (!guids.length) return;

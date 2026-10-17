@@ -373,10 +373,11 @@ test('FeedRepository : création, unicité, articles vus (200 au plus, présents
   assert.throws(() => repo.create({ guildId: GUILD, channelId: CHAN, url: 'https://a.fr/rss' }), /UNIQUE/);
   assert.equal(repo.find(GUILD, CHAN, 'https://a.fr/rss').id, row.id);
   assert.equal(repo.get('autre', row.id), null);
-  // 250 articles vus en plusieurs lectures : 200 gardés, les plus récents.
-  for (let k = 0; k < 5; k += 1) repo.markSeen(row.id, Array.from({ length: 50 }, (_, i) => `g${k * 50 + i}`), 10_000 + k);
+  // MAX_SEEN_PER_FEED + 50 articles vus en plusieurs lectures : MAX_SEEN_PER_FEED gardés, les plus récents.
+  const lots = (MAX_SEEN_PER_FEED + 50) / 50;
+  for (let k = 0; k < lots; k += 1) repo.markSeen(row.id, Array.from({ length: 50 }, (_, i) => `g${k * 50 + i}`), 10_000 + k);
   assert.equal(repo.countSeen(row.id), MAX_SEEN_PER_FEED);
-  assert.ok(!repo.isSeen(row.id, 'g0') && repo.isSeen(row.id, 'g249'));
+  assert.ok(!repo.isSeen(row.id, 'g0') && repo.isSeen(row.id, `g${lots * 50 - 1}`));
   // Un article encore présent dans le flux est « rafraîchi » à chaque lecture : jamais oublié.
   repo.markSeen(row.id, ['keep'], 40_000);
   for (let k = 0; k < 3; k += 1) repo.markSeen(row.id, ['keep', ...Array.from({ length: 60 }, (_, i) => `m${k * 60 + i}`)], 50_000 + k);

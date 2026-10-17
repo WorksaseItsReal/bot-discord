@@ -338,3 +338,55 @@ test('R104 : fils automatiques refusés dans un salon fermé à l\'auteur ; un s
   await auto.buttons.cpchannels(interaction([STAFF_NEWS, PUBLIC_NEWS]), client);
   assert.deepEqual(config.get(G).automations.crosspost.channels, [STAFF_NEWS, PUBLIC_NEWS]);
 });
+
+/* ------------------------------------------------------------------ */
+/* R105 : flux RSS à guid changeant                                     */
+/* ------------------------------------------------------------------ */
+
+const { FeedRepository } = require('../src/database/repositories/FeedRepository');
+const { FeedService } = require('../src/services/FeedService');
+
+function feedSetup() {
+  const GUILD = '100000000000000001';
+  const CHAN = '400000000000000001';
+  const ROLE = '300000000000000001';
+  const AUTHOR = '200000000000000002';
+  const sent = [];
+  const channel = { id: CHAN, type: ChannelType.GuildText, permissionsFor: () => new PermissionsBitField(PermissionsBitField.All), send: async (p) => sent.push(p) };
+  const guild = {
+    id: GUILD,
+    available: true,
+    channels: { cache: new Collection([[CHAN, channel]]) },
+    roles: { cache: new Collection([[ROLE, { id: ROLE, name: 'Notifications', mentionable: true }]]) },
+    members: { me: null, cache: new Collection([[AUTHOR, { id: AUTHOR, permissions: new PermissionsBitField([PF.MentionEveryone]) }]]) },
+  };
+  const client = { guilds: { cache: new Collection([[GUILD, guild]]) }, services: { logging: { send: async () => {} } } };
+  const state = { items: () => [] };
+  const xml = () => `<?xml version="1.0"?><rss version="2.0"><channel><title>Journal</title>${state.items().map((i) => `<item><title>${i.title}</title><link>${i.link}</link><guid isPermaLink="false">${i.guid}</guid></item>`).join('')}</channel></rss>`;
+  const http = async (url) => ({ status: 200, ok: true, headers: new Headers({ 'content-type': 'application/rss+xml' }), url: String(url), body: Buffer.from(xml()) });
+  const { db } = memoryDb();
+  const repo = new FeedRepository(db);
+  const svc = new FeedService({ client, feeds: repo, http });
+  const row = repo.create({ guildId: GUILD, channelId: CHAN, url: 'https://journal.exemple.fr/rss', roleId: ROLE, synced: false, createdBy: AUTHOR, now: 0 });
+  const pings = () => sent.filter((p) => p.content === `<@&${ROLE}>` && p.allowedMentions?.roles?.includes(ROLE)).length;
+  return { repo, svc, row, sent, state, pings };
+}
+
+test('R105 : mêmes articles avec des guid qui changent à chaque lecture : jamais republiés', async () => {
+  const { repo, svc, row, sent, state, pings } = feedSetup();
+  let poll = 0;
+  state.items = () => [1, 2, 3, 4, 5, 6].map((n) => ({ title: `Article ${n}`, link: `https://journal.exemple.fr/a${n}${poll % 2 ? '/' : ''}#top`, guid: `a${n}-${poll}` }));
+  for (poll = 0; poll < 4; poll += 1) await svc.poll(repo.byId(row.id));
+  assert.equal(sent.length, 0, `${sent.length} message(s) republiés`);
+  assert.equal(pings(), 0);
+});
+
+test('R105 : plusieurs nouveautés dans une lecture : le rôle n\'est mentionné qu\'une fois', async () => {
+  const { repo, svc, row, sent, state, pings } = feedSetup();
+  state.items = () => [{ title: 'Ancien', link: 'https://journal.exemple.fr/old', guid: 'old' }];
+  await svc.poll(repo.byId(row.id));
+  state.items = () => [1, 2, 3, 4].map((n) => ({ title: `Neuf ${n}`, link: `https://journal.exemple.fr/n${n}`, guid: `n${n}` })).concat([{ title: 'Ancien', link: 'https://journal.exemple.fr/old', guid: 'old' }]);
+  await svc.poll(repo.byId(row.id));
+  assert.equal(sent.length, 4);
+  assert.equal(pings(), 1, 'une mention par article publié');
+});
