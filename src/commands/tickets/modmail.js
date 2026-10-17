@@ -4,6 +4,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, ModalBuilder, Tex
 const { card, field, ICONS, status, subtext } = require('../../utils/ui');
 const { truncate } = require('../../utils/embeds');
 const { UserError } = require('../../core/errors');
+const { archiveIssue, assertPrivateTranscripts } = require('../../services/TicketService');
 
 /** customId du formulaire de réponse (routé vers buttons.send par components/cmd.js). */
 const REPLY_MODAL_ID = 'cmd:modmail:send';
@@ -40,6 +41,8 @@ module.exports = {
       const patch = {};
       const category = interaction.options.getChannel('categorie');
       const logChannel = interaction.options.getChannel('salon_logs');
+      // Transcripts = conversations privées : jamais dans un salon lisible par tous.
+      if (logChannel) assertPrivateTranscripts(interaction.guild, logChannel.id, 'du ModMail');
       if (logChannel) patch.logChannel = logChannel.id;
       const role = interaction.options.getRole('role_staff');
       const active = interaction.options.getBoolean('actif');
@@ -49,6 +52,7 @@ module.exports = {
       if (active !== null) patch.enabled = active;
       config.update(interaction.guild.id, { modmail: patch });
       const cfg = config.get(interaction.guild.id).modmail ?? {};
+      const issue = cfg.logChannel ? archiveIssue(interaction.guild, cfg.logChannel) : null;
       return interaction.reply({
         embeds: [
           card({
@@ -61,6 +65,7 @@ module.exports = {
                 ? 'Les membres peuvent désormais écrire au bot en message privé pour contacter le staff.'
                 : 'La configuration est enregistrée. Activez le ModMail avec l\'option `actif`.',
               subtext('Chaque conversation ouvre un salon privé visible du staff.'),
+              issue ? `${ICONS.warning} Je ne peux pas archiver dans <#${cfg.logChannel}> : ${issue}. Tant que l'archive échoue, les conversations fermées gardent leur salon.` : null,
             ],
             fields: [
               field(ICONS.status, 'État', cfg.enabled ? '🟢 Actif' : '⚫ Inactif'),

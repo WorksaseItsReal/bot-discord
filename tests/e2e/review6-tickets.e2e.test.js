@@ -587,3 +587,38 @@ test('R73 un membre du staff ne prend pas en charge son propre ticket', async ()
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R74
+
+test('R74 salon des transcripts visible par @everyone : refusé (/tickets et /modmail setup) ; permissions manquantes signalées', async () => {
+  const h = await createHarness({ botAdministrator: false });
+  try {
+    h.configureAll();
+    h.configure({ tickets: { logChannel: null }, modmail: { logChannel: null } });
+    const view = (rec) => h.messagesOf(rec).at(-1);
+    const dash = await h.slash('tickets');
+    const setup = await h.click(view(dash), 'cmd:tickets:nav', { values: ['setup'] });
+    // #général : visible de tous.
+    const pub = await h.click(view(setup), 'cmd:tickets:transcripts', { values: [IDS.channels.general] });
+    assert.ok(h.isError(pub), `salon public accepté : ${h.replyText(pub)}`);
+    assert.match(h.replyText(pub), /@everyone/);
+    assert.equal(h.client.services.config.get(h.guild.id).tickets.logChannel, null);
+    const mm = await h.slash('modmail', sub('setup', [opt('salon_logs', 7, IDS.channels.general)]));
+    assert.ok(h.isError(mm), `salon public accepté par /modmail setup : ${h.replyText(mm)}`);
+    assert.equal(h.client.services.config.get(h.guild.id).modmail.logChannel ?? null, null);
+
+    // #staff privé, mais le bot n'y a pas « Joindre des fichiers » : accepté avec un avertissement.
+    setOverwrites(h, IDS.channels.staff, [{ id: IDS.roles.bot, type: 0, allow: String(P.ViewChannel | P.SendMessages | P.EmbedLinks), deny: String(P.AttachFiles) }]);
+    await h.settle();
+    const priv = await h.click(view(setup), 'cmd:tickets:transcripts', { values: [IDS.channels.staff] });
+    assert.ok(!h.isError(priv), h.replyText(priv));
+    assert.match(h.replyText(priv), /Joindre des fichiers/);
+    assert.equal(h.client.services.config.get(h.guild.id).tickets.logChannel, IDS.channels.staff);
+    const mm2 = await h.slash('modmail', sub('setup', [opt('salon_logs', 7, IDS.channels.staff)]));
+    assert.ok(!h.isError(mm2), h.replyText(mm2));
+    assert.match(h.replyText(mm2), /Joindre des fichiers/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

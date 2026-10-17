@@ -53,6 +53,25 @@ function archiveIssue(guild, channelId) {
   return null;
 }
 
+/** Le salon est-il visible par @everyone ? (transcripts : conversations privées). Pur. */
+function isPublicChannel(guild, channelId) {
+  const channel = channelId ? guild?.channels?.cache?.get(channelId) : null;
+  const everyone = guild?.roles?.everyone ?? guild?.roles?.cache?.get?.(guild.id);
+  if (!channel?.permissionsFor || !everyone) return false;
+  try {
+    return channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Refus d'un salon de transcripts visible par @everyone (UserError). */
+function assertPrivateTranscripts(guild, channelId, what = 'des tickets') {
+  if (isPublicChannel(guild, channelId)) {
+    throw new UserError(`<#${channelId}> est visible par @everyone : les transcripts (conversations privées ${what}) y seraient lisibles par tous. Choisissez un salon réservé à l'équipe.`);
+  }
+}
+
 /**
  * Salon des transcripts au moment d'archiver : le salon, ou null s'il a été supprimé (confirmé
  * par Discord, 10003 : la confirmation l'a annoncé). Toute autre erreur (accès, réseau) est levée.
@@ -879,6 +898,8 @@ module.exports = {
   attachmentFields,
   archiveContinuationCard,
   archiveIssue,
+  isPublicChannel,
+  assertPrivateTranscripts,
   resolveArchiveChannel,
   archiveFailedPayload,
   ARCHIVE_PERMISSIONS,
