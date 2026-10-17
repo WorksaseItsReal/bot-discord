@@ -390,6 +390,8 @@ class ModerationService {
     this.recentBotActions = new Map();
     /** @type {Map<string, number>} dernier rattrapage des refus du rôle Muted, par serveur */
     this.mutedSyncAt = new Map();
+    /** @type {Map<string, Promise<import('discord.js').Role>>} création / adoption du rôle Muted en cours, par serveur */
+    this.mutedRoleSetups = new Map();
   }
 
   /** Marque une action du bot (avant l'appel API). */
@@ -433,29 +435,40 @@ class ModerationService {
    * la première fois) : pas de parcours de tous les salons à chaque /mute.
    */
   async ensureMutedRole(guild) {
+    // Création / adoption déjà en cours (deux /mute simultanés) : le même rôle pour tous, sinon
+    // deux rôles « Muted » seraient créés et le premier membre resterait muet à vie.
+    const pending = this.mutedRoleSetups.get(guild.id);
+    if (pending) return pending;
     const cfg = this.config.get(guild.id);
     const roleId = cfg.moderation.mutedRoleId;
-    let role = roleId ? guild.roles.cache.get(roleId) : guild.roles.cache.find((r) => r.name === 'Muted');
-    let setup = false;
-    if (!role) {
-      role = await guild.roles.create({ name: 'Muted', colors: { primaryColor: 0x607d8b }, reason: 'Rôle de mute Inspecteur Gadget' });
-      setup = true;
+    const role = roleId ? guild.roles.cache.get(roleId) : guild.roles.cache.find((r) => r.name === 'Muted');
+    if (!role || cfg.moderation.mutedRoleId !== role.id) {
+      const setup = this.#setupMutedRole(guild, role);
+      this.mutedRoleSetups.set(guild.id, setup);
+      try {
+        return await setup;
+      } finally {
+        if (this.mutedRoleSetups.get(guild.id) === setup) this.mutedRoleSetups.delete(guild.id);
+      }
     }
-    if (cfg.moderation.mutedRoleId !== role.id) {
-      this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
-      setup = true;
-    }
-    // Création/adoption : synchronisation complète attendue. Sinon, rattrapage en arrière-plan
-    // (au plus toutes les 10 min) des salons créés depuis ou devenus gérables : syncMutedRole
-    // ignore les salons déjà conformes et ceux où le bot n'a pas les droits.
+    // Rattrapage en arrière-plan (au plus toutes les 10 min) des salons créés depuis ou devenus
+    // gérables : syncMutedRole ignore les salons déjà conformes et ceux où le bot n'a pas les droits.
     const last = this.mutedSyncAt.get(guild.id) ?? 0;
-    if (setup) {
-      this.mutedSyncAt.set(guild.id, Date.now());
-      await this.syncMutedRole(guild, role);
-    } else if (Date.now() - last > MUTED_RESYNC_MS) {
+    if (Date.now() - last > MUTED_RESYNC_MS) {
       this.mutedSyncAt.set(guild.id, Date.now());
       this.syncMutedRole(guild, role).catch((err) => logger.debug('Synchronisation du rôle Muted :', err?.message));
     }
+    return role;
+  }
+
+  /** Création (ou adoption) du rôle Muted, puis synchronisation complète des refus. */
+  async #setupMutedRole(guild, existing) {
+    const role = existing ?? await guild.roles.create({ name: 'Muted', colors: { primaryColor: 0x607d8b }, reason: 'Rôle de mute Inspecteur Gadget' });
+    if (this.config.get(guild.id).moderation.mutedRoleId !== role.id) {
+      this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
+    }
+    this.mutedSyncAt.set(guild.id, Date.now());
+    await this.syncMutedRole(guild, role);
     return role;
   }
 

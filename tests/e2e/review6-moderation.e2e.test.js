@@ -398,3 +398,26 @@ test('R32 salon déverrouillé à la main pendant un lockdown : statut recalcul�
     await h.close();
   }
 });
+
+test('R20 deux /mute simultanés sans rôle Muted : un seul rôle créé, les deux membres démutables', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.fake.latency = 20;
+  try {
+    await Promise.all([
+      h.slash('mute', [opt('membre', 6, IDS.users.target), opt('duree', 3, '10m')], { as: 'admin', label: 'mute target' }),
+      h.slash('mute', [opt('membre', 6, IDS.users.member), opt('duree', 3, '10m')], { as: 'owner', label: 'mute member' }),
+    ]);
+    await h.settle();
+    h.fake.latency = 0;
+    const muted = [...h.fake.roles.values()].filter((r) => r.name === 'Muted');
+    assert.equal(muted.length, 1, `${muted.length} rôles « Muted » créés`);
+    for (const who of ['target', 'member']) {
+      await h.slash('unmute', [opt('membre', 6, IDS.users[who])], { as: 'admin' });
+      assert.ok(!h.fake.members.get(IDS.users[who]).roles.includes(muted[0].id), `${who} toujours muet`);
+    }
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
