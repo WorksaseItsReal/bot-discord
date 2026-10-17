@@ -113,3 +113,73 @@ test('R41 : invitations encodées supprimées par l\'anti-invitations', async ()
     await h.close();
   }
 });
+
+const sub = (name, options = []) => [{ name, type: 1, options }];
+const buttonsOf = (m) => (m?.components ?? []).flatMap((r) => r.components ?? []);
+const hasRole = (h, userId, roleId) => Boolean(h.fake.members.get(userId)?.roles.includes(roleId));
+
+/** Quarantaine d'un compte piraté (rôles retirés) sur le membre « target » ; renvoie le log. */
+async function quarantineTarget(h) {
+  h.configure({ antiraid: { enabled: false }, levels: { enabled: false }, automod: { enabled: true, notify: 'none', escalation: { enabled: false }, newMembers: { enabled: false }, filters: {
+    antiHacked: { enabled: true, removeRoles: true, scamScore: 5, channels: 3, action: 'quarantine', duration: '1d', purgeMinutes: 10 },
+  } } });
+  const mark = h.fake.messageLog.length;
+  await h.userMessage({ as: 'target', content: 'Nitro gratuit !! https://dlscord-gift.ru/claim @everyone' });
+  await h.settle();
+  const log = h.fake.messageLog.slice(mark).map((id) => h.message(id)).find((m) => m?.embeds?.[0]?.title?.includes('quarantaine'));
+  assert.ok(log, 'quarantaine non posée');
+  return log;
+}
+
+test('R42 : levée de quarantaine — un rôle temporaire ou un mute arrivé à échéance pendant la quarantaine n\'est pas rendu', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  const T = IDS.users.target;
+  try {
+    await h.slash('role', sub('temporaire', [opt('membre', 6, T), opt('role', 8, IDS.roles.gamer), opt('duree', 3, '2h')]));
+    await h.slash('mute', [opt('membre', 6, T), opt('duree', 3, '1h')]);
+    const mutedRoleId = h.client.services.config.get(h.guild.id).moderation.mutedRoleId;
+    assert.ok(hasRole(h, T, IDS.roles.gamer) && hasRole(h, T, mutedRoleId));
+    const log = await quarantineTarget(h);
+    assert.equal(hasRole(h, T, IDS.roles.gamer) || hasRole(h, T, mutedRoleId), false, 'rôles non retirés par la quarantaine');
+
+    // Les deux échéances passent pendant la quarantaine (vrai scheduler).
+    const db = h.client.database.db;
+    db.prepare('UPDATE temp_roles SET expires_at = ? WHERE active = 1').run(Date.now() - 1000);
+    db.prepare("UPDATE sanctions SET expires_at = ? WHERE active = 1 AND type = 'mute'").run(Date.now() - 1000);
+    await h.client.services.scheduler.tick();
+    await h.settle();
+
+    const lift = buttonsOf(log).find((c) => c.custom_id.startsWith('cmd:automod:qlift:'));
+    const rec = await h.click(log, lift.custom_id, { as: 'admin' });
+    await h.settle();
+    assert.equal(hasRole(h, T, IDS.roles.gamer), false, 'rôle temporaire expiré rendu définitivement');
+    assert.equal(hasRole(h, T, mutedRoleId), false, 'rôle muet d\'un mute terminé rendu définitivement');
+    const text = h.replyText(rec);
+    assert.match(text, /Quarantaine levée/);
+    assert.match(text, /échéance/i, 'les rôles écartés sont signalés');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R42 : levée de quarantaine — rôle temporaire et mute toujours en cours rendus (le scheduler les retirera)', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  const T = IDS.users.target;
+  try {
+    await h.slash('role', sub('temporaire', [opt('membre', 6, T), opt('role', 8, IDS.roles.gamer), opt('duree', 3, '2h')]));
+    await h.slash('mute', [opt('membre', 6, T), opt('duree', 3, '1h')]);
+    const mutedRoleId = h.client.services.config.get(h.guild.id).moderation.mutedRoleId;
+    const log = await quarantineTarget(h);
+    const lift = buttonsOf(log).find((c) => c.custom_id.startsWith('cmd:automod:qlift:'));
+    await h.click(log, lift.custom_id, { as: 'admin' });
+    await h.settle();
+    assert.equal(hasRole(h, T, IDS.roles.gamer), true);
+    assert.equal(hasRole(h, T, mutedRoleId), true);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

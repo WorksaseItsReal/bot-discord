@@ -31,6 +31,7 @@ class TempRoleRepository {
     );
     this.deferStmt = db.prepare('UPDATE temp_roles SET next_attempt_at = ? WHERE id = ? AND active = 1');
     this.closeStmt = db.prepare('UPDATE temp_roles SET active = 0, ended_at = ?, end_reason = ? WHERE id = ? AND active = 1');
+    this.closedSinceStmt = db.prepare('SELECT DISTINCT role_id FROM temp_roles WHERE guild_id = ? AND user_id = ? AND active = 0 AND ended_at >= ?');
     this.setExpiryStmt = db.prepare(
       'UPDATE temp_roles SET expires_at = ?, reason = COALESCE(?, reason), moderator_id = COALESCE(?, moderator_id), next_attempt_at = NULL WHERE id = ? AND active = 1',
     );
@@ -93,6 +94,11 @@ class TempRoleRepository {
   /** Clôt une ligne active. @returns {boolean} true si elle l'était encore. */
   close(id, reason, now = Date.now()) {
     return this.closeStmt.run(now, reason, id).changes > 0;
+  }
+
+  /** Rôles temporaires d'un membre terminés (échus, retirés…) depuis `since`. @returns {string[]} */
+  closedSince(guildId, userId, since) {
+    return this.closedSinceStmt.all(guildId, userId, since).map((r) => r.role_id);
   }
 
   /** Nouvelle échéance d'une ligne active. @returns {boolean} */

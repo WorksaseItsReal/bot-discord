@@ -1056,6 +1056,31 @@ async function liftTimeout(interaction, client, userId, reason, { expectedUntil 
 const roleList = (ids) => fitList(ids.map((id) => `<@&${id}>`), 900);
 
 /**
+ * Rôles retirés par une quarantaine qui ne doivent plus être rendus : rôle temporaire terminé
+ * depuis (échu ou retiré pendant la quarantaine), rôle muet d'un mute qui n'est plus en vigueur.
+ * Rendus, ils deviendraient permanents : plus aucune ligne active ne les retirerait.
+ * @returns {{ keep: string[], lines: string[] }}
+ */
+function expiredQuarantineRoles(client, guildId, userId, roleIds, since) {
+  const repos = client.repositories ?? {};
+  const mutedRoleId = client.services.config.get(guildId).moderation?.mutedRoleId ?? null;
+  let closed = new Set();
+  try {
+    closed = new Set((repos.tempRoles?.closedSince?.(guildId, userId, since) ?? []).filter((id) => !repos.tempRoles.activeFor(guildId, userId, id)));
+  } catch {
+    // base indisponible : rien n'est écarté
+  }
+  const temp = roleIds.filter((id) => closed.has(id));
+  const muted = Boolean(mutedRoleId) && roleIds.includes(mutedRoleId) && !repos.sanctions?.activeMute?.(guildId, userId);
+  const skip = new Set([...temp, ...(muted ? [mutedRoleId] : [])]);
+  const lines = [
+    temp.length ? `Rôle(s) temporaire(s) arrivé(s) à échéance pendant la quarantaine, non rendu(s) : ${roleList(temp)}` : null,
+    muted && !closed.has(mutedRoleId) ? 'Rôle muet non rendu : le mute est arrivé à échéance (ou a été levé) pendant la quarantaine.' : null,
+  ].filter(Boolean);
+  return { keep: roleIds.filter((id) => !skip.has(id)), lines };
+}
+
+/**
  * Rend les rôles retirés par une quarantaine (rôles existants, sous le cliqueur et le bot).
  * @returns {Promise<{ ok: boolean, lines: string[] }>} ok : tous les rôles ont été rendus
  */
@@ -1502,8 +1527,10 @@ module.exports = {
       const timeout = await liftTimeout(interaction, client, userId, reason, row ? { expectedUntil: row.timeout_until ?? 0 } : {});
       // Rôles relus en base ; repli (quarantaine antérieure) : CE log, s'il concerne bien ce membre.
       const roleIds = row ? row.roles : footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
-      const roles = roleIds.length ? await restoreRoles(interaction, userId, roleIds, reason) : { ok: true, lines: [] };
-      const done = [timeout.text, ...roles.lines];
+      const since = row?.created_at ?? interaction.message?.createdTimestamp ?? 0;
+      const expired = roleIds.length ? expiredQuarantineRoles(client, interaction.guildId, userId, roleIds, since) : { keep: [], lines: [] };
+      const roles = expired.keep.length ? await restoreRoles(interaction, userId, expired.keep, reason) : { ok: true, lines: [] };
+      const done = [timeout.text, ...roles.lines, ...expired.lines];
       if (row?.event_id) {
         try {
           if (client.repositories?.automodEvents?.remove(interaction.guildId, row.event_id)) done.push('Infraction retirée du compteur de récidive.');
