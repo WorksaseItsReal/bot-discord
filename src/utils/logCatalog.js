@@ -98,6 +98,7 @@ const LOG_CATEGORIES = Object.freeze({
       feeds: 'Flux RSS (ajouts, retraits, désactivations)',
       automations: 'Automatisations (publication, fils, boosts : alertes)',
       botProfile: 'Profil et thème du bot sur ce serveur (/settings)',
+      securityFix: 'Corrections de l\'audit de sécurité (/diagnostics)',
     },
   },
 });
