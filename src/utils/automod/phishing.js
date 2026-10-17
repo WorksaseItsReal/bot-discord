@@ -191,6 +191,11 @@ function phishingScore(text, ctx = {}) {
       linkScore += l.disguised === 'domain' ? 3 : 2;
       reasons.push(`lien déguisé (« …@ » devant le vrai site ${l.host})`);
     }
+    if (l.ip) {
+      // « http://45.13.227.9/nitro » : un vrai service n'envoie pas vers une adresse IP nue.
+      linkScore += 2;
+      reasons.push(`lien vers une adresse IP (${l.host})`);
+    }
     if (l.host.split('.').some((p) => p.startsWith('xn--'))) {
       linkScore += 2;
       reasons.push(`domaine déguisé (punycode : ${l.host})`);
