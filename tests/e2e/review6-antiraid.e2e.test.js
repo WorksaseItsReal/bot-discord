@@ -119,3 +119,56 @@ test('R30 : catégorie Sécurité mise en pause dans /logs → la vague d\'arriv
     await h.close();
   }
 });
+
+/** Rôle « Server Booster » géré par Discord, créé dans le faux serveur. */
+async function boosterRole(h) {
+  const { nextId } = require('./lib/ids');
+  const id = nextId();
+  const role = { id, name: 'Server Booster', color: 0, colors: { primary_color: 0, secondary_color: null, tertiary_color: null }, hoist: false, icon: null, unicode_emoji: null, position: 2, permissions: '0', managed: true, mentionable: false, flags: 0, tags: { premium_subscriber: null } };
+  h.fake.roles.set(id, role);
+  h.fake.dispatchNow('GUILD_ROLE_CREATE', { guild_id: h.guild.id, role }, 'rôle Booster');
+  await h.settle();
+  return id;
+}
+
+/** Le modérateur booste (Discord lui donne le rôle géré) puis supprime 6 salons. */
+async function boosterNukes(h, boosterId) {
+  const { nextId } = require('./lib/ids');
+  const mod = h.fake.members.get(IDS.users.mod);
+  mod.roles = [...mod.roles, boosterId];
+  h.fake.dispatchNow('GUILD_MEMBER_UPDATE', { guild_id: h.guild.id, ...mod }, 'boost du modo');
+  await h.settle();
+  for (let i = 0; i < 6; i += 1) await h.auditEntry({ action_type: 12, target_id: nextId(), user_id: IDS.users.mod });
+  return h.fake.calls.some((c) => c.method === 'PUT' && c.route.includes(`/bans/${IDS.users.mod}`));
+}
+
+test('R31 : le tableau de bord refuse le rôle Booster ; un booster qui nuke est sanctionné', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { channelDeleteThreshold: 3, punishExecutor: 'ban' } });
+    const boosterId = await boosterRole(h);
+    const dash = await h.slash('antiraid', [], { as: 'admin' });
+    await h.click(h.messagesOf(dash)[0], 'cmd:antiraid:nav', { as: 'admin', values: ['whitelist'] });
+    const pick = await h.click(h.messagesOf(dash)[0], 'cmd:antiraid:wlroles', { as: 'admin', values: [boosterId] });
+    assert.ok(h.isError(pick), 'rôle géré accepté par le tableau de bord');
+    assert.deepEqual(h.client.services.config.get(h.guild.id).whitelist.roles, []);
+    assert.equal(await boosterNukes(h, boosterId), true, 'booster immunisé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R31 : rôle Booster déjà whitelisté (ancienne configuration) → aucune immunité', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { channelDeleteThreshold: 3, punishExecutor: 'ban' } });
+    const boosterId = await boosterRole(h);
+    h.configure({ whitelist: { roles: [boosterId] } });
+    assert.equal(await boosterNukes(h, boosterId), true, 'booster immunisé par une ancienne whitelist');
+  } finally {
+    await h.close();
+  }
+});

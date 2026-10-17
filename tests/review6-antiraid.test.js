@@ -200,3 +200,58 @@ test('R30 : alerte bien reçue (logs sécurité ou salon d\'alerte) → aucun re
   await quiet.service.alert(quiet.guild, { tone: 'caution', title: 'Nouveau membre expulsé' });
   assert.equal(quiet.dms.length + quiet.systemPosts.length, 0);
 });
+
+// ---------------------------------------------------------------- R31
+
+const antiraidCmd = require('../src/commands/security/antiraid');
+const { PermissionsBitField } = require('discord.js');
+const { memoryDb } = require('./db.helper');
+const { GuildConfigRepository } = require('../src/database/repositories/GuildConfigRepository');
+const { ConfigService } = require('../src/services/ConfigService');
+
+const BOOSTER = '300000000000000099';
+const TRUSTED = '300000000000000001';
+
+/** Tableau de bord /antiraid sur une vraie configuration (base en mémoire). */
+function dashboardWorld() {
+  const config = new ConfigService(new GuildConfigRepository(memoryDb().db));
+  const roles = new Collection([
+    [TRUSTED, { id: TRUSTED, managed: false }],
+    [BOOSTER, { id: BOOSTER, managed: true, toString: () => `<@&${BOOSTER}>` }],
+  ]);
+  const guild = { id: G, ownerId: 'owner', roles: { cache: roles }, channels: { cache: new Collection() }, members: { me: null } };
+  const logged = [];
+  const client = { guilds: { cache: new Map([[G, guild]]) }, services: { config }, user: { id: 'bot' }, channels: { fetch: async () => null } };
+  client.services.antiraid = new AntiRaidService({ client, config, logging: { send: async (...a) => { logged.push(a); return true; } } });
+  const interaction = (values, { user = 'admin' } = {}) => ({
+    guildId: G,
+    guild,
+    user: { id: user, tag: user, toString: () => `<@${user}>` },
+    memberPermissions: new PermissionsBitField(PermissionsBitField.All),
+    values,
+    updates: [],
+    async update(p) { this.updates.push(p); },
+    async reply(p) { this.updates.push(p); },
+    async deferUpdate() {},
+    async editReply(p) { this.updates.push(p); },
+  });
+  return { config, guild, client, interaction, logged };
+}
+
+test('R31 : le tableau de bord refuse un rôle géré (Booster) comme /whitelist', async () => {
+  const w = dashboardWorld();
+  await assert.rejects(antiraidCmd.buttons.wlroles(w.interaction([TRUSTED, BOOSTER]), w.client), (e) => e.name === 'UserError' && /géré/.test(e.message));
+  assert.deepEqual(w.config.get(G).whitelist.roles, [], 'rôle géré whitelisté');
+  await antiraidCmd.buttons.wlroles(w.interaction([TRUSTED]), w.client);
+  assert.deepEqual(w.config.get(G).whitelist.roles, [TRUSTED]);
+});
+
+test('R31 : un rôle géré déjà whitelisté (ancienne configuration) ne donne aucune immunité et disparaît au prochain choix', async () => {
+  const w = dashboardWorld();
+  w.config.update(G, { whitelist: { roles: [BOOSTER, TRUSTED] } });
+  assert.equal(w.client.services.antiraid.isWhitelisted(G, 'booster', [BOOSTER]), false, 'tout booster est immunisé');
+  assert.equal(w.client.services.antiraid.isWhitelisted(G, 'staff', [TRUSTED]), true);
+  // Le rôle géré n'est plus présélectionné : choisir la whitelist le retire.
+  await antiraidCmd.buttons.wlroles(w.interaction([TRUSTED]), w.client);
+  assert.deepEqual(w.config.get(G).whitelist.roles, [TRUSTED]);
+});

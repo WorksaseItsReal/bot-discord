@@ -256,10 +256,15 @@ class AntiRaidService {
     this.client.services?.moderation?.markBotAction?.('ban', guildId, userId);
   }
 
+  /**
+   * Utilisateur ou rôle whitelisté. Un rôle géré (Booster, rôle de bot) n'immunise jamais :
+   * il s'obtient sans contrôle du serveur (refusé par /whitelist et le tableau de bord).
+   */
   isWhitelisted(guildId, userId, roleIds = []) {
     const wl = this.config.get(guildId).whitelist || { users: [], roles: [] };
     if (wl.users?.includes(userId)) return true;
-    return roleIds.some((r) => wl.roles?.includes(r));
+    const roles = this.client.guilds?.cache?.get?.(guildId)?.roles?.cache;
+    return roleIds.some((r) => wl.roles?.includes(r) && !roles?.get?.(r)?.managed);
   }
 
   /** Enregistre une arrivée et renvoie les arrivants encore dans la fenêtre (le plus ancien d'abord). */

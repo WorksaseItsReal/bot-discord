@@ -370,11 +370,14 @@ function alertsView(client, guild, notice) {
   };
 }
 
-/** Entrées de whitelist présélectionnées : existantes en cache (si connu), 25 au plus. */
+/** Rôle géré par une intégration (Booster, rôle de bot…) : jamais whitelistable (comme /whitelist). */
+const managedRole = (guild, id) => Boolean(guild.roles?.cache?.get?.(id)?.managed);
+
+/** Entrées de whitelist présélectionnées : existantes en cache (si connu), hors rôles gérés, 25 au plus. */
 function whitelistDefaults(cfg, guild) {
   const wl = cfg.whitelist ?? {};
   const roleCache = guild.roles?.cache;
-  const roles = (wl.roles ?? []).filter((r) => !roleCache || roleCache.has(r)).slice(0, MAX_WL);
+  const roles = (wl.roles ?? []).filter((r) => (!roleCache || roleCache.has(r)) && !managedRole(guild, r)).slice(0, MAX_WL);
   const users = (wl.users ?? []).slice(0, MAX_WL);
   return { users, roles };
 }
@@ -699,9 +702,15 @@ module.exports = {
       guard(interaction);
       const cfg = cfgOf(client, interaction.guildId);
       const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId);
+      // Rôle géré (Booster, rôle de bot) : n'importe qui l'obtient sans contrôle du serveur → immunité totale.
+      const managed = picked.filter((id) => managedRole(interaction.guild, id) || interaction.roles?.get?.(id)?.managed);
+      if (managed.length) {
+        throw new UserError(`${managed.map((id) => `<@&${id}>`).join(', ')} : rôle géré par une intégration (boost, bot…), il ne peut pas être whitelisté. Whitelistez plutôt le bot ou le membre concerné.`);
+      }
       const shown = new Set(whitelistDefaults(cfg, interaction.guild).roles);
       const cache = interaction.guild.roles?.cache;
-      const hidden = (cfg.whitelist?.roles ?? []).filter((id) => !shown.has(id) && (!cache || cache.has(id)));
+      // Rôles gérés d'une ancienne configuration : retirés au passage.
+      const hidden = (cfg.whitelist?.roles ?? []).filter((id) => !shown.has(id) && (!cache || cache.has(id)) && !managedRole(interaction.guild, id));
       const roles = [...new Set([...picked, ...hidden])];
       client.services.config.update(interaction.guildId, { whitelist: { roles } });
       await interaction.update(render(client, interaction.guild, 'whitelist', `${roles.length} rôle(s) whitelisté(s).`));
