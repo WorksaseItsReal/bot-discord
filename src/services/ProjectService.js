@@ -3,6 +3,7 @@
 const { PermissionFlagsBits } = require('discord.js');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
+const { assertAutomodClean } = require('../utils/safeText');
 const {
   LIMITS,
   STATUSES,
@@ -66,6 +67,18 @@ class ProjectService {
     if (!this.canManage(project, member)) {
       throw new UserError('Seuls le responsable du projet et les gestionnaires peuvent faire cela.');
     }
+  }
+
+  /**
+   * Texte d'un membre que le bot publiera (fiche, boutons-liens) : mêmes filtres que l'AutoMod
+   * pour un message ordinaire (mots interdits, invitations, liens d'arnaque ou non autorisés).
+   * Modérateurs (« Gérer les messages ») et rôles ignorés par l'AutoMod : exemptés. Sans membre
+   * (appel interne) : aucun contrôle.
+   */
+  assertClean(member, texts) {
+    if (!member?.guild) return;
+    const text = texts.flat().filter((t) => typeof t === 'string' && t).join('\n');
+    assertAutomodClean(text, { automod: this.config.get(member.guild.id).automod, guild: member.guild, member, label: 'Le projet' });
   }
 
   // ---------------------------------------------------------------- lecture
@@ -152,6 +165,7 @@ class ProjectService {
       throw new UserError(`Description trop longue (${LIMITS.description} caractères maximum).`);
     }
     if (data.status && !STATUSES[data.status]) throw new UserError('Statut inconnu.');
+    this.assertClean(member, [data.name, description, data.tags ?? [], data.link, data.imageUrl]);
 
     const project = this.repo.create({
       guildId,
@@ -169,8 +183,12 @@ class ProjectService {
     return project;
   }
 
-  /** Met à jour des champs puis rafraîchit le message publié. */
-  update(project, patch) {
+  /**
+   * Met à jour des champs puis rafraîchit le message publié.
+   * @param {{ member?: import('discord.js').GuildMember|null }} [opts] auteur : textes filtrés (AutoMod)
+   */
+  update(project, patch, { member = null } = {}) {
+    this.assertClean(member, [patch.name, patch.description, patch.tags ?? [], patch.imageUrl, patch.thumbnailUrl, (patch.links ?? []).flatMap((l) => [l.label, l.url])]);
     if (patch.name !== undefined) patch.name = this.validateName(project.guildId, patch.name, project.id);
     if (patch.description !== undefined) {
       const d = patch.description?.trim() || null;
@@ -198,7 +216,8 @@ class ProjectService {
     return this.update(project, patch);
   }
 
-  addMember(project, userId, role) {
+  addMember(project, userId, role, { member = null } = {}) {
+    this.assertClean(member, [role]);
     if (userId === project.ownerId) throw new UserError('Le responsable fait déjà partie du projet.');
     const members = this.repo.members(project.id);
     const already = members.some((m) => m.userId === userId);
@@ -229,9 +248,10 @@ class ProjectService {
     return this.update(project, { ownerId: newOwnerId });
   }
 
-  addTask(project, title) {
+  addTask(project, title, { member = null } = {}) {
     const clean = String(title ?? '').trim().replace(/\s+/g, ' ');
     if (!clean) throw new UserError('Le titre de la tâche est vide.');
+    this.assertClean(member, [clean]);
     if (clean.length > LIMITS.taskTitle) throw new UserError(`Titre trop long (${LIMITS.taskTitle} caractères maximum).`);
     const counts = this.repo.taskCounts(project.id);
     if (counts.total >= LIMITS.tasks) throw new UserError(`Un projet compte au maximum ${LIMITS.tasks} tâches.`);
@@ -268,10 +288,11 @@ class ProjectService {
     return { task, project: this.update(project, {}) };
   }
 
-  addLink(project, label, url) {
+  addLink(project, label, url, { member = null } = {}) {
     const cleanLabel = String(label ?? '').trim().slice(0, LIMITS.linkLabel);
     if (!cleanLabel) throw new UserError('Donnez un nom au lien.');
     const cleanUrl = this.validateUrlField(url, 'Lien');
+    this.assertClean(member, [cleanLabel, cleanUrl]);
     const links = (project.links || []).filter((l) => l.label.toLowerCase() !== cleanLabel.toLowerCase());
     if (links.length >= LIMITS.links) throw new UserError(`Un projet compte au maximum ${LIMITS.links} liens.`);
     links.push({ label: cleanLabel, url: cleanUrl });

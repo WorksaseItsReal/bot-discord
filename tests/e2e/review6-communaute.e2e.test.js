@@ -558,3 +558,48 @@ test('R88 /invitations voir : les codes d\'un autre membre ne sont jamais affich
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R89 : projets et AutoMod
+
+test('R89 /projet : invitations, liens d\'arnaque et mots interdits refusés aux non-modérateurs ; réponse de création éphémère ; publication avec « Intégrer des liens »', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const projet = (name, options, as = 'member') => h.slash('projet', sub(name, options), { as, channel: 'general' });
+    const r1 = await projet('creer', [opt('nom', 3, 'Cadeaux'), opt('description', 3, 'Nitro offert ici : discord.gg/arnaque')]);
+    assert.ok(h.isError(r1), 'projet avec invitation accepté');
+    const r2 = await projet('creer', [opt('nom', 3, 'Cadeaux'), opt('lien', 3, 'https://steamcornmunity.ru/login')]);
+    assert.ok(h.isError(r2), 'projet avec lien non autorisé accepté');
+    const r3 = await projet('creer', [opt('nom', 3, 'Projet interdit')]);
+    assert.ok(h.isError(r3), 'projet avec mot interdit accepté');
+    assert.equal(h.client.services.projects.repo.count(h.guild.id), 0);
+
+    // Projet propre : réponse éphémère.
+    const ok = await projet('creer', [opt('nom', 3, 'Jardin partagé'), opt('description', 3, 'On plante des tomates')]);
+    assert.ok(!h.isError(ok), h.replyText(ok));
+    assert.ok(h.messagesOf(ok)[0].flags & 64, 'réponse de création publique');
+    // Ajouts ultérieurs filtrés aussi.
+    const t = await projet('tache-ajouter', [opt('projet', 3, '1'), opt('titre', 3, 'Rejoindre discord.gg/arnaque')]);
+    assert.ok(h.isError(t), 'tâche avec invitation acceptée');
+    const l = await projet('lien-ajouter', [opt('projet', 3, '1'), opt('nom', 3, 'Site'), opt('url', 3, 'https://steamcornmunity.ru/login')]);
+    assert.ok(h.isError(l), 'lien non autorisé accepté');
+
+    // Publication : « Intégrer des liens » exigé de la personne dans le salon.
+    const gen = h.fake.channels.get(IDS.channels.general);
+    const updated = { ...gen, permission_overwrites: [...gen.permission_overwrites, { id: IDS.roles.member, type: 0, allow: '0', deny: P.EmbedLinks.toString() }, { id: IDS.roles.everyone, type: 0, allow: '0', deny: P.EmbedLinks.toString() }] };
+    h.fake.channels.set(gen.id, updated);
+    h.fake.dispatchNow('CHANNEL_UPDATE', updated, 'préparation : pas d\'intégration de liens dans #général');
+    await h.settle();
+    const mark = h.fake.messageLog.length;
+    const pub = await h.click(h.messagesOf(ok)[0], h.messagesOf(ok)[0].components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith('cmd:projet:publish:')).custom_id, { as: 'member', channel: 'general' });
+    assert.ok(h.isError(pub), 'publication sans « Intégrer des liens » acceptée');
+    assert.equal(botMessagesIn(h, IDS.channels.general, mark).filter((m) => !(m.flags & 64)).length, 0);
+
+    // Modérateur (exempté de l'AutoMod) : accepté comme un message ordinaire.
+    const mod = await projet('creer', [opt('nom', 3, 'Partenariat'), opt('description', 3, 'discord.gg/partenaire')], 'mod');
+    assert.ok(!h.isError(mod), h.replyText(mod));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

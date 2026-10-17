@@ -63,7 +63,7 @@ module.exports = {
         tags: parseTags(get('tags')),
         imageUrl: get('image') || null,
         color,
-      });
+      }, { member: interaction.member });
       const { tasks, members } = service.details(updated);
       await interaction.reply({
         embeds: [
