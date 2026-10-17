@@ -64,6 +64,24 @@ async function recreate(guild, snap, ctx, store, executorId) {
   const label = `#${snap.name ?? snap.id}`;
   const already = ctx.idMap?.get(snap.id);
   if (already && guild.channels.cache.has(already)) return { ok: true };
+  // Déjà recréé hors de cet incident (restauration /backup, incident précédent), suivi par
+  // l'identifiant d'origine (jamais par le nom) : configuration rebranchée sur cette copie.
+  const twin = store.remapOf(guild.id, snap.id);
+  if (twin && guild.channels.cache.has(twin)) {
+    ctx.idMap?.set(snap.id, twin);
+    if (snap.bundle) {
+      try {
+        channelRemap.restore(snap.bundle, twin);
+        St.replugConfig(ctx.client?.services?.config, guild.id, snap.bundle.configPaths, snap.id, twin);
+      } catch {
+        /* au mieux */
+      }
+    }
+    St.noteSummary(ctx, 'channels:twin', (d) => {
+      d.count = (d.count ?? 0) + 1;
+    }, (d) => `Salons déjà restaurés (par /backup) : ${d.count} — configuration rebranchée sur ces copies, aucun doublon créé.`);
+    return { ok: true };
+  }
   if (snap.kind !== 'normal') {
     const why = snap.kind ? `c'était un ${St.KIND_LABELS[snap.kind] ?? snap.kind}` : 'son type (ticket, ModMail…) n\'a pas pu être déterminé';
     return { ok: false, note: `Salon ${label} jamais recréé : ${why}.` };
@@ -86,7 +104,9 @@ async function recreate(guild, snap, ctx, store, executorId) {
     }
   }
   const mask = St.botMask(guild);
-  const overwrites = St.mapOverwrites(snap.overwrites, (id, type) => (type === 0 ? St.resolveRoleId(guild, ctx, store, id) : guild.members?.cache?.has?.(id) || guild.client?.users?.cache?.has?.(id) ? id : null), mask);
+  // Surcharges membre : jamais rendues à l'auteur d'un incident à sanctionner (sanction défaite).
+  const memberTarget = (id) => (St.sanctionedIncidentOf(ctx, guild.id, id) ? null : guild.members?.cache?.has?.(id) || guild.client?.users?.cache?.has?.(id) ? id : null);
+  const overwrites = St.mapOverwrites(snap.overwrites, (id, type) => (type === 0 ? St.resolveRoleId(guild, ctx, store, id) : memberTarget(id)), mask);
   const options = St.buildChannelCreate(snap, {
     community: Boolean(guild.features?.includes?.('COMMUNITY')),
     maximumBitrate: guild.maximumBitrate ?? 96_000,
@@ -181,19 +201,30 @@ function channelApiValue(ch, key) {
 }
 
 async function undoOverwrite(guild, record, ctx) {
-  const channel = guild.channels?.cache?.get?.(record.channelId);
-  if (!channel) return { ok: false, note: 'Surcharge non rétablie : le salon n\'existe plus.' };
+  const cached = guild.channels?.cache?.get?.(record.channelId);
+  if (!cached) return { ok: false, note: 'Surcharge non rétablie : le salon n\'existe plus.' };
+  // Relecture forcée : après un PUT précédent du bot, le cache n'est pas encore à jour.
+  const channel = (typeof guild.channels.fetch === 'function' ? await guild.channels.fetch(cached.id, { force: true }).catch(() => null) : null) ?? cached;
   const current = channel.permissionOverwrites?.cache?.get?.(record.targetId) ?? null;
-  const state = current ? { allow: St.toBig(current.allow).toString(), deny: St.toBig(current.deny).toString() } : null;
-  // Relecture : déjà rétablie → rien à faire ; modifiée depuis par quelqu'un d'autre → on s'abstient.
-  if (St.sameValue(state, record.before)) return { ok: true };
-  if (!St.sameValue(state, record.after)) return { ok: false, note: `Surcharge de #${channel.name} modifiée depuis : laissée telle quelle.` };
+  // En bits, sur l'état relu : ce que CETTE modification a accordé est retiré, ce qu'elle a retiré
+  // est rendu, le reste (retouche suivante, autre auteur) est laissé.
+  const big = (o) => ({ allow: St.toBig(o?.allow), deny: St.toBig(o?.deny) });
+  const now = big(current);
+  const before = big(record.before);
+  const after = big(record.after);
+  const next = {
+    allow: (now.allow & ~(after.allow & ~before.allow)) | (before.allow & ~after.allow),
+    deny: (now.deny & ~(after.deny & ~before.deny)) | (before.deny & ~after.deny),
+  };
+  const empty = next.allow === 0n && next.deny === 0n;
+  if (current ? next.allow === now.allow && next.deny === now.deny : empty) return { ok: true }; // déjà rétablie
+  const remove = empty && !record.before;
   const route = Routes.channelPermission(channel.id, record.targetId);
   try {
-    if (!record.before) await ctx.client.rest.delete(route, { reason: REASON });
+    if (remove) await ctx.client.rest.delete(route, { reason: REASON });
     else {
       if (record.targetType === 0 && !St.resolveRoleId(guild, ctx, St.storeFor(ctx.client), record.targetId)) return { ok: false, note: `Surcharge de #${channel.name} non rétablie : le rôle n'existe plus.` };
-      await ctx.client.rest.put(route, { body: { type: record.targetType, allow: record.before.allow, deny: record.before.deny }, reason: REASON });
+      await ctx.client.rest.put(route, { body: { type: record.targetType, allow: next.allow.toString(), deny: next.deny.toString() }, reason: REASON });
     }
     return { ok: true };
   } catch (e) {
@@ -207,6 +238,7 @@ async function undoFields(guild, record, ctx) {
   const store = St.storeFor(ctx.client);
   const body = {};
   const skipped = [];
+  const changed = [];
   for (const c of record.changes ?? []) {
     if (!St.CHANNEL_RESTORABLE.includes(c.key)) {
       skipped.push(c.key);
@@ -214,8 +246,9 @@ async function undoFields(guild, record, ctx) {
     }
     const now = channelApiValue(channel, c.key);
     if (St.sameValue(now, c.old)) continue; // déjà rétabli
-    if (!St.sameValue(now, c.new)) {
-      skipped.push(`${c.key} modifié depuis`);
+    // Valeur due à une modification suivante du même auteur (chaîne) : l'origine est rétablie.
+    if (!St.chainMatches(store, guild.id, `channel:${channel.id}`, c, now)) {
+      changed.push(c.key);
       continue;
     }
     let value = c.old ?? null;
@@ -236,6 +269,8 @@ async function undoFields(guild, record, ctx) {
     }
   }
   if (skipped.length) St.noteSummary(ctx, `channel:${channel.id}`, () => {}, () => `#${channel.name} : non rétabli automatiquement (${[...new Set(skipped)].join(', ')}).`);
+  // Modifié depuis par quelqu'un d'autre : laissé tel quel, compté comme non annulé.
+  if (changed.length) return { ok: false, note: `#${channel.name} : ${[...new Set(changed)].join(', ')} modifié depuis par quelqu'un d'autre, laissé tel quel.` };
   return { ok: true };
 }
 
@@ -287,7 +322,7 @@ const channelDelete = {
     }
     if (!snap) snap = St.channelFromChanges(entry); // dernier recours : jamais recréé
     if (entry.executorId) store.markDeleted(guild.id, id, entry.executorId);
-    return { weight: 1, record: { channelId: id, name: snap.name ?? null, type: snap.type ?? null, executorId: entry.executorId ?? null, snapshot: snap } };
+    return { weight: 1, record: { channelId: id, originId: store.originOf(guild.id, id), name: snap.name ?? null, type: snap.type ?? null, executorId: entry.executorId ?? null, snapshot: snap } };
   },
   async undo(guild, record, ctx) {
     const store = St.storeFor(ctx.client);
@@ -297,9 +332,10 @@ const channelDelete = {
     return recreate(guild, snap, ctx, store, record.executorId ?? null);
   },
   describe: (record) => `Salon supprimé${record?.name ? ` : #${record.name}` : ''}`,
-  // Par nom et type : un salon recréé change d'identifiant ; un autre bot qui le supprime en boucle
-  // déclenche ainsi le disjoncteur.
-  targetKey: (record) => `delete:${record?.type ?? ''}:${record?.name ?? record?.channelId ?? record?.targetId ?? ''}`,
+  // Par identifiant d'ORIGINE (suivi à travers les recréations) : un autre bot qui supprime en boucle
+  // le salon recréé déclenche le disjoncteur, mais trois homonymes supprimés par un nuke restent
+  // trois objets distincts.
+  targetKey: (record) => `delete:${record?.originId ?? record?.channelId ?? record?.targetId ?? ''}`,
 };
 
 const channelUpdate = {
@@ -311,8 +347,10 @@ const channelUpdate = {
     const channel = guild.channels?.cache?.get?.(entry.targetId);
     if (channel?.isThread?.()) return null;
     if (entry.action === 11) {
-      const changes = St.filterChannelChanges(entry.changes, { lenient });
-      if (!changes.length) return null;
+      const filtered = St.filterChannelChanges(entry.changes, { lenient });
+      if (!filtered.length) return null;
+      // Modifications successives du même champ par le même auteur : old ← valeur d'origine.
+      const changes = St.chainChanges(St.storeFor(ctx.client), guild.id, `channel:${entry.targetId}`, entry.executorId, filtered);
       return { weight: 1, record: { action: 11, channelId: entry.targetId, name: channel?.name ?? null, changes } };
     }
     const ow = overwriteRecord(entry, guild);

@@ -3,6 +3,7 @@
 const { PermissionFlagsBits, Routes } = require('discord.js');
 const { applyRoles } = require('../../../utils/memberRoles');
 const channelRemap = require('../../../utils/channelRemap');
+const { remapRole } = require('../../../utils/roleRemap');
 const S = require('../../../utils/secur');
 const St = require('../structure');
 
@@ -54,6 +55,12 @@ function roleApiValue(role, key) {
   }
 }
 
+/** Rôle relu chez Discord (le PATCH précédent du bot n'est pas encore dans le cache), ou celui du cache. */
+async function freshRole(guild, role) {
+  if (typeof guild.roles?.fetch !== 'function') return role;
+  return (await guild.roles.fetch(role.id, { force: true }).catch(() => null)) ?? role;
+}
+
 /** Le rôle est-il modifiable par le bot (sous son rôle le plus haut, non géré) ? */
 function editable(guild, role) {
   if (!role || role.managed) return false;
@@ -70,12 +77,16 @@ async function recreate(guild, snap, ctx, store) {
   const label = `@${snap.name ?? snap.id}`;
   const already = ctx.idMap?.get(snap.id);
   if (already && guild.roles.cache.has(already)) return { ok: true };
+  // Déjà recréé hors de cet incident (restauration /backup), suivi par l'identifiant d'origine
+  // (jamais par le nom) : cette copie reçoit membres, surcharges et références, sans doublon.
+  const twinId = store.remapOf(guild.id, snap.id);
+  const twin = twinId ? guild.roles.cache.get(twinId) ?? null : null;
   const protectedKind = St.protectedRoleKind(snap);
   if (protectedKind) return { ok: false, note: `Rôle ${label} jamais recréé : ${protectedKind === 'managed' ? 'rôle géré (bot, intégration ou booster)' : 'rôle d\'abonnement ou lié'}.` };
   if (snap.source !== 'cache') return { ok: false, note: `Rôle ${label} jamais recréé : aucun instantané fiable.` };
   const me = guild.members?.me;
   if (!me?.permissions?.has?.(PermissionFlagsBits.ManageRoles)) return { ok: false, note: `Rôle ${label} non recréé : il me manque « Gérer les rôles ».` };
-  if (!St.takeBudget(ctx, 'roles', St.MAX_ROLE_RECREATIONS)) return { ok: false, note: `Plafond de ${St.MAX_ROLE_RECREATIONS} recréations de rôles atteint pour cet incident : restaurez le reste avec /backup.` };
+  if (!twin && !St.takeBudget(ctx, 'roles', St.MAX_ROLE_RECREATIONS)) return { ok: false, note: `Plafond de ${St.MAX_ROLE_RECREATIONS} recréations de rôles atteint pour cet incident : restaurez le reste avec /backup.` };
   const botAdmin = me.permissions.has(PermissionFlagsBits.Administrator);
   const options = St.buildRoleCreate(snap, {
     botAdmin,
@@ -85,20 +96,30 @@ async function recreate(guild, snap, ctx, store) {
     maxPosition: (me.roles?.highest?.position ?? 1) - 1,
     reason: REASON,
   });
-  let role;
-  try {
-    role = await guild.roles.create(options);
-  } catch (e) {
-    return { ok: false, note: `Rôle ${label} non recréé : ${String(e?.message ?? e).slice(0, 120)}.` };
+  let role = twin;
+  if (!role) {
+    try {
+      role = await guild.roles.create(options);
+    } catch (e) {
+      return { ok: false, note: `Rôle ${label} non recréé : ${String(e?.message ?? e).slice(0, 120)}.` };
+    }
   }
   ctx.idMap?.set(snap.id, role.id);
   store.setRemap(guild.id, snap.id, role.id);
 
-  // Membres (cache, 250 au plus, un par un).
+  // Membres (cache, 250 au plus, un par un). L'auteur d'un incident à sanctionner n'en reçoit
+  // rien (sa sanction serait défaite) : le rôle rejoint ceux que « Restaurer » pourra lui rendre.
   let members = 0;
+  let withheld = 0;
   for (const id of (snap.members ?? []).slice(0, St.MAX_ROLE_MEMBERS_RESTORED)) {
     const member = guild.members.cache.get(id);
     if (!member || member.roles.cache.has(role.id)) continue;
+    const incident = St.sanctionedIncidentOf(ctx, guild.id, id);
+    if (incident) {
+      incident.removedRoles = [...new Set([...(incident.removedRoles ?? []), role.id])];
+      withheld += 1;
+      continue;
+    }
     const res = await applyRoles(member, { add: [role.id] }, REASON);
     if (res.added.length) members += 1;
   }
@@ -127,14 +148,24 @@ async function recreate(guild, snap, ctx, store) {
   } catch {
     /* au mieux */
   }
+  // Références en base (rôles temporaires, anniversaires, boutique, giveaways, « Rendre les rôles »…).
+  let base = { carried: 0, lostMenus: 0 };
+  try {
+    base = remapRole(St.dbOf(ctx.client), guild.id, snap.id, role.id);
+  } catch {
+    /* au mieux */
+  }
   St.noteSummary(ctx, 'roles', (d) => {
     d.count = (d.count ?? 0) + 1;
     d.members = (d.members ?? 0) + members;
     d.total = (d.total ?? 0) + (snap.members?.length ?? 0);
     d.overwrites = (d.overwrites ?? 0) + overwrites;
     d.refs = (d.refs ?? 0) + configRefs;
-    d.lost = (d.lost ?? 0) + (!botAdmin && St.toBig(snap.permissions) !== options.permissions ? 1 : 0);
-  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs})${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
+    d.lost = (d.lost ?? 0) + (!twin && !botAdmin && St.toBig(snap.permissions) !== options.permissions ? 1 : 0);
+    d.withheld = (d.withheld ?? 0) + withheld;
+    d.base = (d.base ?? 0) + base.carried;
+    d.menus = (d.menus ?? 0) + base.lostMenus;
+  }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs}${d.base ? ` ; en base : ${d.base}` : ''})${d.menus ? ` — ${d.menus} menu(s) de rôles à republier (ils proposent l'ancien rôle)` : ''}${d.withheld ? ` — ${d.withheld} attribution(s) retenue(s) pour l'auteur sanctionné` : ''}${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
   return { ok: true };
 }
 
@@ -188,7 +219,7 @@ const roleDelete = {
     // Rôle géré (bot expulsé, intégration retirée, booster) : action de Discord, jamais comptée.
     if (St.protectedRoleKind(snap) === 'managed') return null;
     if (!snap && St.changeValue(entry, 'managed', 'old') === true) return null;
-    return { weight: 1, record: { roleId: id, name: snap?.name ?? St.changeValue(entry, 'name', 'old') ?? null, snapshot: snap ?? null } };
+    return { weight: 1, record: { roleId: id, originId: store.originOf(guild.id, id), name: snap?.name ?? St.changeValue(entry, 'name', 'old') ?? null, snapshot: snap ?? null } };
   },
   async undo(guild, record, ctx) {
     const store = St.storeFor(ctx.client);
@@ -198,8 +229,9 @@ const roleDelete = {
     return recreate(guild, snap, ctx, store);
   },
   describe: (record) => `Rôle supprimé${record?.name ? ` : @${record.name}` : ''}`,
-  // Par nom : un rôle recréé change d'identifiant (disjoncteur contre un autre bot).
-  targetKey: (record) => `delete:${record?.name ?? record?.roleId ?? record?.targetId ?? ''}`,
+  // Par identifiant d'ORIGINE (suivi à travers les recréations, disjoncteur contre un autre bot) :
+  // des rôles homonymes (séparateurs) restent des objets distincts.
+  targetKey: (record) => `delete:${record?.originId ?? record?.roleId ?? record?.targetId ?? ''}`,
 };
 
 const roleUpdate = {
@@ -220,8 +252,10 @@ const roleUpdate = {
       }
       return null; // permissions DONNÉES à ce bot (réglage par un admin) : jamais comptées
     }
-    const changes = St.filterRoleChanges(entry.changes, { lenient: St.isLenient(ctx, 'roleUpdate', 'dangerousOnly') });
-    if (!changes.length) return null;
+    const filtered = St.filterRoleChanges(entry.changes, { lenient: St.isLenient(ctx, 'roleUpdate', 'dangerousOnly') });
+    if (!filtered.length) return null;
+    // Modifications successives du même champ par le même auteur : old ← valeur d'origine.
+    const changes = St.chainChanges(St.storeFor(ctx.client), guild.id, `role:${id}`, entry.executorId, filtered);
     const noUndo = Boolean(role && (role.managed || !editable(guild, role)));
     return { weight: 1, record: { roleId: id, name: role?.name ?? null, changes, noUndo } };
   },
@@ -233,20 +267,36 @@ const roleUpdate = {
     if (record.noUndo || !editable(guild, role)) {
       return { ok: false, note: record.botRole ? `Permissions retirées à mon rôle ${label} : non annulable (je ne peux pas modifier mon propre rôle). Rendez-les à la main.` : `Rôle ${label} : non annulable (rôle géré, ou au niveau du mien ou au-dessus).` };
     }
+    const store = St.storeFor(ctx.client);
+    const current = (record.changes ?? []).some((c) => St.ROLE_RESTORABLE.includes(c.key)) ? await freshRole(guild, role) : role;
     const body = {};
     const skipped = [];
+    const changed = [];
+    const restored = [];
     for (const c of record.changes ?? []) {
       if (!St.ROLE_RESTORABLE.includes(c.key)) {
         skipped.push(c.key === 'icon_hash' || c.key === 'icon' ? 'icône' : c.key);
         continue;
       }
-      const now = roleApiValue(role, c.key);
-      if (St.sameValue(now, c.old)) continue; // déjà rétabli
-      if (!St.sameValue(now, c.new)) {
-        skipped.push(`${c.key} modifié depuis`);
+      if (c.key === 'permissions') {
+        // En bits, sur l'état relu : les bits gagnés par cette modification sont retirés, ceux
+        // qu'elle a retirés sont rendus, le reste est laissé (deux PATCH successifs, file occupée).
+        const now = St.toBig(current.permissions);
+        const next = (now & ~St.gainedBits(c.old, c.new)) | St.gainedBits(c.new, c.old);
+        if (next !== now) {
+          body.permissions = next.toString();
+          restored.push(c);
+        }
         continue;
       }
-      body[c.key] = c.key === 'permissions' ? String(c.old ?? '0') : c.old ?? null;
+      const now = roleApiValue(current, c.key);
+      if (St.sameValue(now, c.old)) continue; // déjà rétabli
+      if (!St.chainMatches(store, guild.id, `role:${role.id}`, c, now)) {
+        changed.push(c.key);
+        continue;
+      }
+      body[c.key] = c.old ?? null;
+      restored.push(c);
     }
     if (Object.keys(body).length) {
       try {
@@ -256,8 +306,14 @@ const roleUpdate = {
       }
     }
     if (skipped.length) St.noteSummary(ctx, `role:${role.id}`, () => {}, () => `Rôle ${label} : non rétabli automatiquement (${[...new Set(skipped)].join(', ')}).`);
-    // changed : false quand rien n'a été rétabli (déjà fait, modifié depuis) — ignoré par le disjoncteur.
-    return { ok: true, changed: Object.keys(body).length > 0 };
+    // Modifié depuis par quelqu'un d'autre : laissé tel quel, compté comme non annulé.
+    if (changed.length) return { ok: false, note: `Rôle ${label} : ${[...new Set(changed)].join(', ')} modifié depuis par quelqu'un d'autre, laissé tel quel.` };
+    // changed (disjoncteur par objet) : false quand rien n'a été rétabli (déjà fait), ou quand
+    // chaque champ rétabli appartient à une chaîne déjà annulée une fois : les modifications
+    // enchaînées d'une même rafale (bits distincts, chacun réellement retiré) comptent une seule
+    // fois ; une réapplication après l'annulation (boucle entre bots) ouvre une nouvelle chaîne.
+    const fresh = restored.map((c) => store.firstChainUndo(guild.id, `role:${role.id}:${c.key}`, c.chain));
+    return { ok: true, changed: fresh.some(Boolean) };
   },
   describe: (record) => `Rôle modifié${record?.name ? ` : @${record.name}` : ''}`,
   targetKey: (record) => `update:${record?.roleId ?? ''}`,
@@ -309,6 +365,9 @@ const roleRemove = {
       // Rôles retirés AU BOT : alerte prioritaire et sanction d'emblée.
       return { weight: S.effectiveLimit(ctx.cfg, 'roleRemove'), record: { targetId, roles: removed, bot: true } };
     }
+    // Cible auteur d'un incident Secur en cours : un responsable la neutralise à la main. Ni compté
+    // (le responsable n'est pas dérangé), ni annulé (l'auteur n'est pas réarmé).
+    if (St.openIncidentOf(ctx, guild.id, targetId)) return null;
     const opts = levelOpts(ctx);
     const roles = removed.filter((id) => {
       const role = guild.roles?.cache?.get?.(id);
@@ -317,8 +376,13 @@ const roleRemove = {
     if (!roles.length) return null;
     return { weight: 1, record: { targetId, roles } };
   },
-  async undo(guild, record) {
+  async undo(guild, record, ctx) {
     if (!record?.roles?.length) return { ok: false };
+    // Incident ouvert pour la cible depuis le classement : rien ne lui est rendu.
+    if (!record.bot && St.openIncidentOf(ctx, guild.id, record.targetId)) {
+      St.noteSummary(ctx, `remove:${record.targetId}`, () => {}, () => `Rôles retirés à <@${record.targetId}> non rendus : il est l'auteur d'un incident Secur en cours.`);
+      return { ok: true };
+    }
     const member = record.bot ? guild.members?.me : guild.members?.cache?.get?.(record.targetId) ?? (await guild.members?.fetch?.(record.targetId).catch(() => null));
     if (!member) return { ok: false, note: `<@${record.targetId}> a quitté le serveur : rôles non rendus.` };
     const roles = record.roles.filter((id) => guild.roles.cache.has(id) && !member.roles.cache.has(id));

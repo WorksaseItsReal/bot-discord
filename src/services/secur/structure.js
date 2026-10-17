@@ -11,7 +11,7 @@ const channelRemap = require('../../utils/channelRemap');
  *
  *  - StructureStore : instantanés pris AVANT tout nettoyage (écouteurs `prepend`), orphelins d'une
  *    catégorie supprimée et surcharges retirées (channelUpdate), correspondance ancien → nouvel
- *    identifiant. Tout est borné (500 instantanés par serveur, 120 s ; 1 000 orphelins ou
+ *    identifiant. Tout est borné (500 instantanés par serveur, 30 min ; 1 000 orphelins ou
  *    surcharges, 30 s ; 1 000 serveurs) et oublié au départ du serveur.
  *  - Captures (cache + base, synchrones) et planificateurs PURS (diff de permissions, filtres
  *    « on » / « max », clés de serveur restaurables, charges utiles de recréation).
@@ -22,7 +22,12 @@ const channelRemap = require('../../utils/channelRemap');
  * déterminable n'est JAMAIS recréé.
  */
 
-const SNAPSHOT_TTL_MS = 120_000;
+/**
+ * Instantanés, suppressions classées et correspondances ancien → nouvel identifiant : 30 min. La
+ * file d'annulation peut rester occupée plusieurs minutes (membres rendus un par un, limites de
+ * débit) : une mémoire plus courte expirait avant la recréation (salon hors de sa catégorie).
+ */
+const SNAPSHOT_TTL_MS = 30 * 60_000;
 const MAX_SNAPSHOTS = 500;
 const BUFFER_TTL_MS = 30_000;
 const MAX_BUFFERED = 1_000;
@@ -285,8 +290,9 @@ class StructureStore {
     this.maxBuffered = maxBuffered;
     this.bufferTtlMs = bufferTtlMs;
     this.maxGuilds = maxGuilds;
-    /** @type {Map<string, { snaps: Map, orphans: Map, overwrites: Map, remap: Map, deleted: Map, prunedAt: number }>} */
+    /** @type {Map<string, { snaps: Map, orphans: Map, overwrites: Map, remap: Map, origin: Map, deleted: Map, chains: Map, prunedAt: number }>} */
     this.guilds = new Map();
+    this.chainSeq = 0;
   }
 
   static #put(map, key, value, max) {
@@ -299,7 +305,7 @@ class StructureStore {
     if (!guildId) return null;
     let st = this.guilds.get(guildId);
     if (!st && create) {
-      st = { snaps: new Map(), orphans: new Map(), overwrites: new Map(), remap: new Map(), deleted: new Map(), prunedAt: this.now() };
+      st = { snaps: new Map(), orphans: new Map(), overwrites: new Map(), remap: new Map(), origin: new Map(), deleted: new Map(), chains: new Map(), prunedAt: this.now() };
       StructureStore.#put(this.guilds, guildId, st, this.maxGuilds);
     }
     if (st && this.now() - st.prunedAt > PRUNE_EVERY_MS) this.#prune(st);
@@ -308,7 +314,7 @@ class StructureStore {
 
   #prune(st, now = this.now()) {
     st.prunedAt = now;
-    for (const [map, ttl] of [[st.snaps, this.snapshotTtlMs], [st.remap, this.snapshotTtlMs], [st.deleted, this.snapshotTtlMs], [st.orphans, this.bufferTtlMs], [st.overwrites, this.bufferTtlMs]]) {
+    for (const [map, ttl] of [[st.snaps, this.snapshotTtlMs], [st.remap, this.snapshotTtlMs], [st.origin, this.snapshotTtlMs], [st.deleted, this.snapshotTtlMs], [st.chains, this.snapshotTtlMs], [st.orphans, this.bufferTtlMs], [st.overwrites, this.bufferTtlMs]]) {
       for (const [k, v] of map) if (now - v.at >= ttl) map.delete(k);
     }
   }
@@ -373,15 +379,63 @@ class StructureStore {
     return [...st.overwrites.values()].filter((v) => v.id === targetId && this.now() - v.at < this.bufferTtlMs);
   }
 
-  /** Ancien identifiant (salon ou rôle recréé) → nouveau, 120 s (entre incidents). */
+  /**
+   * Ancien identifiant (salon ou rôle recréé) → nouveau, 30 min (entre incidents). Le nouveau garde
+   * l'identifiant d'ORIGINE de la chaîne (originOf) : clé du disjoncteur, qui suit un objet recréé
+   * puis supprimé de nouveau sans confondre deux homonymes.
+   */
   setRemap(guildId, oldId, newId) {
     const st = this.#state(guildId);
-    if (st && oldId && newId) StructureStore.#put(st.remap, oldId, { id: newId, at: this.now() }, this.maxSnapshots);
+    if (!st || !oldId || !newId) return;
+    StructureStore.#put(st.remap, oldId, { id: newId, at: this.now() }, this.maxSnapshots);
+    const root = this.#fresh(st.origin, oldId, this.snapshotTtlMs)?.id ?? oldId;
+    StructureStore.#put(st.origin, newId, { id: root, at: this.now() }, this.maxSnapshots);
+  }
+
+  /** Identifiant d'origine d'un salon ou rôle recréé par Secur (lui-même s'il ne l'a pas été). */
+  originOf(guildId, id) {
+    const st = this.#state(guildId, false);
+    return (st && id ? this.#fresh(st.origin, id, this.snapshotTtlMs)?.id : null) ?? id ?? null;
   }
 
   remapOf(guildId, oldId) {
     const st = this.#state(guildId, false);
     return st ? this.#fresh(st.remap, oldId, this.snapshotTtlMs)?.id ?? null : null;
+  }
+
+  /**
+   * Modifications successives d'un même champ par un même auteur (A → B puis B → C) : une chaîne,
+   * dont l'origine (A) et la dernière valeur (C) servent à toutes ses annulations, quel que soit
+   * leur ordre dans la file. @returns {{ id: number, origin: unknown }}
+   */
+  chainChange(guildId, key, executorId, oldValue, newValue) {
+    const st = this.#state(guildId);
+    if (!st || !key || !executorId) return { id: 0, origin: oldValue };
+    const prev = this.#fresh(st.chains, key, this.snapshotTtlMs);
+    const linked = prev && prev.executorId === executorId && sameValue(prev.last, oldValue);
+    const link = linked ? { ...prev, last: newValue, at: this.now() } : { id: (this.chainSeq += 1), executorId, origin: oldValue, last: newValue, at: this.now() };
+    StructureStore.#put(st.chains, key, link, this.maxSnapshots);
+    return { id: link.id, origin: link.origin };
+  }
+
+  /** Chaîne de modifications d'un champ (voir chainChange), ou null. */
+  chainOf(guildId, key) {
+    const st = this.#state(guildId, false);
+    return st ? this.#fresh(st.chains, key, this.snapshotTtlMs) : null;
+  }
+
+  /**
+   * Première annulation effective d'une chaîne (disjoncteur par objet) ? Les tâches suivantes de la
+   * même chaîne (rafale d'un auteur, modifications enchaînées) répondent false. Chaîne inconnue,
+   * expirée ou remplacée : true (comptée).
+   */
+  firstChainUndo(guildId, key, chainId) {
+    const st = this.#state(guildId, false);
+    const chain = st && chainId ? this.#fresh(st.chains, key, this.snapshotTtlMs) : null;
+    if (!chain || chain.id !== chainId) return true;
+    if (chain.undone) return false;
+    chain.undone = true;
+    return true;
   }
 
   /** Suppression classée (auteur) : une catégorie supprimée dans le même incident est recréée d'abord. */
@@ -543,7 +597,9 @@ function captureChannel(client, channel, now = Date.now()) {
     defaultReactionEmoji: channel.defaultReactionEmoji ? { id: channel.defaultReactionEmoji.id ?? null, name: channel.defaultReactionEmoji.name ?? null } : null,
     defaultSortOrder: channel.defaultSortOrder ?? null,
     defaultForumLayout: channel.defaultForumLayout ?? null,
-    parentId: channel.parentId ?? null,
+    // Catégorie perdue juste avant (catégorie supprimée d'abord : Discord sort l'enfant) figée dans
+    // l'instantané, le tampon des orphelins ne durant que 30 s.
+    parentId: channel.parentId ?? (isCategory ? null : storeFor(client).orphanParentOf(guild?.id ?? channel.guildId, channel.id)) ?? null,
     position: Number.isInteger(channel.rawPosition) ? channel.rawPosition : null,
     overwrites: overwritesOf(channel),
     children: isCategory ? [...(guild?.channels?.cache?.values?.() ?? [])].filter((c) => c.parentId === channel.id && !c.isThread?.()).map((c) => c.id) : [],
@@ -681,6 +737,26 @@ function incidentOf(ctx) {
   return null;
 }
 
+/**
+ * Incident Secur encore ouvert dont `userId` est l'auteur (moteur SEC1), ou null. Lecture seule :
+ * un incident expiré n'est jamais retiré d'ici.
+ */
+function openIncidentOf(ctx, guildId, userId) {
+  const state = ctx?.service?.open?.get?.(`${guildId}:${userId}`);
+  if (!state) return null;
+  const now = typeof ctx.service.now === 'function' ? ctx.service.now() : Date.now();
+  return now <= state.expiresAt ? state : null;
+}
+
+/**
+ * Auteur d'un incident ouvert à sanctionner (sanction visée au moins le derank) : une recréation ne
+ * doit rien lui rendre (rôle, surcharge membre), sinon elle défait sa sanction.
+ */
+function sanctionedIncidentOf(ctx, guildId, userId) {
+  const state = openIncidentOf(ctx, guildId, userId);
+  return state && S.PUNISH_ORDER.indexOf(state.target) >= S.PUNISH_ORDER.indexOf('derank') ? state : null;
+}
+
 const summaries = new WeakMap();
 /**
  * Ligne de synthèse d'un incident (une par `key`, mise à jour sur place) : les annulations
@@ -701,6 +777,30 @@ function noteSummary(ctx, key, mutate, render) {
   else if (state.details.length < 8) state.details.push(line);
   else return;
   data.line = line;
+}
+
+/**
+ * Changements d'une entrée rattachés à la chaîne de leur champ (classify, dans l'ordre du journal) :
+ * old ← origine de la chaîne (valeur d'avant la 1re modification de cet auteur), chain ← identifiant.
+ * Sans magasin, serveur ou auteur : inchangés.
+ */
+function chainChanges(store, guildId, prefix, executorId, changes) {
+  if (!store || !guildId || !executorId) return changes;
+  return changes.map((c) => {
+    const { id, origin } = store.chainChange(guildId, `${prefix}:${c.key}`, executorId, c.old, c.new);
+    return { ...c, old: origin, chain: id };
+  });
+}
+
+/**
+ * La valeur actuelle vient-elle encore de cette modification (sa nouvelle valeur, ou celle d'une
+ * modification suivante du même auteur sur le même champ) ? Sinon, quelqu'un d'autre l'a changée.
+ */
+function chainMatches(store, guildId, prefix, c, now) {
+  if (sameValue(now, c.new)) return true;
+  if (!c.chain || !store) return false;
+  const chain = store.chainOf(guildId, `${prefix}:${c.key}`);
+  return Boolean(chain && chain.id === c.chain && sameValue(now, chain.last));
 }
 
 /** Identifiant actuel d'un salon (recréé : idMap, puis report entre incidents). */
@@ -809,7 +909,11 @@ module.exports = {
   isLenient,
   takeBudget,
   incidentOf,
+  openIncidentOf,
+  sanctionedIncidentOf,
   noteSummary,
+  chainChanges,
+  chainMatches,
   resolveChannelId,
   resolveRoleId,
   botMask,
