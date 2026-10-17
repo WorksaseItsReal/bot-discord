@@ -94,9 +94,12 @@ module.exports = {
       const minDays = interaction.options.getInteger('anciennete_min') ?? null;
       const inviteTracking = client.services.invites?.hasSnapshot?.(interaction.guild.id) ?? true;
       const warnings = conditionWarnings(client.services.config.get(interaction.guild.id), { minLevel, minInvites, inviteTracking });
+      // Acquittée AVANT la publication : un envoi lent (> 3 s) ferait expirer l'interaction alors
+      // que le giveaway est créé, et l'organisateur relancerait (doublon).
+      await interaction.deferReply({ ephemeral: true });
       const { id, message } = await giveaways.create(interaction.channel, interaction.user, { prize, winners, durationMs, requiredRole, forbiddenRole, minLevel, minInvites, minDays });
       const created = giveaways.get(id);
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [
           card({
             tone: 'celebrate',
@@ -117,7 +120,6 @@ module.exports = {
           }),
         ],
         components: message?.url ? buttonRows(linkButton('Voir le giveaway', message.url, ICONS.link)) : [],
-        ephemeral: true,
       });
     }
 

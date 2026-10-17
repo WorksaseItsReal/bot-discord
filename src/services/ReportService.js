@@ -13,6 +13,8 @@ const logger = createLogger('reports');
 
 /** Délai minimal entre deux signalements d'un même membre. */
 const REPORT_COOLDOWN_MS = 30_000;
+/** Le rôle du staff est mentionné au plus une fois par serveur sur cette durée (les cartes, elles, sont toutes publiées). */
+const PING_COOLDOWN_MS = 10 * 60 * 1000;
 /** Longueur maximale de la raison donnée par le signaleur. */
 const MAX_REPORT_REASON = 500;
 /** Longueur de la copie du message conservée (base et carte). */
@@ -84,6 +86,8 @@ class ReportService {
     this.logging = logging;
     /** Signalements dont une action ou une clôture est en cours : `<guildId>:<id>`. */
     this.pending = new Set();
+    /** Dernier ping du rôle du staff : guildId → ms (plafond par serveur). */
+    this.lastPing = new Map();
   }
 
   settings(guildId) {
@@ -165,7 +169,10 @@ class ReportService {
     if (!id) throw new UserError('Vous avez déjà signalé ce message : l\'équipe de modération va l\'examiner.');
     const report = this.reports.get(guild.id, id);
     const settings = this.settings(guild.id);
-    const role = settings.pingRoleId && settings.pingRoleId !== guild.id && guild.roles?.cache?.has(settings.pingRoleId) ? settings.pingRoleId : null;
+    const configured = settings.pingRoleId && settings.pingRoleId !== guild.id && guild.roles?.cache?.has(settings.pingRoleId) ? settings.pingRoleId : null;
+    // Plafond par serveur : plusieurs signaleurs (ou un seul toutes les 30 s) ne pinguent pas le staff à chaque fois.
+    const now = Date.now();
+    const role = configured && now - (this.lastPing.get(guild.id) ?? 0) >= PING_COOLDOWN_MS ? configured : null;
     try {
       const sent = await dest.channel.send({
         ...(role ? { content: `<@&${role}>` } : {}),
@@ -173,6 +180,7 @@ class ReportService {
         allowedMentions: role ? { parse: [], roles: [role] } : { parse: [] },
       });
       this.reports.setCard(guild.id, id, sent.channelId ?? dest.channel.id, sent.id);
+      if (role) this.lastPing.set(guild.id, now);
     } catch (err) {
       logger.debug(`Carte de signalement non publiée (${guild.id}) :`, err?.message);
       this.reports.delete(guild.id, id);
@@ -312,6 +320,7 @@ class ReportService {
 module.exports = {
   ReportService,
   REPORT_COOLDOWN_MS,
+  PING_COOLDOWN_MS,
   REPORT_TIMEOUT_MS,
   MAX_REPORT_REASON,
   REPORT_ICON,

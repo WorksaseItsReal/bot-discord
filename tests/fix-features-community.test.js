@@ -207,11 +207,17 @@ test('Giveaway : reroll avec un nombre de gagnants, en série (pas de doublon)',
   const { repo, service, id } = giveawaySetup();
   for (const u of ['a', 'b', 'c', 'd', 'e']) repo.toggleEntry(id, u);
   const [first] = await service.end(id, { guildId: 'g1' });
-  const [r1, r2] = await Promise.all([
+  // Deux rerolls simultanés : exécutés en série ; le second, juste après le premier, est refusé
+  // (anti-double clic, revue n° 6 R82). Une fois le délai écoulé, un nouveau reroll exclut les précédents.
+  const settled = await Promise.allSettled([
     service.end(id, { reroll: true, guildId: 'g1', count: 2 }),
     service.end(id, { reroll: true, guildId: 'g1', count: 2 }),
   ]);
+  const r1 = settled.find((r) => r.status === 'fulfilled').value;
+  assert.equal(settled.filter((r) => r.status === 'rejected').length, 1);
   assert.equal(r1.length, 2);
+  service.lastReroll.clear();
+  const r2 = await service.end(id, { reroll: true, guildId: 'g1', count: 2 });
   const all = [first, ...r1, ...r2];
   assert.equal(new Set(all).size, all.length, 'aucun gagnant tiré deux fois');
   assert.equal(service.locks.size, 0, 'verrous libérés');

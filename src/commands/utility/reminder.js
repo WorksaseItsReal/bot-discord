@@ -1,16 +1,30 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { truncate } = require('../../utils/embeds');
 const { parseDuration, discordTimestamp } = require('../../utils/time');
 const { card, field, wide, ICONS, subtext, status, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { assertInvoker } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
+const { assertAutomodClean } = require('../../utils/safeText');
 
 const REMINDER_ICON = '⏰';
 const MAX_LISTED = 10;
 /** Rappels en cours au maximum par utilisateur (évite de remplir la base et le planificateur). */
 const MAX_ACTIVE_REMINDERS = 25;
+
+/**
+ * L'auteur peut-il écrire dans le salon de la commande ? (permissions de l'interaction, surcharges
+ * du salon comprises ; fil : « Envoyer des messages dans les fils »). Sinon le rappel part en MP :
+ * /reminder ne doit pas faire publier plus tard, par le bot, un texte dans un salon en lecture seule.
+ */
+function canWriteHere(interaction) {
+  if (!interaction.inGuild?.()) return true;
+  const perms = interaction.memberPermissions;
+  if (!perms) return false;
+  const send = interaction.channel?.isThread?.() ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
+  return perms.has([PermissionFlagsBits.ViewChannel, send]);
+}
 
 /** Carte « Vos rappels » + un bouton d'annulation par rappel affiché. Pur. */
 function renderList(list, ownerId) {
@@ -49,6 +63,7 @@ function renderList(list, ownerId) {
 module.exports = {
   category: 'utility',
   renderList,
+  canWriteHere,
   MAX_ACTIVE_REMINDERS,
   data: new SlashCommandBuilder()
     .setName('reminder')
@@ -70,12 +85,18 @@ module.exports = {
       const message = interaction.options.getString('message').trim();
       if (!message) throw new UserError('Le message du rappel ne peut pas être vide.');
       if (message.length > 2000) throw new UserError('Le message du rappel est trop long (2000 caractères max).');
+      if (interaction.inGuild?.()) {
+        // Publié plus tard par le bot, que l'AutoMod ignore : mêmes filtres qu'un message ordinaire.
+        assertAutomodClean(message, { automod: client.services.config.get(interaction.guildId).automod, guild: interaction.guild, member: interaction.member, channel: interaction.channel, label: 'Le message du rappel' });
+      }
       const active = repo.listByUser(interaction.user.id).length;
       if (active >= MAX_ACTIVE_REMINDERS) {
         throw new UserError(`Vous avez déjà **${active}** rappels en cours (maximum ${MAX_ACTIVE_REMINDERS}). Supprimez-en avec \`/reminder list\` avant d'en créer un nouveau.`);
       }
       const remindAt = Date.now() + ms;
-      const id = repo.create({ guildId: interaction.guildId, channelId: interaction.channelId, userId: interaction.user.id, message, remindAt });
+      const writable = canWriteHere(interaction);
+      const channelId = writable ? interaction.channelId : null;
+      const id = repo.create({ guildId: interaction.guildId, channelId, userId: interaction.user.id, message, remindAt });
       return interaction.reply({
         embeds: [
           card({
@@ -83,11 +104,15 @@ module.exports = {
             section: 'utility',
             icon: REMINDER_ICON,
             title: 'Rappel programmé',
-            description: [`Je vous le rappellerai ${discordTimestamp(remindAt, 'R')}.`, subtext('Le rappel est conservé même si le bot redémarre.')],
+            description: [
+              `Je vous le rappellerai ${discordTimestamp(remindAt, 'R')}.`,
+              writable ? null : subtext('Vous ne pouvez pas écrire dans ce salon : le rappel vous sera envoyé en message privé.'),
+              subtext('Le rappel est conservé même si le bot redémarre.'),
+            ],
             fields: [
               field(ICONS.id, 'Numéro', `**#${id}**`),
               field(ICONS.date, 'Échéance', discordTimestamp(remindAt, 'f')),
-              field(ICONS.channel, 'Salon', interaction.channelId ? `<#${interaction.channelId}>` : 'Messages privés'),
+              field(ICONS.channel, 'Salon', channelId && interaction.inGuild?.() ? `<#${channelId}>` : 'Messages privés'),
               wide(ICONS.reason, 'Message', truncate(message, 1000)),
             ],
           }),

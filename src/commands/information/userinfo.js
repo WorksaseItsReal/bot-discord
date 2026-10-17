@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { truncate } = require('../../utils/embeds');
+const { safeName } = require('../../utils/safeText');
 const { discordTimestamp } = require('../../utils/time');
 const { permissionLabel } = require('../../utils/permissionNames');
 const { card, field, wide, ICONS, code, linkButton, actionButton, buttonRows } = require('../../utils/ui');
@@ -55,7 +56,7 @@ async function userCard(interaction, target) {
     const perms = KEY_PERMISSIONS.filter((p) => member.permissions.has(p));
     fields.push(
       field('📥', 'Arrivée', member.joinedTimestamp ? `${discordTimestamp(member.joinedTimestamp, 'D')}\n${discordTimestamp(member.joinedTimestamp, 'R')}` : 'Inconnue'),
-      field('✏️', 'Surnom', truncate(member.nickname || '—', 100)),
+      field('✏️', 'Surnom', member.nickname ? safeName(truncate(member.nickname, 100)) : '—'),
       field(ICONS.role, 'Rôle principal', member.roles.highest.id === interaction.guild.id ? '—' : `${member.roles.highest}`),
       field(ICONS.color, 'Couleur', member.displayHexColor && member.displayColor ? code(member.displayHexColor.toUpperCase()) : '—'),
     );

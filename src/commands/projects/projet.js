@@ -238,6 +238,10 @@ async function publishTo(interaction, service, project, channel) {
   if (!channel.permissionsFor?.(interaction.member)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
     throw new UserError(`Vous ne pouvez pas envoyer de messages dans ${channel}.`);
   }
+  // La fiche est une intégration avec boutons-liens : « Intégrer des liens » exigé, comme pour un message.
+  if (!channel.permissionsFor?.(interaction.member)?.has(PermissionFlagsBits.EmbedLinks)) {
+    throw new UserError(`Vous ne pouvez pas intégrer de liens dans ${channel} : la fiche ne peut pas y être publiée par vous.`);
+  }
   await interaction.deferReply({ ephemeral: true });
   const updated = await service.publish(project, channel);
   const link = `https://discord.com/channels/${interaction.guildId}/${updated.channelId}/${updated.messageId}`;
@@ -449,6 +453,8 @@ const HANDLERS = {
           actionButton({ command: 'projet', action: 'edit', args: [project.id], label: 'Modifier', emoji: '✏️' }),
         ),
       ],
+      // Éphémère : la fiche n'est publique qu'une fois publiée (« Publier ici », droits vérifiés).
+      ephemeral: true,
     });
   },
 
@@ -512,7 +518,7 @@ const HANDLERS = {
     const target = await guild.members.fetch(user.id).catch(() => null);
     if (!target) throw new UserError('Ce membre n\'est pas sur le serveur.');
     const role = interaction.options.getString('role');
-    const added = service.addMember(project, user.id, role);
+    const added = service.addMember(project, user.id, role, { member });
     const updated = service.repo.get(project.id);
     await interaction.reply(updatedReply(service, updated, guild, `${user} ${added ? 'a rejoint' : 'est déjà dans'} l'équipe de **${updated.name}**${role ? ` (*${role}*)` : ''}.`));
   },
@@ -530,7 +536,7 @@ const HANDLERS = {
   async 'tache-ajouter'({ interaction, service, guild, member }) {
     const project = service.resolve(guild.id, interaction.options.getString('projet'));
     service.assertCanEdit(project, member);
-    const updated = service.addTask(project, interaction.options.getString('titre'));
+    const updated = service.addTask(project, interaction.options.getString('titre'), { member });
     await interaction.reply(updatedReply(service, updated, guild, `Tâche ajoutée à **${updated.name}**.${publishedHint(updated)}`));
   },
 
@@ -553,7 +559,7 @@ const HANDLERS = {
   async 'lien-ajouter'({ interaction, service, guild, member }) {
     const project = service.resolve(guild.id, interaction.options.getString('projet'));
     service.assertCanEdit(project, member);
-    const updated = service.addLink(project, interaction.options.getString('nom'), interaction.options.getString('url'));
+    const updated = service.addLink(project, interaction.options.getString('nom'), interaction.options.getString('url'), { member });
     await interaction.reply(updatedReply(service, updated, guild, `Lien ajouté à **${updated.name}**.${publishedHint(updated)}`));
   },
 

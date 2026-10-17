@@ -23,9 +23,14 @@ module.exports = {
     if (!member) throw new UserError('Membre introuvable.');
     assertCanModerate(interaction.member, member, interaction.guild.members.me, { action: 'dérank' });
 
-    // Le rôle Muted n'est jamais retiré : un derank ne doit pas lever un mute.
+    // Le rôle Muted n'est jamais retiré : un derank ne doit pas lever un mute. Le rôle de
+    // vérification non plus : retiré, le « non vérifié » (mode retrait) donnerait l'accès
+    // complet, et le « vérifié » (mode ajout) serait repris par « Me vérifier » avec les rôles
+    // automatiques — le derank serait annulé par le membre lui-même.
     const mutedId = client?.services?.moderation?.mutedRole?.(interaction.guild)?.id ?? null;
-    const roles = member.roles.cache.filter((r) => r.id !== interaction.guild.id && r.id !== mutedId);
+    const verification = client?.services?.config?.get(interaction.guild.id)?.welcome?.verification;
+    const verifyId = verification?.enabled ? verification.roleId ?? null : null;
+    const roles = member.roles.cache.filter((r) => r.id !== interaction.guild.id && r.id !== mutedId && r.id !== verifyId);
     const removable = roles.filter((r) => r.editable);
     const kept = roles.filter((r) => !r.editable);
     if (!removable.size) {

@@ -4,13 +4,15 @@ const { truncate, listOrMore } = require('../utils/embeds');
 const { button, row, ButtonStyle } = require('../utils/components');
 const { card, field, wide, ICONS, subtext, actionButton, linkButton, buttonRows } = require('../utils/ui');
 const { discordTimestamp } = require('../utils/time');
-const { pickWinners } = require('../utils/random');
+const { lazyShuffle } = require('../utils/random');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('giveaways');
 /** Plafond du nombre de gagnants d'un reroll (option `gagnants`). */
 const MAX_REROLL_WINNERS = 20;
+/** Après un reroll, un autre reroll du même giveaway est refusé pendant ce délai (double clic, deux organisateurs). */
+const REROLL_COOLDOWN_MS = 10_000;
 
 /** Délai de regroupement des mises à jour du compteur de participants. */
 const EDIT_DEBOUNCE_MS = 5_000;
@@ -93,6 +95,8 @@ class GiveawayService {
     this.inflightEdits = new Map();
     /** @type {Map<number, Promise<unknown>>} fin / reroll en cours, par giveaway (exécutés en série) */
     this.locks = new Map();
+    /** Fin du dernier reroll annoncé : giveawayId → ms. */
+    this.lastReroll = new Map();
   }
 
   /** Carte du giveaway en cours. */
@@ -241,7 +245,9 @@ class GiveawayService {
    * les conditions (rôles requis / interdit, niveau, invitations, ancienneté).
    */
   async #drawWinners(g, entries, count) {
-    const shuffled = pickWinners(entries, entries.length);
+    // Tirage paresseux (Fisher-Yates) : O(n) même pour 300 000 participants, jamais un
+    // mélange complet par splice() qui gelait la boucle d'événements.
+    const shuffled = lazyShuffle(entries);
     const guild = this.client.guilds?.cache?.get?.(g.guild_id) ?? null;
     const winners = [];
     for (const userId of shuffled) {
@@ -405,6 +411,10 @@ class GiveawayService {
     let retry = false;
     if (reroll) {
       if (!g.ended) throw new UserError('Ce giveaway est encore en cours : terminez-le avant de faire un reroll.');
+      // Exécutés en série : le second clic (ou le second organisateur) arrive juste après le premier tirage.
+      if (Date.now() - (this.lastReroll.get(giveawayId) ?? 0) < REROLL_COOLDOWN_MS) {
+        throw new UserError('Un nouveau tirage vient d\'être fait pour ce giveaway : patientez quelques secondes avant de relancer.');
+      }
     } else if (!this.giveaways.markEnded(giveawayId)) {
       // Garde atomique : un seul appel (commande, scheduler…) peut terminer le giveaway.
       // Exception (reprise) : terminé mais annonce jamais publiée (`announced_at`) →
@@ -452,6 +462,11 @@ class GiveawayService {
     // Gagnants mémorisés dès qu'ils sont visibles (annonce ou carte) : une reprise
     // les réannonce au lieu d'en tirer d'autres. Invisibles : /giveaway end retire au sort.
     if (announced || cardEdited) this.giveaways.addWinners?.(giveawayId, winners);
+    if (reroll && announced) {
+      const now = Date.now();
+      this.lastReroll.set(giveawayId, now);
+      if (this.lastReroll.size > 500) for (const [k, at] of this.lastReroll) if (now - at > REROLL_COOLDOWN_MS) this.lastReroll.delete(k);
+    }
     if (!announced) {
       throw new UserError(reroll
         ? 'Le nouveau tirage n\'a pas pu être annoncé (salon introuvable ou permissions manquantes). Corrigez puis relancez.'

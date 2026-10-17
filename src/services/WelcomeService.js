@@ -1,7 +1,9 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { PermissionFlagsBits, escapeMarkdown } = require('discord.js');
+const { PermissionFlagsBits } = require('discord.js');
+const { safeName } = require('../utils/safeText');
+const { hasForbiddenPermissions } = require('../commands/roles/rolemenu');
 const { card, field, ICONS, userLine } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
@@ -26,6 +28,12 @@ const DAY_MS = 86_400_000;
 /** Repli « accueil manqué » après un redémarrage : seulement pour une arrivée de moins de 15 min. */
 const MISSED_WELCOME_MS = 15 * 60 * 1000;
 const MAX_AUTO_ROLES = 10;
+/** Rattrapage au démarrage (mode « retrait ») : arrivées hors ligne de moins de 7 jours. */
+const CATCH_UP_WINDOW_MS = 7 * DAY_MS;
+/** Une arrivée enregistrée (suivi des invitations) à moins de 10 min de joinedAt a été vue en ligne. */
+const SEEN_JOIN_TOLERANCE_MS = 10 * 60_000;
+/** Lecture de la liste complète des membres pour le rattrapage. */
+const CATCH_UP_FETCH_TIMEOUT_MS = 60_000;
 const CHALLENGE_TTL_MS = 5 * 60_000;
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW_MS = 10 * 60_000;
@@ -173,8 +181,10 @@ const SAMPLE_VARS = Object.freeze({ id: null, name: 'Nouveau membre', server: 'V
  * Pur.
  */
 function renderTemplate(template, vars, { plain = false } = {}) {
-  const name = plain ? vars.name : escapeMarkdown(String(vars.name));
-  const server = plain ? vars.server : escapeMarkdown(String(vars.server));
+  // Markdown échappé, liens masqués compris : un nom d'affichage « [Nitro](https://…) » ne
+  // devient jamais un lien cliquable signé par le bot.
+  const name = plain ? vars.name : safeName(vars.name);
+  const server = plain ? vars.server : safeName(vars.server);
   const values = {
     membre: plain ? vars.name : vars.id ? `<@${vars.id}>` : `@${name}`,
     pseudo: name,
@@ -234,6 +244,11 @@ function roleIssue(role, guild) {
   const top = guild?.members?.me?.roles?.highest?.position;
   if (top != null && role.position >= top) return 'il est au-dessus de mon rôle';
   return null;
+}
+
+/** Rôle conférant une permission de modération / d'administration (serveur ou surcharge de salon) ? */
+function sensitiveRole(role) {
+  return Boolean(role?.permissions?.any && hasForbiddenPermissions(role));
 }
 
 /** Libellés des permissions sensibles qu'un rôle confère. Pur. */
@@ -432,7 +447,11 @@ class WelcomeService {
 
   /** Rôles attribuables parmi `ids` (existants, sous mon rôle, ni gérés ni administrateurs). */
   assignable(guild, ids) {
-    return [...new Set(ids ?? [])].filter((id) => !roleIssue(guild.roles?.cache?.get(id), guild));
+    // Revérifié à chaque attribution : un rôle devenu sensible après sa configuration n'est plus distribué.
+    return [...new Set(ids ?? [])].filter((id) => {
+      const role = guild.roles?.cache?.get(id);
+      return !roleIssue(role, guild) && !sensitiveRole(role);
+    });
   }
 
   // ------------------------------------------------------------ événements
@@ -581,11 +600,59 @@ class WelcomeService {
 
   // ------------------------------------------------------------ vérification
 
+  /**
+   * Sanction en cours qui interdit de se (re)vérifier : sinon « Me vérifier » rendrait le rôle
+   * vérifié et les rôles automatiques retirés par un mute ou une quarantaine. Texte, ou null.
+   */
+  #activeSanction(member) {
+    const guild = member.guild;
+    if ((member.communicationDisabledUntilTimestamp ?? 0) > this.now()) return 'un timeout';
+    const muted = this.client?.services?.moderation?.mutedRole?.(guild);
+    if (muted && member.roles?.cache?.has?.(muted.id)) return 'un mute';
+    if (this.client?.repositories?.automodQuarantines?.hasPendingRoles?.(guild.id, member.id)) return 'une quarantaine (compte piraté)';
+    return null;
+  }
+
+  /**
+   * Mode « retrait » : rattrape au démarrage les arrivées faites pendant un arrêt du bot (aucun
+   * GUILD_MEMBER_ADD reçu : ni rôle « non vérifié », ni accueil). Sans cela, ces comptes ont
+   * l'accès complet et le panneau leur répond « déjà vérifié ». Candidats : humains arrivés
+   * depuis moins de 7 jours, sans AUCUN rôle et dont l'arrivée n'a pas été vue en ligne (suivi
+   * des invitations) — un membre vérifié en ligne n'est jamais re-verrouillé.
+   * @returns {Promise<number>} membres verrouillés
+   */
+  async catchUpOfflineJoins(guild) {
+    const v = this.settings(guild.id).verification ?? {};
+    if (!guild?.available || !v.enabled || v.mode !== 'remove' || !v.roleId) return 0;
+    if (!this.assignable(guild, [v.roleId]).length) return 0;
+    if ((guild.members.cache.size ?? 0) < (guild.memberCount ?? 0)) {
+      await guild.members.fetch({ time: CATCH_UP_FETCH_TIMEOUT_MS }).catch((e) => logger.debug(`Membres de ${guild.id} (rattrapage) :`, e?.message));
+    }
+    const now = this.now();
+    const joins = this.client?.repositories?.inviteJoins;
+    let locked = 0;
+    for (const member of [...guild.members.cache.values()]) {
+      if (member.user?.bot || member.pending || member.id === guild.ownerId) continue;
+      const joined = member.joinedTimestamp;
+      if (!joined || now - joined > CATCH_UP_WINDOW_MS) continue;
+      if ([...member.roles.cache.keys()].some((id) => id !== guild.id)) continue;
+      const seen = joins?.lastJoin?.(guild.id, member.id);
+      if (seen && seen.joined_at >= joined - SEEN_JOIN_TOLERANCE_MS) continue;
+      const { added } = await applyRoles(member, { add: [v.roleId] }, 'Vérification : arrivée pendant un arrêt du bot', (id, e) =>
+        logger.debug(`Rattrapage de la vérification sur ${guild.id} (rôle ${id}) :`, e?.message));
+      if (added.length) locked += 1;
+    }
+    if (locked) logger.info(`Vérification : ${locked} arrivée(s) pendant un arrêt du bot verrouillée(s) sur ${guild.id}.`);
+    return locked;
+  }
+
   /** Lève une UserError claire si le membre ne peut pas se vérifier maintenant. */
   assertCanVerify(member) {
     const cfg = this.settings(member.guild.id).verification;
     const refusal = verifyRefusal(member, cfg, this.now());
     if (refusal) throw new UserError(refusal);
+    const sanction = this.#activeSanction(member);
+    if (sanction) throw new UserError(`Vous ne pouvez pas vous vérifier pendant ${sanction}. Contactez la modération.`);
     const locked = this.lockedUntil(member.guild.id, member.id);
     if (locked) throw new UserError(`Trop de mauvaises réponses. Vous pourrez réessayer ${discordTimestamp(locked, 'R')}.`);
   }
@@ -601,6 +668,9 @@ class WelcomeService {
     const v = cfg.verification;
     if (roleIssue(guild.roles?.cache?.get(v.roleId), guild)) {
       throw new UserError('Je ne peux pas gérer le rôle de vérification : prévenez un administrateur (mon rôle doit être placé au-dessus).');
+    }
+    if (v.mode !== 'remove' && sensitiveRole(guild.roles?.cache?.get(v.roleId))) {
+      throw new UserError('Le rôle de vérification confère des permissions de modération ou d\'administration : je ne l\'attribue pas. Prévenez un administrateur.');
     }
     const plan = verifyRoles(cfg);
     const wanted = this.assignable(guild, plan.add).filter((id) => !member.roles.cache.has(id));
@@ -631,6 +701,8 @@ class WelcomeService {
       ],
     });
     await this.logging?.send(guild.id, 'members', embed, undefined, { event: 'memberVerify' }).catch(() => {});
+    // Membre qui revient : ses rôles de récompense de niveau, retenus jusqu'à la vérification.
+    await this.client?.services?.levels?.restoreRewards?.(member, { verified: true })?.catch?.(() => {});
     return { added: add, removed: remove };
   }
 }

@@ -180,10 +180,27 @@ test('starboard : un salon du staff (invisible pour @everyone) n\'est jamais rep
   assert.equal(isLessVisible(source, board), false);
 });
 
-test('starboard : starboard lui-même privé → les salons privés y sont acceptés', () => {
-  const { svc, makeChannel, board } = starWorld({ boardPublic: false });
-  const staff = makeChannel(STAFF, { visible: false });
-  assert.equal(svc.ineligibility(starMessage(staff), svc.cfg(GUILD), board), null);
+test('starboard réservé au staff → les salons du staff y sont acceptés, pas ceux qu\'un rôle voyant le starboard ne voit pas', () => {
+  // Rôles réels : @everyone sans « Voir les salons » (serveur à vérification), Membre, Staff.
+  const { guild } = starWorld();
+  const MEMBER = '300000000000000001';
+  const STAFF_ROLE = '300000000000000002';
+  const everyone = { id: GUILD, permissions: new PermissionsBitField(0n) };
+  const member = { id: MEMBER, permissions: new PermissionsBitField(PermissionFlagsBits.ViewChannel) };
+  const staffRole = { id: STAFF_ROLE, permissions: new PermissionsBitField(PermissionFlagsBits.ViewChannel) };
+  guild.roles = { everyone, cache: new Collection([[GUILD, everyone], [MEMBER, member], [STAFF_ROLE, staffRole]]) };
+  const deny = (id) => [id, { deny: new PermissionsBitField(PermissionFlagsBits.ViewChannel), allow: new PermissionsBitField(0n) }];
+  const allow = (id) => [id, { deny: new PermissionsBitField(0n), allow: new PermissionsBitField(PermissionFlagsBits.ViewChannel) }];
+  const chan = (id, overwrites) => ({ id, guild, type: ChannelType.GuildText, isThread: () => false, permissionOverwrites: { cache: new Collection(overwrites) } });
+  const staff = chan(STAFF, [deny(GUILD), deny(MEMBER), allow(STAFF_ROLE)]);
+  const staffBoard = chan(BOARD, [deny(GUILD), deny(MEMBER), allow(STAFF_ROLE)]);
+  const memberBoard = chan(BOARD, []);
+  assert.equal(isLessVisible(staff, staffBoard), false, 'starboard du staff : #staff refusé');
+  assert.equal(isLessVisible(staff, memberBoard), true, 'starboard lu par Membre : #staff accepté');
+  // Fil public d'un salon du staff : suit son parent.
+  const thread = { id: '400000000000000009', guild, type: ChannelType.PublicThread, isThread: () => true, parent: staff };
+  assert.equal(isLessVisible(thread, memberBoard), true);
+  assert.equal(isLessVisible(chan(CHAN, []), memberBoard), false, 'salon public refusé');
 });
 
 test('starboard : message supprimé pendant le recompte → aucune carte orpheline', async () => {
@@ -307,7 +324,11 @@ function annWorld() {
   const author = H.fakeMember(guild, H.USER.mod);
   author.permissions = new PermissionsBitField(PermissionFlagsBits.MentionEveryone);
   guild.members.cache.set(author.id, author);
-  return { guild, client, repo, service, author, channel: guild.channels.cache.get(H.CH.general) };
+  const channel = guild.channels.cache.get(H.CH.general);
+  // Vue d'un membre dans le salon : ses permissions (aucune surcharge) ; le bot garde la sienne.
+  const botView = channel.permissionsFor;
+  channel.permissionsFor = (target) => (target && target !== guild.members.me && target.permissions ? target.permissions : botView(target));
+  return { guild, client, repo, service, author, channel };
 }
 
 function scheduled(repo, { runAt = Date.now() - 1000, repeat = 'none', roleId = GUILD } = {}) {

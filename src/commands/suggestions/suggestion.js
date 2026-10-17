@@ -57,7 +57,7 @@ module.exports = {
     if (sub === 'create') {
       const content = interaction.options.getString('contenu');
       await interaction.deferReply({ ephemeral: true });
-      const id = await suggestions.create(interaction.guild, interaction.user, content);
+      const id = await suggestions.create(interaction.guild, interaction.user, content, { member: interaction.member });
       const url = suggestions.url(client.repositories.suggestions.get(id));
       return interaction.editReply({
         embeds: [

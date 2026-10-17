@@ -3,6 +3,7 @@
 const { PermissionFlagsBits } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { truncate } = require('../utils/embeds');
+const { neutralizeMaskedLinks } = require('../utils/safeText');
 const { discordTimestamp } = require('../utils/time');
 const { card, field, ICONS } = require('../utils/ui');
 const { sanctionCard } = require('./ModerationService');
@@ -491,13 +492,25 @@ class SchedulerService {
   }
 
   /** Carte de rappel (salon d'origine ou message privé). */
+  /**
+   * L'auteur d'un rappel peut-il encore écrire dans ce salon ? Relu à la livraison : un membre
+   * parti, banni ou privé du droit d'écrire ne fait jamais publier son texte par le bot.
+   */
+  static async authorCanPost(channel, userId) {
+    if (!channel.guild) return true; // messages privés
+    const member = await channel.guild.members.fetch(userId).catch(() => null);
+    if (!member) return false;
+    const send = channel.isThread?.() ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
+    return Boolean(channel.permissionsFor?.(member)?.has([PermissionFlagsBits.ViewChannel, send]));
+  }
+
   static reminderCard(reminder) {
     return card({
       tone: 'info',
       section: 'utility',
       icon: '⏰',
       title: 'Rappel',
-      description: truncate(reminder.message, 4000),
+      description: neutralizeMaskedLinks(truncate(reminder.message, 3900)),
       fields: [reminder.created_at ? field(ICONS.date, 'Programmé', discordTimestamp(reminder.created_at, 'R')) : null],
       footer: `Rappel #${reminder.id}`,
     });
@@ -537,11 +550,11 @@ class SchedulerService {
     if (r.channel_id) {
       try {
         const channel = await this.client.channels.fetch(r.channel_id);
-        if (channel?.isTextBased?.() && typeof channel.send === 'function') {
+        if (channel?.isTextBased?.() && typeof channel.send === 'function' && (await SchedulerService.authorCanPost(channel, r.user_id))) {
           await channel.send({ content: `<@${r.user_id}>`, embeds: [embed], allowedMentions: { users: [r.user_id] } });
           return 'sent';
         }
-        // Salon devenu non textuel : inutilisable, on passe au MP.
+        // Salon devenu non textuel, auteur parti, banni ou sans droit d'écrire : MP.
       } catch (e) {
         if (!PERMANENT_CHANNEL_CODES.has(e?.code)) permanent = false;
         logger.debug(`Rappel #${r.id} : salon ${r.channel_id} indisponible (${e?.code ?? e?.message}), envoi en MP.`);

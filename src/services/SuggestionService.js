@@ -5,6 +5,7 @@ const { button, row, ButtonStyle } = require('../utils/components');
 const { card, field, wide, ICONS, subtext } = require('../utils/ui');
 const { discordTimestamp } = require('../utils/time');
 const { UserError } = require('../core/errors');
+const { neutralizeMaskedLinks, assertAutomodClean } = require('../utils/safeText');
 
 /** Apparence de chaque statut : pastille, ton, titre de décision. */
 const STATUS = {
@@ -79,7 +80,7 @@ class SuggestionService {
       section: 'suggestions',
       icon: ICONS.idea,
       title: `Suggestion #${s.id}`,
-      description: [truncate(s.content, 3800), closed ? null : '', closed ? null : subtext('Votez avec les boutons ci-dessous. Vous pouvez changer d\'avis à tout moment.')],
+      description: [neutralizeMaskedLinks(truncate(s.content, 3700)), closed ? null : '', closed ? null : subtext('Votez avec les boutons ci-dessous. Vous pouvez changer d\'avis à tout moment.')],
       fields,
       thumbnail,
       footer: `Suggestion #${s.id}`,
@@ -93,7 +94,11 @@ class SuggestionService {
     return { embeds: [embed], components };
   }
 
-  async create(guild, author, content) {
+  /**
+   * @param {{ member?: import('discord.js').GuildMember|null }} [ctx] auteur sur le serveur : un
+   *   membre muet ou en timeout ne publie rien, et le texte passe les filtres de l'AutoMod.
+   */
+  async create(guild, author, content, { member = null } = {}) {
     const cfg = this.config.get(guild.id).suggestions;
     const channelId = cfg.channelId;
     if (!channelId) throw new UserError('Aucun salon de suggestions n\'est configuré. Un administrateur peut le définir avec `/suggestion setup`.');
@@ -102,6 +107,13 @@ class SuggestionService {
     content = String(content ?? '').trim();
     if (!content) throw new UserError('La suggestion ne peut pas être vide.');
     if (content.length > 2000) throw new UserError('La suggestion est trop longue (2000 caractères max).');
+    if (member) {
+      const muted = this.client?.services?.moderation?.mutedRole?.(guild);
+      if ((muted && member.roles?.cache?.has?.(muted.id)) || (member.communicationDisabledUntilTimestamp ?? 0) > Date.now()) {
+        throw new UserError('Vous êtes réduit(e) au silence sur ce serveur : vous ne pouvez pas publier de suggestion.');
+      }
+    }
+    assertAutomodClean(content, { automod: this.config.get(guild.id).automod, guild, member, channel, label: 'La suggestion' });
 
     const id = this.suggestions.create({ guildId: guild.id, channelId, messageId: null, authorId: author.id, content });
     const s = this.suggestions.get(id);

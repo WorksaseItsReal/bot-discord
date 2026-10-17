@@ -1,6 +1,6 @@
 'use strict';
 
-const { PermissionFlagsBits, ActionRowBuilder, ChannelType, ReactionType } = require('discord.js');
+const { PermissionFlagsBits, PermissionsBitField, ActionRowBuilder, ChannelType, ReactionType } = require('discord.js');
 const { card, field, ICONS, linkButton, fitEmbeds } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
@@ -20,6 +20,9 @@ const RECENT_MAX = 1_000;
 const UNKNOWN = new Set([10003, 10008]);
 const UNKNOWN_MESSAGE = 10008;
 
+/** Raisons de confidentialité : une carte déjà publiée est retirée au prochain recompte. */
+const PRIVATE_REASONS = new Set(['salon privé', 'fil privé']);
+
 const SEND_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
 
 /**
@@ -30,21 +33,41 @@ const SEND_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMes
  * Ne comptent pas : l'auteur du message (auto-étoile, y compris en super-réaction) et
  * les bots. Ne sont jamais repostés : les messages de bots ou système, ceux des salons
  * exclus et du salon starboard lui-même, ceux d'un salon NSFW si le starboard n'est
- * pas NSFW, ceux des fils privés, et ceux d'un salon invisible pour @everyone quand le
- * starboard, lui, est visible de tous (jamais de fuite d'un salon du staff).
+ * pas NSFW, ceux des fils privés, et ceux d'un salon qu'un rôle voyant le starboard ne
+ * voit pas (jamais de fuite d'un salon du staff, même sur un serveur à vérification où
+ * @everyone ne voit rien).
  */
 /**
- * Le salon d'origine est-il moins visible que le starboard ? (@everyone ne voit pas la
- * source alors qu'il voit le starboard). Un fil suit son salon parent. Inconnu → non. Pur.
+ * Le salon d'origine est-il moins visible que le starboard ? Vrai dès qu'un rôle du
+ * serveur (avec la base de @everyone) voit le starboard sans voir la source : comparer
+ * la seule vue de @everyone laisserait passer #staff vers un starboard réservé au rôle
+ * « Membre » (serveur à vérification). Un fil suit son salon parent. Pur.
  */
 function isLessVisible(source, starChannel) {
-  const everyone = source?.guild?.roles?.everyone ?? starChannel?.guild?.roles?.everyone;
-  if (!everyone || typeof source?.permissionsFor !== 'function' || typeof starChannel?.permissionsFor !== 'function') return false;
-  const sees = (channel) => channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel);
-  const sourceVisible = sees(source);
-  const starVisible = sees(starChannel);
-  if (sourceVisible == null || starVisible == null) return false;
-  return !sourceVisible && starVisible;
+  const guild = source?.guild ?? starChannel?.guild;
+  const everyone = guild?.roles?.everyone;
+  const src = source?.isThread?.() && source.parent ? source.parent : source;
+  if (!everyone) return false;
+  if (!src?.permissionOverwrites?.cache || !starChannel?.permissionOverwrites?.cache || !guild.roles.cache?.some) {
+    // Structures incomplètes : repli sur la seule vue de @everyone.
+    if (typeof src?.permissionsFor !== 'function' || typeof starChannel?.permissionsFor !== 'function') return false;
+    const sees = (channel) => channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel);
+    const sourceVisible = sees(src);
+    const starVisible = sees(starChannel);
+    if (sourceVisible == null || starVisible == null) return false;
+    return !sourceVisible && starVisible;
+  }
+  const sees = (channel, role) => {
+    const base = new PermissionsBitField(everyone.permissions).add(role.permissions ?? 0n);
+    if (base.has(PermissionFlagsBits.Administrator)) return true;
+    const ev = channel.permissionOverwrites.cache.get(everyone.id);
+    const ow = role.id === everyone.id ? null : channel.permissionOverwrites.cache.get(role.id);
+    return base
+      .remove(ev?.deny ?? 0n).add(ev?.allow ?? 0n)
+      .remove(ow?.deny ?? 0n).add(ow?.allow ?? 0n)
+      .has(PermissionFlagsBits.ViewChannel);
+  };
+  return guild.roles.cache.some((role) => sees(starChannel, role) && !sees(src, role));
 }
 
 class StarboardService {
@@ -270,7 +293,17 @@ class StarboardService {
         return null;
       }
     }
-    if (this.ineligibility(message, cfg, starChannel)) return null;
+    const reason = this.ineligibility(message, cfg, starChannel);
+    if (reason) {
+      // Salon devenu privé après la publication : la carte déjà affichée est retirée.
+      const stale = PRIVATE_REASONS.has(reason) ? this.repo.get(guildId, messageId) : null;
+      if (stale) {
+        this.repo.delete(guildId, messageId);
+        if (stale.star_message_id) await this.#deleteCard(guildId, stale.star_message_id, starChannel);
+        return 'removed';
+      }
+      return null;
+    }
 
     const emoji = parseEmoji(cfg.emoji) ?? parseEmoji('⭐');
     const stars = await this.countStars(message, emoji);

@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { card, field, wide, ICONS, subtext, status, actionButton, labelButton, deleteButton, buttonRows, ButtonStyle, code } = require('../../utils/ui');
 const { discordTimestamp } = require('../../utils/time');
 const { confirm } = require('../../utils/confirmation');
@@ -31,24 +31,28 @@ function trackingNotice(client, guild) {
   return null;
 }
 
-/** Une invitation active (pur). */
-function inviteLine(entry, now = Date.now()) {
+/** Une invitation active (pur). `hideCode` : code masqué (carte publique d'un autre membre). */
+function inviteLine(entry, now = Date.now(), { hideCode = false } = {}) {
   const uses = entry.maxUses ? `**${fmt(entry.uses)}**/${fmt(entry.maxUses)}` : `**${fmt(entry.uses)}**`;
   return [
-    code(entry.code),
+    hideCode ? '`••••••`' : code(entry.code),
     `${uses} utilisation${entry.uses > 1 ? 's' : ''}`,
     entry.channelId ? `<#${entry.channelId}>` : null,
     entry.expiresAt && entry.expiresAt > now ? `expire ${discordTimestamp(entry.expiresAt, 'R')}` : 'permanente',
   ].filter(Boolean).join(' · ');
 }
 
-/** Carte d'un membre : réelles, départs, fausses, net et invitations actives. */
-function memberView(client, guild, user, ownerId) {
+/**
+ * Carte d'un membre : réelles, départs, fausses, net et invitations actives.
+ * `showCodes` : codes en clair (réponse éphémère, à soi-même ou à « Gérer le serveur ») ; sinon
+ * masqués — un code d'invitation (salon privé compris) n'est jamais publié pour un autre membre.
+ */
+function memberView(client, guild, user, ownerId, { showCodes = true } = {}) {
   const stats = client.repositories.inviteJoins.stats(guild.id, user.id);
   const active = client.services.invites?.invitesOf(guild.id, user.id) ?? [];
   const days = client.services.invites?.fakeDays(guild.id) ?? 7;
   const notice = trackingNotice(client, guild);
-  const list = active.slice(0, MAX_ACTIVE).map((e) => `› ${inviteLine(e)}`);
+  const list = active.slice(0, MAX_ACTIVE).map((e) => `› ${inviteLine(e, Date.now(), { hideCode: !showCodes })}`);
   if (active.length > MAX_ACTIVE) list.push(subtext(`… et ${active.length - MAX_ACTIVE} autre(s).`));
   const activeUses = active.reduce((n, e) => n + e.uses, 0);
   return {
@@ -159,14 +163,17 @@ module.exports = {
     const guild = interaction.guild;
     if (sub === 'voir') {
       const user = interaction.options.getUser('membre') ?? interaction.user;
+      // Codes d'invitation : seulement les siens ou avec « Gérer le serveur », et en éphémère.
+      const showCodes = user.id === interaction.user.id || Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
+      const ephemeral = showCodes;
       // Cache encore vide (démarrage, permission rendue) : première lecture avant d'afficher.
       if (!client.services.invites?.hasSnapshot(guild.id) && client.services.invites?.state(guild) !== 'noperm') {
-        await interaction.deferReply();
+        await interaction.deferReply({ ephemeral });
         await client.services.invites.refresh(guild).catch(() => null);
-        await interaction.editReply(memberView(client, guild, user, interaction.user.id));
+        await interaction.editReply(memberView(client, guild, user, interaction.user.id, { showCodes }));
         return;
       }
-      await interaction.reply(memberView(client, guild, user, interaction.user.id));
+      await interaction.reply({ ...memberView(client, guild, user, interaction.user.id, { showCodes }), ephemeral });
       return;
     }
     if (sub === 'classement') {
@@ -216,7 +223,8 @@ module.exports = {
     /** cmd:invitations:member:<auteur> — carte de la personne qui clique. */
     async member(interaction, client, [ownerId]) {
       if (!SNOWFLAKE.test(ownerId ?? '')) throw new UserError('Ce bouton est invalide.');
-      await interaction.update(memberView(client, interaction.guild, interaction.user, ownerId));
+      // Message public (classement) : codes masqués ; « /invitations voir » les montre en éphémère.
+      await interaction.update(memberView(client, interaction.guild, interaction.user, ownerId, { showCodes: false }));
     },
   },
 };

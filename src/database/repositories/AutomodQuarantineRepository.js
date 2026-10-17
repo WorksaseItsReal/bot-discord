@@ -13,6 +13,7 @@ class AutomodQuarantineRepository {
     );
     this.getStmt = db.prepare('SELECT * FROM automod_quarantines WHERE id = ? AND guild_id = ?');
     this.setRolesStmt = db.prepare('UPDATE automod_quarantines SET roles = ? WHERE id = ? AND guild_id = ?');
+    this.pendingStmt = db.prepare("SELECT roles FROM automod_quarantines WHERE guild_id = ? AND user_id = ? AND lifted_at IS NULL AND roles != '[]' LIMIT 1");
     this.liftStmt = db.prepare('UPDATE automod_quarantines SET lifted_at = ?, lifted_by = ? WHERE id = ? AND guild_id = ? AND lifted_at IS NULL');
   }
 
@@ -38,6 +39,11 @@ class AutomodQuarantineRepository {
   /** Remplace la liste des rôles retirés (ex. retrait refusé par Discord : aucun). */
   setRoles(guildId, id, roles) {
     return this.setRolesStmt.run(JSON.stringify(roles), id, guildId).changes > 0;
+  }
+
+  /** Quarantaine non levée dont des rôles retirés attendent d'être rendus ? */
+  hasPendingRoles(guildId, userId) {
+    return Boolean(this.pendingStmt.get(guildId, userId));
   }
 
   /** Marque la quarantaine comme levée (une seule fois). @returns {boolean} */

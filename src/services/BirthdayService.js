@@ -1,6 +1,6 @@
 'use strict';
 
-const { escapeMarkdown } = require('discord.js');
+const { safeName } = require('../utils/safeText');
 const { createLogger } = require('../core/logger');
 const { applyRoles } = require('../utils/memberRoles');
 const { card, field, ICONS } = require('../utils/ui');
@@ -42,9 +42,9 @@ function shownAge(row, year) {
 function renderBirthday(template, { id, name, server, age }) {
   const lines = String(template || DEFAULT_MESSAGE).split('\n').filter((line) => age != null || !/\{age\}/i.test(line));
   const values = {
-    membre: id ? `<@${id}>` : `@${escapeMarkdown(String(name ?? 'membre'))}`,
-    pseudo: escapeMarkdown(String(name ?? 'membre')),
-    serveur: escapeMarkdown(String(server ?? 'le serveur')),
+    membre: id ? `<@${id}>` : `@${safeName(name ?? 'membre')}`,
+    pseudo: safeName(name ?? 'membre'),
+    serveur: safeName(server ?? 'le serveur'),
     age: age != null ? String(age) : '',
   };
   const out = lines.join('\n').replace(/\{(membre|pseudo|serveur|age)\}/gi, (_, key) => values[key.toLowerCase()]).trim();

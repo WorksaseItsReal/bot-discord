@@ -18,6 +18,7 @@ const { snowflake } = require('../../utils/buttonGuard');
 const { canActOnByHierarchy } = require('../../utils/permissions');
 const { applyEscalation, serialWarn } = require('./warn');
 const { UserError } = require('../../core/errors');
+const { assertMentionAllowed } = require('../../services/AnnouncementService');
 
 /**
  * /signalements : tableau de bord des signalements (éphémère, « Gérer le serveur ») et
@@ -259,9 +260,11 @@ module.exports = {
         const role = interaction.guild.roles.cache.get(id);
         if (!role) throw new UserError('Ce rôle est introuvable.');
         if (role.managed) throw new UserError('Ce rôle est géré par une intégration : choisissez un rôle du staff.');
+        // Rôle non mentionnable : le bot le pinguerait à la place de quelqu'un qui n'en a pas le droit.
+        assertMentionAllowed(interaction.guild, id, interaction.memberPermissions);
       }
       client.services.config.update(interaction.guildId, { reports: { pingRoleId: id } });
-      await interaction.update(homeView(client, interaction.guild, id ? `${ICONS.success} <@&${id}> sera mentionné à chaque signalement.` : `${ICONS.success} Plus aucun rôle mentionné.`));
+      await interaction.update(homeView(client, interaction.guild, id ? `${ICONS.success} <@&${id}> sera mentionné pour les nouveaux signalements (au plus une fois toutes les 10 minutes).` : `${ICONS.success} Plus aucun rôle mentionné.`));
     },
     /** cmd:signalements:toggle:<on|off> — valeur cible (un double clic ne réinverse pas). */
     async toggle(interaction, client, [state]) {

@@ -4,7 +4,7 @@ const { card, field, ICONS, userLine, subtext, linkButton, buttonRows, fitEmbeds
 const { truncate } = require('../utils/embeds');
 const { buildIndex, findMatches, keywordKey, quoteExcerpt, MIN_KEYWORD, MAX_KEYWORD, MAX_KEYWORDS } = require('../utils/highlights');
 const { isNsfwChannel } = require('../utils/community');
-const { canRead, canReadCached } = require('../utils/channelAccess');
+const { canReadCached, needsThreadCheck } = require('../utils/channelAccess');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
 
@@ -20,7 +20,10 @@ const ACTIVITY_MS = 5 * 60_000;
 const MAX_DM_FAILURES = 3;
 /** Garde-fou : MP envoyés au plus pour un même message. */
 const MAX_DMS_PER_MESSAGE = 20;
-/** Garde-fou : membres hors cache récupérés au plus pour un même message (requêtes à Discord). */
+/**
+ * Garde-fou : requêtes à Discord au plus pour un même message (membres hors cache et
+ * appartenance à un fil privé, comptées ensemble).
+ */
 const MAX_FETCHES_PER_MESSAGE = 10;
 /** Salons et membres bloqués au plus (par membre). */
 const MAX_BLOCKED = 25;
@@ -101,6 +104,8 @@ class HighlightService {
     this.indexes = new Map();
     /** Fin du cooldown : `${guildId}:${userId}:${channelId}` → ms. */
     this.cooldowns = new Map();
+    /** Non-membres d'un fil privé vérifiés auprès de Discord : `${threadId}:${userId}` → fin du refus (ms). */
+    this.threadDenied = new Map();
     /** Dernier message d'un membre (ayant des alertes) dans un salon : `${channelId}:${userId}` → ms. */
     this.activity = new Map();
     this.deleted = new Map();
@@ -287,13 +292,24 @@ class HighlightService {
         fetches += 1;
         member = await guild.members.fetch(userId).catch(() => null);
       }
-      // Fil privé : appartenance vérifiée auprès de Discord si le cache des membres du fil l'ignore.
-      if (!member || member.user?.bot || !(await canRead(channel, member))) continue;
+      if (!member || member.user?.bot) continue;
+      // Fil privé : appartenance vérifiée auprès de Discord si le cache des membres du fil l'ignore,
+      // dans le budget du message, et un refus est retenu (sinon une requête par abonné et par message).
+      let readable = canReadCached(channel, member);
+      if (!readable && needsThreadCheck(channel, member)) {
+        const denyKey = `${channel.id}:${userId}`;
+        if ((this.threadDenied.get(denyKey) ?? 0) > now || fetches >= MAX_FETCHES_PER_MESSAGE) continue;
+        fetches += 1;
+        readable = Boolean(await Promise.resolve(channel.members?.fetch?.(userId)).catch(() => null));
+        if (!readable) this.threadDenied.set(denyKey, now + this.cooldownMs);
+      }
+      if (!readable) continue;
       this.cooldowns.set(coolKey, now + this.cooldownMs);
       if (await this.notify(member, message, words)) sent += 1;
     }
     const now = Date.now();
     if (this.cooldowns.size > PRUNE_AT) for (const [k, until] of this.cooldowns) if (until <= now) this.cooldowns.delete(k);
+    if (this.threadDenied.size > PRUNE_AT) for (const [k, until] of this.threadDenied) if (until <= now) this.threadDenied.delete(k);
     return sent;
   }
 
