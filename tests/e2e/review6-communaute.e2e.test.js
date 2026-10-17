@@ -711,3 +711,42 @@ test('R84 rôle devenu sensible : plus distribué par l\'accueil ni par les nive
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R113 : signalements et ping du staff
+
+test('R113 signalements : rôle du staff pingué au plus une fois par période ; rôle non mentionnable refusé sans « Mentionner @everyone »', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ reports: { channelId: IDS.channels.staff, pingRoleId: IDS.roles.mod } });
+  try {
+    for (const [as, author] of [['member', 'target'], ['target', 'member'], ['admin', 'member']]) {
+      const m = await h.userMessage({ as: author, channel: 'general', content: `message banal de ${author} ${Math.random()}` });
+      const menu = await h.contextMenu('Signaler le message', m, { as });
+      assert.ok(menu.modals?.length, h.replyText(menu));
+      await h.submitModal(menu, { raison: 'spam' });
+    }
+    const posts = h.fake.calls.filter((c) => c.method === 'POST' && c.route === `/channels/${IDS.channels.staff}/messages`);
+    assert.equal(posts.length, 3, 'cartes de signalement manquantes');
+    const pings = posts.filter((c) => (c.body?.allowed_mentions?.roles ?? []).includes(IDS.roles.mod) && c.body.content?.includes(IDS.roles.mod)).length;
+    assert.equal(pings, 1, `pings du rôle du staff : ${pings}`);
+
+    // Configuration : « Gérer le serveur » sans « Mentionner @everyone » ne choisit pas un rôle non mentionnable.
+    updateRole(h, IDS.roles.temp, () => P.ManageGuild, 'préparation : Temporaire gère le serveur');
+    const tm = h.fake.members.get(IDS.users.target);
+    tm.roles = [IDS.roles.temp];
+    h.fake.dispatchNow('GUILD_MEMBER_UPDATE', { guild_id: h.guild.id, ...tm }, 'préparation : cible Temporaire');
+    await h.settle();
+    h.configure({ reports: { pingRoleId: null } });
+    const dash = await h.slash('signalements', [], { as: 'target' });
+    const pick = await h.click(h.messagesOf(dash)[0], 'cmd:signalements:role', { values: [IDS.roles.admin], as: 'target' });
+    assert.ok(h.isError(pick), 'rôle non mentionnable accepté sans « Mentionner @everyone »');
+    assert.equal(h.client.services.config.get(h.guild.id).reports.pingRoleId, null);
+    const ok = await h.click(h.messagesOf(dash)[0], 'cmd:signalements:role', { values: [IDS.roles.notif], as: 'target' });
+    assert.ok(!h.isError(ok), h.replyText(ok));
+    assert.equal(h.client.services.config.get(h.guild.id).reports.pingRoleId, IDS.roles.notif);
+    h.fake.massMentions.length = 0; // ping légitime et plafonné du rôle du staff
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
