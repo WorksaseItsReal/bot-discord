@@ -331,3 +331,77 @@ test('S31 /pseudo délégué : le filtre des pseudos de l\'AutoMod s\'applique a
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ S32 : /embed create délégué
+
+test('S32 /embed create délégué : la soumission du formulaire honore la délégation (embed publié)', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    assert.ok(!h.isError(await level(h, 1, 'ajouter', IDS.roles.gamer, 'admin')));
+    assert.ok(!h.isError(await assign(h, 'embed', 1, 'admin')));
+    const perms = BigInt(h.permissionsIn(IDS.users.member, IDS.channels.general));
+    assert.ok(!(perms & P.ManageMessages), 'member : pas « Gérer les messages » natif');
+    const rec = await h.slash('embed', sub('create'), { as: 'member' });
+    assert.equal(rec.modals.length, 1);
+    const mark = h.fake.messageLog.length;
+    const submit = await h.submitModal(rec, { title: 'Annonce', description: 'Bonjour à tous', color: '', image: '' }, { as: 'member' });
+    assert.ok(!h.isError(submit), h.replyText(submit));
+    const posted = h.fake.messageLog.slice(mark).map((id) => h.message(id)).find((m) => m?.embeds?.[0]?.title === 'Annonce');
+    assert.ok(posted, 'embed publié');
+    // Délégation retirée entre l'ouverture et la soumission : refus.
+    const again = await h.slash('embed', sub('create'), { as: 'member' });
+    assert.ok(!h.isError(await assign(h, 'embed', 0, 'admin')));
+    const refused = await h.submitModal(again, { title: 'Encore', description: 'Bonjour', color: '', image: '' }, { as: 'member' });
+    assert.ok(h.isError(refused), h.replyText(refused));
+    // Mode strict : /embed réservé au niveau 2, un modérateur (rang 0, permission native) est refusé.
+    assert.ok(!h.isError(await assign(h, 'embed', 2, 'admin')));
+    const modForm = await h.slash('embed', sub('create'), { as: 'mod' });
+    assert.equal(modForm.modals.length, 1);
+    h.configure({ permissions: { strict: true } });
+    const strict = await h.submitModal(modForm, { title: 'Strict', description: 'Bonjour', color: '', image: '' }, { as: 'mod' });
+    assert.ok(h.isError(strict), h.replyText(strict));
+    assert.match(h.replyText(strict), /niveau 2/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+// ------------------------------------------------------------------ S41 : /channel renouveler et alertes
+
+test('S41 /channel renouveler : le salon bloqué des alertes de mots-clés suit le salon (base, bilan et index en mémoire)', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ automod: { enabled: false } });
+    const hl = h.client.services.highlights;
+    hl.delayMs = 5;
+    const old = IDS.channels.general;
+    hl.addWord(h.guild.id, IDS.users.member, 'gadget');
+    hl.setBlockedChannels(h.guild.id, IDS.users.member, [old]);
+    hl.index(h.guild.id); // index en mémoire déjà construit (bot démarré depuis longtemps)
+    const rec = await h.slash('channel', [{ name: 'renouveler', type: 1, options: [{ name: 'salon', type: 7, value: old }] }], { as: 'admin', channel: 'staff' });
+    const [plan] = h.messagesOf(rec);
+    assert.match(JSON.stringify(plan.embeds), /Alertes de mots-clés/, 'bilan : report annoncé');
+    const button = btn(plan, 'cmd:channel:renewform:');
+    const form = await h.click(plan, button.custom_id, { as: 'admin' });
+    const done = await h.submitModal(form, { confirmation: 'RENOUVELER' }, { as: 'admin' });
+    assert.ok(!h.isError(done), h.replyText(done));
+    const created = [...h.guild.channels.cache.values()].find((c) => c.name === 'général' && c.id !== old) ?? [...h.guild.channels.cache.values()].find((c) => c.id !== old && c.name === h.fake.channels.get(old)?.name);
+    assert.ok(created, 'copie créée');
+    assert.ok(!h.fake.channels.has(old), 'original supprimé');
+    assert.deepEqual(h.client.repositories.highlights.get(h.guild.id, IDS.users.member).blockedChannels, [created.id]);
+    // Un message avec le mot-clé dans la copie : aucune alerte pour le membre qui avait bloqué le salon.
+    const dmsBefore = h.fake.messageLog.length;
+    await h.userMessage({ as: 'target', channel: created.id, content: 'quelqu\'un a vu le gadget ?' });
+    await sleep(60);
+    await h.settle();
+    const dm = [...h.fake.dms.values()].find((d) => d.recipients[0].id === IDS.users.member);
+    const alerted = Boolean(dm && h.fake.messageLog.slice(dmsBefore).some((id) => h.message(id)?.channel_id === dm.id));
+    assert.equal(alerted, false, 'alerte envoyée depuis le salon bloqué renouvelé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

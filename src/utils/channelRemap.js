@@ -43,6 +43,13 @@ const COLUMNS = Object.freeze({
   'security_grants.card_channel_id': 'history',
 });
 
+/**
+ * Colonnes LISTES de salons (tableau JSON de chaînes) : l'identifiant est remplacé DANS la liste,
+ * toujours reporté (alertes de mots-clés : salons bloqués par le membre). Une donnée illisible
+ * n'est jamais réécrite. Vérifié par tests/review7-divers.test.js (colonnes « …channels »).
+ */
+const JSON_LISTS = Object.freeze(['highlights.blocked_channels']);
+
 /** Colonnes de message remises à NULL quand le salon est reporté (le message n'existe plus). */
 const RESETS = Object.freeze({
   'sticky_messages.channel_id': ['last_message_id'],
@@ -123,6 +130,54 @@ function writeConfig(config, guildId, stored) {
   config.update(guildId, stored);
 }
 
+/**
+ * Génération des listes JSON de salons, par serveur : incrémentée à chaque report. Un index en
+ * mémoire construit depuis ces listes (alertes de mots-clés) se reconstruit quand elle change.
+ */
+const listGenerations = new Map();
+
+/** Génération courante des listes JSON de salons d'un serveur (0 au départ). */
+function listGeneration(guildId) {
+  return listGenerations.get(guildId) ?? 0;
+}
+
+/** Liste JSON lue, ou null si illisible. Pur. */
+function parseList(raw) {
+  try {
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Lignes (rowid, liste) du serveur dont la liste JSON `table.column` contient `channelId`
+ * (préfiltre LIKE, puis lecture réelle de la liste).
+ */
+function listRows(db, table, column, guildId, channelId) {
+  return db.prepare(`SELECT rowid AS rid, ${quote(column)} AS raw FROM ${quote(table)} WHERE guild_id = ? AND instr(${quote(column)}, ?) > 0`)
+    .all(guildId, channelId)
+    .map((r) => ({ rid: r.rid, list: parseList(r.raw) }))
+    .filter((r) => r.list?.includes(channelId));
+}
+
+/** Remplace `oldId` par `newId` dans les listes JSON de salons du serveur. @returns {Record<string, number>} lignes modifiées par table */
+function remapLists(db, guildId, oldId, newId) {
+  const out = {};
+  for (const key of JSON_LISTS) {
+    const [table, column] = key.split('.');
+    if (!tableExists(db, table)) continue;
+    const update = db.prepare(`UPDATE ${quote(table)} SET ${quote(column)} = ? WHERE rowid = ? AND guild_id = ?`);
+    for (const { rid, list } of listRows(db, table, column, guildId, oldId)) {
+      const next = [...new Set(list.map((id) => (id === oldId ? newId : id)))];
+      if (update.run(JSON.stringify(next), rid, guildId).changes) out[table] = (out[table] ?? 0) + 1;
+    }
+  }
+  if (Object.keys(out).length) listGenerations.set(guildId, listGeneration(guildId) + 1);
+  return out;
+}
+
 /** Lignes perdues / jamais recréées d'un salon (rapport). */
 function countAffected(db, guildId, channelId, policy) {
   const out = {};
@@ -151,6 +206,7 @@ function remapInPlace(db, config, guildId, oldId, newId, { resetMessages = true 
       const n = db.prepare(`UPDATE OR IGNORE ${quote(table)} SET ${quote(column)} = ?${extra} WHERE guild_id = ? AND ${quote(column)} = ?`).run(newId, guildId, oldId).changes;
       if (n) report.carried[table] = (report.carried[table] ?? 0) + n;
     }
+    for (const [table, n] of Object.entries(remapLists(db, guildId, oldId, newId))) report.carried[table] = (report.carried[table] ?? 0) + n;
     const stored = storedConfig(config, guildId);
     if (stored) {
       report.configPaths = findPaths(stored, oldId);
@@ -172,6 +228,12 @@ function capture(db, config, guildId, channelId) {
     if (!tableExists(db, table)) continue;
     const list = db.prepare(`SELECT * FROM ${quote(table)} WHERE guild_id = ? AND ${quote(column)} = ?`).all(guildId, channelId);
     if (list.length) rows[`${table}.${column}`] = list;
+  }
+  for (const key of JSON_LISTS) {
+    const [table, column] = key.split('.');
+    if (!tableExists(db, table)) continue;
+    const list = listRows(db, table, column, guildId, channelId);
+    if (list.length) rows[key] = list.map((r) => ({ rowid: r.rid }));
   }
   const stored = storedConfig(config, guildId);
   const bundle = {
@@ -230,6 +292,8 @@ function restore(bundle, newId, { db = bundle?.db, config = bundle?.config } = {
         }
       }
     }
+    // Listes JSON de salons : l'ancien identifiant (salon supprimé) est remplacé là où il reste.
+    for (const n of Object.values(remapLists(db, guildId, channelId, newId))) updated += n;
     let stored = storedConfig(config, guildId);
     const paths = [];
     if (stored) {
@@ -253,4 +317,4 @@ function lossSummary({ lost = {}, never = {} } = {}) {
   return parts.join(' · ');
 }
 
-module.exports = { COLUMNS, RESETS, remapInPlace, capture, restore, lossSummary, findPaths, replaceDeep };
+module.exports = { COLUMNS, RESETS, JSON_LISTS, listGeneration, remapInPlace, capture, restore, lossSummary, findPaths, replaceDeep };

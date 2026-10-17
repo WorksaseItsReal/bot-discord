@@ -5,6 +5,7 @@ const { status, TONES, ICONS, linkButton, buttonRows } = require('../utils/ui');
 const { validateEmbedInput } = require('../commands/utility/embed');
 const { parseColor } = require('../utils/projectFormat');
 const { UserError } = require('../core/errors');
+const access = require('../utils/access');
 
 /**
  * Réception du modal du constructeur d'embed.
@@ -15,8 +16,10 @@ module.exports = {
   /** @param {import('discord.js').ModalSubmitInteraction} interaction */
   async execute(interaction) {
     if (!interaction.isModalSubmit()) return;
-    // Le modal peut être soumis longtemps après /embed create : on revérifie les droits.
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages)) {
+    // Le modal peut être soumis longtemps après /embed create : on revérifie les droits, avec les
+    // niveaux de /permissions de LA commande /embed (mode strict, délégation du palier « Courant »).
+    access.assertStrict(interaction.client, interaction, 'embed');
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages) && !access.grantFor(interaction.client, interaction, 'embed')) {
       throw new UserError('Vous avez besoin de la permission « Gérer les messages ».');
     }
     const channel = interaction.channel;
