@@ -6,6 +6,7 @@ const { formatDuration } = require('../../utils/time');
 const { card, field, ICONS, subtext } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
 const { confirm } = require('../../utils/confirmation');
+const { isSensitiveRole, hasOwnerLevel } = require('../../utils/secur');
 
 const TARGET_LABELS = { all: 'Tous les membres', humans: 'Humains', bots: 'Bots' };
 const BATCH = 5;
@@ -15,6 +16,35 @@ const PROGRESS_EVERY_MS = 3_000;
 const TOKEN_SAFE_MS = 14 * 60 * 1000;
 /** Serveurs ayant un /massrole en cours (une seule exécution à la fois par serveur). */
 const running = new Set();
+/**
+ * Rôle WHITELISTÉ distribué par un non-owner : chaque attribution passe en attente d'approbation
+ * (une carte par membre) ; au-delà de ce nombre de cibles, l'opération est refusée.
+ */
+const MAX_PENDING_GRANTS = 10;
+
+/**
+ * Pré-contrôle Secur / AntiRaid d'un /massrole, AVANT le premier changement : les attributions
+ * (ou retraits) d'un rôle sensible, signées par le bot, sont comptées au nom de l'auteur
+ * (count = nombre de cibles). Lève l'UserError de refus.
+ * @returns {{ type: 'roleAdd'|'roleRemove'|null, grants: boolean }}
+ */
+function securityCheck(interaction, client, { action, role, count }) {
+  const guild = interaction.guild;
+  const cfg = client?.services?.config?.get(guild.id) ?? {};
+  const perms = client?.services?.permissions;
+  const sensitive = isSensitiveRole(role, cfg, { levelOf: typeof perms?.levelOf === 'function' ? (g, r) => perms.levelOf(g, r) : undefined });
+  if (!sensitive || count < 1) return { type: null, grants: false };
+  const type = action === 'add' ? 'roleAdd' : 'roleRemove';
+  const secur = client?.services?.secur;
+  const whitelisted = action === 'add' && !role.managed && (cfg.whitelist?.roles ?? []).includes(role.id);
+  const owner = secur?.levelOpts ? hasOwnerLevel(guild, interaction.user.id, cfg, secur.levelOpts()) : interaction.user.id === guild.ownerId;
+  const grants = Boolean(secur?.recordGrant) && whitelisted && !owner;
+  if (grants && count > MAX_PENDING_GRANTS) {
+    throw new UserError(`${role} est un rôle **whitelisté** : le distribuer à **${count}** membres est réservé au propriétaire et aux owners de sécurité (${MAX_PENDING_GRANTS} membres au plus, chaque attribution étant soumise à leur approbation).`);
+  }
+  secur?.assertAllowed?.(interaction, type, { count });
+  return { type, grants };
+}
 
 /**
  * Éditeur de la réponse : passe par l'interaction tant que son jeton est valide,
@@ -69,6 +99,8 @@ module.exports = {
   progressCard,
   replyEditor,
   running,
+  securityCheck,
+  MAX_PENDING_GRANTS,
   data: new SlashCommandBuilder()
     .setName('massrole')
     .setDescription('Ajoute ou retire un rôle en masse.')
@@ -125,6 +157,9 @@ async function run(interaction, client, { action, role, target }) {
   let done = 0;
   let failed = 0;
   const list = [...filtered.values()];
+  // Pré-contrôle AVANT le premier changement : refus d'emblée, jamais au milieu de l'opération.
+  const security = securityCheck(interaction, client, { action, role, count: list.length });
+  const updated = [];
   const state = () => ({ action, role, target, total: list.length, done, failed, startedAt });
   await edit({ embeds: [progressCard({ ...state(), finished: list.length === 0 })] });
   if (!list.length) return;
@@ -138,6 +173,7 @@ async function run(interaction, client, { action, role, target }) {
         (action === 'add' ? m.roles.add(role) : m.roles.remove(role))
           .then(() => {
             done += 1;
+            updated.push(m.id);
             // Rôle temporaire retiré : sa ligne est close (sinon rendu au retour du membre).
             if (action === 'remove') client?.services?.tempRoles?.closeManual?.(interaction.guild.id, m.id, role.id);
           })
@@ -154,4 +190,13 @@ async function run(interaction, client, { action, role, target }) {
   }
   // Dernière édition : le travail est fait, un échec d'affichage (message supprimé…) ne doit pas lever.
   await edit({ embeds: [progressCard({ ...state(), finished: true })] }).catch(() => {});
+  if (!security.type || !done) return;
+  // Rôle whitelisté donné par un non-owner : chaque attribution passe en attente d'approbation.
+  if (security.grants) {
+    for (const memberId of updated) {
+      await client.services.secur.recordGrant(interaction.guild, { kind: 'role', subjectId: memberId, roleId: role.id, grantedBy: interaction.user.id }).catch(() => null);
+    }
+  }
+  // Rapport APRÈS succès : les N changements, au nom de l'auteur.
+  await client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, security.type, { count: done })?.catch?.(() => {});
 }

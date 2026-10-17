@@ -159,13 +159,21 @@ test('AntiRaid : /channel supprimer et /role delete comptent au nom du modérate
       await h.slash('role', sub('create', [opt('nom', 3, `jetable-${i}`)]), { as: 'owner' });
       roles.push([...h.fake.roles.values()].find((r) => r.name === `jetable-${i}`).id);
     }
+    // SEC5 : /role delete est pré-contrôlé. Les deux premières suppressions, signées par le bot,
+    // comptent au nom du modérateur : la 3ᵉ, qui atteindrait le seuil, est refusée d'emblée.
     mark = h.fake.messageLog.length;
-    for (const roleId of roles) {
+    for (const [i, roleId] of roles.entries()) {
       const rec = await h.slash('role', sub('delete', [opt('role', 8, roleId)]), { as: 'admin' });
       if (/Confirmation/.test(h.replyText(rec))) await h.confirm(rec);
-      assert.ok(!h.fake.roles.has(roleId));
+      if (i < 2) {
+        assert.ok(!h.fake.roles.has(roleId));
+        continue;
+      }
+      assert.ok(h.isError(rec), 'suppression de rôle au seuil exécutée : les suppressions via le bot ne comptent pas');
+      assert.match(h.replyText(rec), /Action bloquée par la sécurité \(Suppression de rôles\)/);
+      assert.ok(h.fake.roles.has(roleId));
     }
-    assert.equal(destructiveAlerts(h, mark).length, 1, 'suppressions de rôles via le bot invisibles pour l\'AntiRaid');
+    assert.equal(destructiveAlerts(h, mark).length, 0, 'aucune suppression au seuil : aucune alerte');
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
@@ -277,11 +285,15 @@ test('/activite : expulse exactement la liste affichée (relue), historique des 
     const ask2 = await h.click(h.messagesOf(list2)[0], 'cmd:activite:act:30:kick', { as: 'admin' });
     const id2 = buttonsOf(h.messagesOf(ask2)[0]).map((c) => c.custom_id).find((cid) => cid?.startsWith('cmd:activite:kickform:30:'));
     const mark = h.fake.messageLog.length;
-    await h.submitModal(await h.click(h.messagesOf(ask2)[0], id2, { as: 'admin' }), { confirmation: 'EXPULSER', raison: '' }, { as: 'admin' });
-    assert.equal(destructiveAlerts(h, mark).length, 1, 'expulsions groupées invisibles pour l\'AntiRaid');
-    assert.deepEqual(h.fake.members.get(IDS.users.admin).roles, []);
+    // SEC5 : les 4 expulsions de la liste confirmée, signées par le bot, atteindraient le seuil (2) :
+    // refusées d'emblée, avant le premier kick (au lieu de déranger l'auteur au milieu).
+    const refused = await h.submitModal(await h.click(h.messagesOf(ask2)[0], id2, { as: 'admin' }), { confirmation: 'EXPULSER', raison: '' }, { as: 'admin' });
+    assert.ok(h.isError(refused), 'expulsions groupées au seuil exécutées');
+    assert.match(h.replyText(refused), /Action bloquée par la sécurité \(Expulsions\)/);
+    assert.equal(destructiveAlerts(h, mark).length, 0);
+    assert.notDeepEqual(h.fake.members.get(IDS.users.admin).roles, [], 'auteur dérangé pour une opération refusée');
     const kickedAfter = [late, ...more].filter((id) => !h.fake.members.has(id)).length;
-    assert.equal(kickedAfter, 2, 'expulsions poursuivies après le retrait des droits de l\'auteur');
+    assert.equal(kickedAfter, 0, 'expulsion faite malgré le refus');
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();

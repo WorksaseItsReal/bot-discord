@@ -8,6 +8,7 @@ const { paginate } = require('../../utils/pagination');
 const { UserError } = require('../../core/errors');
 const { confirm } = require('../../utils/confirmation');
 const { hasForbiddenPermissions } = require('./rolemenu');
+const { isSensitiveRole } = require('../../utils/secur');
 
 const HEX_COLOR = /^#?[0-9a-f]{6}$/i;
 const PER_PAGE = 15;
@@ -91,6 +92,47 @@ async function resolveButton(interaction, memberId, roleId) {
   const member = await interaction.guild.members.fetch(memberId).catch(() => null);
   if (!member) throw new UserError('Ce membre n\'est plus sur le serveur.');
   return { role, member };
+}
+
+// ---------------------------------------------------------------- sécurité (Secur / AntiRaid)
+
+/**
+ * Rôle sensible POUR SECUR (permission dangereuse, surcharges comprises, rôle de whitelist, niveau
+ * ≥ 2) : son attribution (roleAdd) ou son retrait (roleRemove) via le bot est pré-contrôlé.
+ */
+function isSensitive(client, guild, role) {
+  if (!role) return false;
+  const cfg = client?.services?.config?.get(guild.id) ?? {};
+  const perms = client?.services?.permissions;
+  return isSensitiveRole(role, cfg, { levelOf: typeof perms?.levelOf === 'function' ? (g, r) => perms.levelOf(g, r) : undefined });
+}
+
+/**
+ * Pré-contrôle AVANT Discord : l'action, signée par le bot dans le journal d'audit, échapperait
+ * sinon à la détection. Refus d'emblée (UserError + log « Action bloquée ») si elle atteindrait le seuil.
+ */
+function preCheck(client, interaction, type, count = 1) {
+  client?.services?.secur?.assertAllowed?.(interaction, type, { count });
+}
+
+/** Rapport APRÈS succès, au nom de l'auteur (best-effort, ne lève jamais). */
+async function reportAction(client, guild, user, type, count = 1) {
+  try {
+    await client?.services?.moderation?.reportDestructiveAction?.(guild, user, type, { count });
+  } catch {
+    /* la détection ne fait jamais échouer l'action déjà faite */
+  }
+}
+
+/** Rôle WHITELISTÉ donné via le bot par un non-owner : accès en attente d'approbation (Secur). */
+async function trackGrant(client, guild, role, memberId, grantedBy) {
+  const wl = client?.services?.config?.get(guild.id)?.whitelist?.roles ?? [];
+  if (role?.managed || !wl.includes(role?.id)) return;
+  try {
+    await client?.services?.secur?.recordGrant?.(guild, { kind: 'role', subjectId: memberId, roleId: role.id, grantedBy });
+  } catch {
+    /* suivi best-effort */
+  }
 }
 
 // ---------------------------------------------------------------- rôles temporaires
@@ -248,7 +290,7 @@ const yesNo = (v) => (v ? 'Oui' : 'Non');
  * /role modifier : nom, couleur, affichage séparé, mentionnable. Seules les options
  * fournies sont modifiées ; la carte montre l'avant → après.
  */
-async function editRole(interaction, role) {
+async function editRole(interaction, role, client = interaction.client) {
   const { options } = interaction;
   const name = options.getString('nom')?.trim();
   const rawColor = options.getString('couleur');
@@ -283,9 +325,10 @@ async function editRole(interaction, role) {
     throw new UserError('Précisez au moins une option : `nom`, `couleur`, `affiche_separement` ou `mentionnable`.');
   }
   if (!changes.length) throw new UserError(`${role} a déjà ces réglages : rien à modifier.`);
+  preCheck(client, interaction, 'roleUpdate');
   const updated = await role.edit({ ...patch, reason: truncate(`Modifié par ${interaction.user.tag}`, 400) });
   const after = updated ?? role;
-  return interaction.reply({
+  const response = await interaction.reply({
     embeds: [
       card({
         tone: primaryColor(after) || 'success',
@@ -297,6 +340,8 @@ async function editRole(interaction, role) {
       }),
     ],
   });
+  await reportAction(client, interaction.guild, interaction.user, 'roleUpdate');
+  return response;
 }
 
 module.exports = {
@@ -386,9 +431,10 @@ module.exports = {
         throw new UserError('Couleur invalide : utilisez un code hexadécimal comme `#5865F2`.');
       }
       const color = rawColor ? `#${rawColor.replace(/^#/, '')}` : undefined;
+      preCheck(client, interaction, 'roleCreate');
       // `color` est déprécié depuis discord.js 14.21 : `colors.primaryColor`.
       const role = await guild.roles.create({ name, colors: color ? { primaryColor: color } : undefined, reason: `Créé par ${interaction.user.tag}` });
-      return interaction.reply({
+      const response = await interaction.reply({
         embeds: [
           card({
             tone: primaryColor(role) || 'success',
@@ -407,6 +453,8 @@ module.exports = {
           actionButton({ command: 'role', action: 'uncreate', args: [role.id, ownerId], label: 'Annuler', emoji: '↩️', style: ButtonStyle.Danger }),
         ),
       });
+      await reportAction(client, guild, interaction.user, 'roleCreate');
+      return response;
     }
 
     const role = interaction.options.getRole('role');
@@ -415,13 +463,15 @@ module.exports = {
     if (sub === 'modifier') {
       // Revérifiée : la commande peut avoir été ouverte à tous (pour /role list) dans les intégrations.
       assertManageRoles(interaction);
-      return editRole(interaction, guild.roles.cache.get(role.id) ?? role);
+      return editRole(interaction, guild.roles.cache.get(role.id) ?? role, client);
     }
 
     if (sub === 'delete') {
       const members = role.members?.size ?? 0;
       const name = role.name;
       const color = hex(role);
+      // Pré-contrôlé avant la confirmation (refus immédiat), puis de nouveau juste avant la suppression.
+      preCheck(client, interaction, 'roleDelete');
       if (client?.services?.config?.get(guild.id)?.moderation?.confirmDangerous) {
         const ok = await confirm(interaction, {
           description: `Supprimer définitivement le rôle ${role} (**${members}** membre${members > 1 ? 's' : ''}) ?`,
@@ -433,6 +483,7 @@ module.exports = {
         // faire attendre la requête au-delà des 3 s de Discord.
         await interaction.deferReply();
       }
+      preCheck(client, interaction, 'roleDelete');
       await role.delete(`Supprimé par ${interaction.user.tag}`);
       // Après confirmation, la carte remplace la demande (éphémère).
       const respond = (payload) => (interaction.replied || interaction.deferred ? interaction.editReply(payload) : interaction.reply(payload));
@@ -469,30 +520,47 @@ module.exports = {
       }
       const durationMs = tempDuration(interaction.options.getString('duree'));
       const reason = interaction.options.getString('raison')?.trim() || null;
+      const sensitive = isSensitive(client, guild, role);
+      if (sensitive) preCheck(client, interaction, 'roleAdd');
       // Membre, ajout du rôle puis log : plusieurs appels réseau, au-delà des 3 s possibles.
       await interaction.deferReply();
       const target = await guild.members.fetch(interaction.options.getUser('membre').id).catch(() => null);
       if (!target) throw new UserError('Membre introuvable.');
       const { id, renewed } = await client.services.tempRoles.grant({ guild, member: target, role, durationMs, moderator: interaction.user, reason });
       const row = client.repositories.tempRoles.get(guild.id, id);
-      return interaction.editReply(tempCardView(row, { title: renewed ? 'Rôle temporaire renouvelé' : 'Rôle temporaire attribué', moderator: interaction.user, ownerId, durationMs }));
+      const response = await interaction.editReply(tempCardView(row, { title: renewed ? 'Rôle temporaire renouvelé' : 'Rôle temporaire attribué', moderator: interaction.user, ownerId, durationMs }));
+      if (sensitive) {
+        await trackGrant(client, guild, role, target.id, interaction.user.id);
+        await reportAction(client, guild, interaction.user, 'roleAdd');
+      }
+      return response;
     }
 
     const user = interaction.options.getUser('membre');
     const member = await guild.members.fetch(user.id).catch(() => null);
     if (!member) throw new UserError('Membre introuvable.');
 
+    const sensitive = isSensitive(client, guild, role);
     if (sub === 'add') {
       if (member.roles.cache.has(role.id)) throw new UserError(`${user} a déjà le rôle ${role}.`);
+      if (sensitive) preCheck(client, interaction, 'roleAdd');
       await member.roles.add(role, `Par ${interaction.user.tag}`);
-      return interaction.reply(membershipView('added', { member, role, moderator: interaction.user, ownerId }));
+      const response = await interaction.reply(membershipView('added', { member, role, moderator: interaction.user, ownerId }));
+      if (sensitive) {
+        await trackGrant(client, guild, role, member.id, interaction.user.id);
+        await reportAction(client, guild, interaction.user, 'roleAdd');
+      }
+      return response;
     }
     if (sub === 'remove') {
       if (!member.roles.cache.has(role.id)) throw new UserError(`${user} n'a pas le rôle ${role}.`);
+      if (sensitive) preCheck(client, interaction, 'roleRemove');
       await member.roles.remove(role, `Par ${interaction.user.tag}`);
       // Rôle temporaire retiré à la main : plus d'échéance ni de réapplication au retour.
       client.services.tempRoles?.closeManual(guild.id, member.id, role.id);
-      return interaction.reply(membershipView('removed', { member, role, moderator: interaction.user, ownerId }));
+      const response = await interaction.reply(membershipView('removed', { member, role, moderator: interaction.user, ownerId }));
+      if (sensitive) await reportAction(client, guild, interaction.user, 'roleRemove');
+      return response;
     }
   },
 
@@ -511,13 +579,13 @@ module.exports = {
       if (f === 'card' && !SNOWFLAKE.test(extra ?? '')) throw new UserError('Ce bouton est invalide.');
       const row = activeTempRow(client, interaction, id);
       assertTempAccess(interaction, row);
+      const sensitive = isSensitive(client, interaction.guild, interaction.guild.roles.cache.get(row.role_id));
+      if (sensitive) preCheck(client, interaction, 'roleRemove');
       await interaction.deferUpdate();
       await client.services.tempRoles.removeNow(interaction.guild, row.id, interaction.user);
-      if (f === 'card') {
-        await interaction.editReply(tempRemovedView(row, interaction.user, extra));
-        return;
-      }
-      await interaction.editReply(tempListView(client, interaction.guild, f, Number(extra) || 0, `${ICONS.success} Rôle <@&${row.role_id}> retiré à <@${row.user_id}>.`));
+      if (f === 'card') await interaction.editReply(tempRemovedView(row, interaction.user, extra));
+      else await interaction.editReply(tempListView(client, interaction.guild, f, Number(extra) || 0, `${ICONS.success} Rôle <@&${row.role_id}> retiré à <@${row.user_id}>.`));
+      if (sensitive) await reportAction(client, interaction.guild, interaction.user, 'roleRemove');
     },
 
     /** cmd:role:textend:<id>:<filtre|card>:<page|ownerId> — formulaire de prolongation. */
@@ -551,17 +619,26 @@ module.exports = {
     async take(interaction, client, [memberId, roleId, ownerId]) {
       const { role, member } = await resolveButton(interaction, memberId, roleId);
       if (!member.roles.cache.has(role.id)) throw new UserError(`${member} n'a déjà plus le rôle ${role}.`);
+      const sensitive = isSensitive(client, interaction.guild, role);
+      if (sensitive) preCheck(client, interaction, 'roleRemove');
       await member.roles.remove(role, `Annulation par ${interaction.user.tag}`);
       client.services.tempRoles?.closeManual(interaction.guildId, member.id, role.id);
       await interaction.update(membershipView('removed', { member, role, moderator: interaction.user, ownerId }));
+      if (sensitive) await reportAction(client, interaction.guild, interaction.user, 'roleRemove');
     },
 
     /** cmd:role:give:<memberId>:<roleId>:<ownerId> — rend le rôle qui vient d'être retiré. */
     async give(interaction, client, [memberId, roleId, ownerId]) {
       const { role, member } = await resolveButton(interaction, memberId, roleId);
       if (member.roles.cache.has(role.id)) throw new UserError(`${member} a déjà le rôle ${role}.`);
+      const sensitive = isSensitive(client, interaction.guild, role);
+      if (sensitive) preCheck(client, interaction, 'roleAdd');
       await member.roles.add(role, `Annulation par ${interaction.user.tag}`);
       await interaction.update(membershipView('added', { member, role, moderator: interaction.user, ownerId }));
+      if (sensitive) {
+        await trackGrant(client, interaction.guild, role, member.id, interaction.user.id);
+        await reportAction(client, interaction.guild, interaction.user, 'roleAdd');
+      }
     },
 
     /** cmd:role:uncreate:<roleId>:<ownerId> — annule une création récente (15 min). */

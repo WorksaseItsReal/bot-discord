@@ -65,6 +65,58 @@ function removeGuard(interaction) {
   requirePermission(interaction, 'Administrator');
 }
 
+/**
+ * Salons que « Supprimer les salons créés » supprimerait : salons créés par le bot encore présents,
+ * plus la catégorie si elle deviendrait vide. `counted` : ceux qui comptent pour la sécurité
+ * (un salon créé il y a moins de 10 min ne détruit aucun historique).
+ */
+function removalPlan(client, guild, now = Date.now()) {
+  const cfg = full(client, guild.id);
+  const ids = new Set(cfg.logs?.createdChannels ?? []);
+  const channels = [...ids].map((id) => guild.channels.cache.get(id)).filter(Boolean);
+  const category = cfg.logs?.categoryId ? guild.channels.cache.get(cfg.logs.categoryId) : null;
+  const categoryGoes = Boolean(category) && !guild.channels.cache.some((c) => c.parentId === category.id && !ids.has(c.id));
+  const all = categoryGoes ? [...channels, category] : channels;
+  return { channels: all, counted: all.filter((c) => now - (c.createdTimestamp ?? 0) >= FRESH_CHANNEL_MS).length };
+}
+
+/**
+ * Supprimer des salons via le bot exige « Gérer les salons » NATIF (permissions Discord réelles de
+ * l'auteur, jamais une délégation) au niveau du serveur ET dans chacun des salons visés. Sinon :
+ * refus qui liste les salons, sans aucune suppression partielle.
+ */
+function assertNativeManageChannels(interaction, channels) {
+  const flag = PermissionFlagsBits.ManageChannels;
+  const member = interaction.member;
+  const guildLevel = member?.permissions?.has ? member.permissions.has(flag) : Boolean(interaction.memberPermissions?.has?.(flag));
+  if (!guildLevel) throw new UserError('Supprimer des salons demande la permission **Gérer les salons** (donnée par vos rôles, au niveau du serveur) : aucun salon n\'a été supprimé.');
+  const denied = channels.filter((ch) => !ch.permissionsFor?.(member)?.has?.(flag));
+  if (denied.length) {
+    throw new UserError(`Il vous manque **Gérer les salons** dans ${denied.slice(0, 20).map((ch) => `<#${ch.id}>`).join(', ')}${denied.length > 20 ? ` (+${denied.length - 20})` : ''} : aucun salon n'a été supprimé.`);
+  }
+}
+
+/** Garde complète de la suppression : Administrateur (ou propriétaire) + « Gérer les salons » natif partout. */
+function assertCanRemove(interaction, client) {
+  removeGuard(interaction);
+  const plan = removalPlan(client, interaction.guild);
+  assertNativeManageChannels(interaction, plan.channels);
+  return plan;
+}
+
+/**
+ * Journal de sécurité (Secur) d'un réglage des logs qui touche la sécurité : logs coupés,
+ * catégorie ou événements Sécurité coupés, salon des logs Sécurité modifié ou retiré. Un
+ * changement critique part en alerte hors filtres avec MP. Après la réponse, best-effort.
+ */
+async function securityJournal(client, interaction, before, after) {
+  try {
+    await client.services.secur?.journal?.(interaction.guild, { actorId: interaction.user.id, actor: interaction.user, source: '/logs', before, after });
+  } catch {
+    /* le journal ne fait jamais échouer le réglage déjà enregistré */
+  }
+}
+
 /** Rôles donnés automatiquement par le bot (arrivée, vérification, niveaux, vocal, boost…). */
 function automaticRoles(cfg) {
   const ids = [
@@ -380,7 +432,7 @@ function confirmRemoveView(client, guild) {
           `Les **${channels.length}** salon(s) créés par le bot et leur historique seront **définitivement supprimés** :`,
           channels.map((id) => `<#${id}>`).join(' ') || '*Aucun salon trouvé.*',
           '',
-          subtext('Les salons que vous avez choisis vous-même ne sont pas touchés. Chaque salon supprimé (sauf s\'il vient d\'être créé) compte comme une suppression de salon pour l\'AntiRaid.'),
+          subtext('Les salons que vous avez choisis vous-même ne sont pas touchés. Chaque salon supprimé (sauf s\'il vient d\'être créé) compte comme une suppression de salon pour l\'AntiRaid et Secur : si le seuil était atteint, rien n\'est supprimé.'),
         ],
       }),
     ],
@@ -482,6 +534,8 @@ module.exports = {
   category: 'configuration',
   cooldown: 3_000,
   render,
+  removalPlan,
+  assertNativeManageChannels,
   data: new SlashCommandBuilder()
     .setName('logs')
     .setDescription('Ouvre le tableau de bord des logs : salons, événements, création automatique.')
@@ -499,16 +553,18 @@ module.exports = {
     },
     /** cmd:logs:go:<vue> */
     async go(interaction, client, [view]) {
-      if (view === 'confirmRemove') removeGuard(interaction);
+      if (view === 'confirmRemove') assertCanRemove(interaction, client);
       else guard(interaction);
       await interaction.update(render(client, interaction.guild, view ?? 'home'));
     },
     /** cmd:logs:toggle:<on|off> — interrupteur global (valeur cible). */
     async toggle(interaction, client, [state]) {
       guard(interaction);
-      const enabled = target(state, full(client, interaction.guildId).logs?.enabled !== false);
+      const was = full(client, interaction.guildId).logs?.enabled !== false;
+      const enabled = target(state, was);
       client.services.config.update(interaction.guildId, { logs: { enabled } });
       await interaction.update(render(client, interaction.guild, 'home', `${ICONS.success} Logs ${enabled ? 'réactivés' : 'mis en pause'}.`));
+      if (was !== enabled) await securityJournal(client, interaction, { logs: { enabled: was } }, { logs: { enabled } });
     },
     /** cmd:logs:channel:<catégorie> — sélecteur de salon. */
     async channel(interaction, client, [key]) {
@@ -523,6 +579,7 @@ module.exports = {
         }
         if (!ch || !LOG_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel du serveur.');
       }
+      const previous = full(client, interaction.guildId).logChannels?.[key] ?? null;
       client.services.config.update(interaction.guildId, { logChannels: { [key]: id } });
       const status = client.services.logging.channelStatus(interaction.guild, id);
       const notice = !id
@@ -531,6 +588,7 @@ module.exports = {
           ? `${ICONS.warning} Salon enregistré, mais je ne peux pas y écrire : donnez-moi **Voir**, **Envoyer** et **Intégrer des liens**.`
           : `${ICONS.success} Logs **${LOG_CATEGORIES[key].label}** → <#${id}>.`;
       await interaction.update(categoryView(client, interaction.guild, key, notice));
+      if (key === 'security' && previous !== id) await securityJournal(client, interaction, { logChannels: { security: previous } }, { logChannels: { security: id } });
     },
     /** cmd:logs:events:<catégorie> — événements journalisés (remplace la sélection). */
     async events(interaction, client, [key]) {
@@ -539,19 +597,25 @@ module.exports = {
       if (!meta) throw new UserError('Catégorie de logs inconnue.');
       const all = Object.keys(meta.events);
       const chosen = new Set((interaction.values ?? []).filter((e) => all.includes(e)));
-      const others = (full(client, interaction.guildId).logs?.disabledEvents ?? []).filter((e) => !all.includes(e));
-      client.services.config.update(interaction.guildId, { logs: { disabledEvents: [...others, ...all.filter((e) => !chosen.has(e))] } });
+      const previous = full(client, interaction.guildId).logs?.disabledEvents ?? [];
+      const others = previous.filter((e) => !all.includes(e));
+      const disabledEvents = [...others, ...all.filter((e) => !chosen.has(e))];
+      client.services.config.update(interaction.guildId, { logs: { disabledEvents } });
       await interaction.update(categoryView(client, interaction.guild, key, `${ICONS.success} ${chosen.size} événement(s) journalisé(s) sur ${all.length}.`));
+      const changed = previous.length !== disabledEvents.length || previous.some((e) => !disabledEvents.includes(e));
+      if (key === 'security' && changed) await securityJournal(client, interaction, { logs: { disabledEvents: previous } }, { logs: { disabledEvents } });
     },
     /** cmd:logs:pause:<catégorie>:<on|off> — on : mettre en pause, off : reprendre (valeur cible). */
     async pause(interaction, client, [key, state]) {
       guard(interaction);
       if (!LOG_CATEGORIES[key]) throw new UserError('Catégorie de logs inconnue.');
-      const set = new Set(full(client, interaction.guildId).logs?.disabledCategories ?? []);
+      const previous = full(client, interaction.guildId).logs?.disabledCategories ?? [];
+      const set = new Set(previous);
       const paused = target(state, set.has(key));
       paused ? set.add(key) : set.delete(key);
       client.services.config.update(interaction.guildId, { logs: { disabledCategories: [...set] } });
       await interaction.update(categoryView(client, interaction.guild, key, `${ICONS.success} Catégorie ${paused ? 'mise en pause (le salon est conservé)' : 'réactivée'}.`));
+      if (key === 'security' && previous.includes(key) !== paused) await securityJournal(client, interaction, { logs: { disabledCategories: previous } }, { logs: { disabledCategories: [...set] } });
     },
     /** cmd:logs:test:<catégorie|all> */
     async test(interaction, client, [key]) {
@@ -592,6 +656,7 @@ module.exports = {
     async create(interaction, client) {
       manageGuard(interaction);
       const cfg = full(client, interaction.guildId).logs;
+      const securityBefore = full(client, interaction.guildId).logChannels?.security ?? null;
       await interaction.deferUpdate();
       const result = await client.services.logSetup.create(interaction.guild, {
         layout: cfg.setup?.layout,
@@ -605,6 +670,9 @@ module.exports = {
         result.reused.length ? `♻️ Réutilisés : ${result.reused.map((c) => `${c}`).join(' ')}` : null,
       ].filter(Boolean).join('\n');
       await interaction.editReply(render(client, interaction.guild, 'home', notice));
+      // Salon des logs Sécurité DÉPLACÉ (un salon déjà configuré remplacé) : journal de sécurité.
+      const securityAfter = full(client, interaction.guildId).logChannels?.security ?? null;
+      if (securityBefore && securityBefore !== securityAfter) await securityJournal(client, interaction, { logChannels: { security: securityBefore } }, { logChannels: { security: securityAfter } });
     },
     /** Réparation : recrée les salons supprimés et rétablit les permissions des salons du bot. */
     async repair(interaction, client) {
@@ -615,6 +683,7 @@ module.exports = {
         await interaction.update(render(client, interaction.guild, 'home', `${ICONS.success} Rien à réparer.`));
         return;
       }
+      const securityBefore = full(client, interaction.guildId).logChannels?.security ?? null;
       await interaction.deferUpdate();
       const result = await client.services.logSetup.create(interaction.guild, {
         layout: cfg.setup?.layout,
@@ -632,20 +701,29 @@ module.exports = {
           : null,
       ].filter(Boolean).join('\n');
       await interaction.editReply(render(client, interaction.guild, 'home', notice));
+      const securityAfter = full(client, interaction.guildId).logChannels?.security ?? null;
+      if (securityBefore && securityBefore !== securityAfter) await securityJournal(client, interaction, { logChannels: { security: securityBefore } }, { logChannels: { security: securityAfter } });
     },
     /** Suppression (après confirmation) des salons créés par le bot. */
     async remove(interaction, client) {
-      removeGuard(interaction);
-      await interaction.deferUpdate();
       const guild = interaction.guild;
-      // Suppressions signées par le bot dans le journal d'audit : l'AUTEUR est signalé à l'AntiRaid
-      // après chaque salon supprimé, comme /channel supprimer (sauf salon tout juste créé).
+      // Administrateur (ou propriétaire), « Gérer les salons » natif dans chaque salon visé, puis
+      // pré-contrôle Secur / AntiRaid AVANT toute suppression : les N suppressions, signées par le
+      // bot dans le journal d'audit, sont refusées d'emblée si elles atteignaient le seuil.
+      const plan = assertCanRemove(interaction, client);
+      if (plan.counted) client.services.secur?.assertAllowed?.(interaction, 'channelDelete', { count: plan.counted });
+      await interaction.deferUpdate();
+      const securityBefore = full(client, guild.id).logChannels?.security ?? null;
+      // Salons réellement supprimés (sauf ceux tout juste créés), rapportés en une fois après succès.
+      let counted = 0;
       const onDeleted = (channel) => {
-        if (Date.now() - (channel.createdTimestamp ?? 0) < FRESH_CHANNEL_MS) return null;
-        return client.services.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+        if (Date.now() - (channel.createdTimestamp ?? 0) >= FRESH_CHANNEL_MS) counted += 1;
       };
       const n = await client.services.logSetup.remove(guild, `Salons de logs supprimés par ${interaction.user.tag}`, { onDeleted });
       await interaction.editReply(render(client, guild, 'setup', `${ICONS.success} ${n} salon(s) de logs supprimé(s).`));
+      if (counted) await client.services.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete', { count: counted });
+      const securityAfter = full(client, guild.id).logChannels?.security ?? null;
+      if (securityBefore !== securityAfter) await securityJournal(client, interaction, { logChannels: { security: securityBefore } }, { logChannels: { security: securityAfter } });
       if (!n) return;
       // Trace dans un salon de logs qui a survécu (les salons supprimés sont déjà débranchés).
       await client.services.logging.send(guild.id, 'channels', logCard({

@@ -603,6 +603,10 @@ module.exports = {
         throw new UserError(`Confirmation incorrecte : tapez exactement \`${KICK_WORD}\`. Aucun membre n'a été expulsé.`);
       }
       const entry = kickListFor(token, { guildId: interaction.guildId, actorId: interaction.user.id, days });
+      // Pré-contrôle Secur / AntiRaid AVANT le premier kick : les N expulsions (signées par le bot)
+      // sont refusées d'emblée si elles atteignaient le seuil, au lieu de déranger l'auteur au
+      // milieu de l'opération. N = liste confirmée (borne haute : la relecture ne fait que la réduire).
+      if (entry.ids.length) client.services.secur?.assertAllowed?.(interaction, 'kick', { count: entry.ids.length });
       // Jeton consommé au démarrage : une seule exécution par confirmation.
       await runBulk(interaction, client, { days, action: 'kick', reason: textField(interaction, 'raison') ?? null, onlyIds: entry.ids, onStart: () => kickLists.delete(token) });
     },
