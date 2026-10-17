@@ -135,3 +135,71 @@ test('R5 : /embed send acquitté avant la publication, même sous limite de déb
     await h.close();
   }
 });
+
+test('R7 : une exception synchrone d\'un écouteur (niveaux) n\'empêche pas l\'AutoMod de filtrer le message', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    h.client.services.levels.handleMessage = () => {
+      throw Object.assign(new Error('database or disk is full'), { code: 'SQLITE_FULL' });
+    };
+    const before = h.fake.calls.length;
+    await h.userMessage({ as: 'member', content: 'ceci est un mot interdit' });
+    await h.settle();
+    const deleted = h.fake.calls.slice(before).some((c) => c.method === 'DELETE' && /\/messages\/\d+$/.test(c.route));
+    assert.equal(deleted, true, 'message interdit non filtré : la chaîne d\'écouteurs a été coupée');
+    // L'erreur est journalisée (attendu), sans rejet non géré.
+    assert.equal(h.unhandled.length, 0, h.formatProblems());
+    assert.ok(h.problems().errors.some((e) => /messageCreate/.test(e) && /disk is full/.test(e)), 'erreur de l\'écouteur non journalisée');
+  } finally {
+    await h.close();
+  }
+});
+
+test('R8 : clic sur un panneau après le retrait du bot → refus propre, aucune erreur inattendue ni écriture', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const sug = await h.slash('suggestion', [{ name: 'create', type: 1, options: [{ name: 'contenu', type: 3, value: 'Ajouter un salon musique' }] }], { as: 'member' });
+    const card = h.fake.messageLog.slice(sug.msgMark ?? 0).map((id) => h.message(id)).find((m) => m?.author?.id === h.client.user.id && (m.components ?? []).length && !(m.flags & 64));
+    assert.ok(card, `carte de suggestion introuvable : ${h.replyText(sug)}`);
+    const button = card.components.flatMap((r) => r.components).find((c) => c.custom_id && !c.custom_id.startsWith('cmd:_:'));
+    h.fake.dispatchNow('GUILD_DELETE', { id: h.guild.id, unavailable: false }, 'guildDelete');
+    await h.settle();
+    h.resetProblems();
+    const errorsBefore = h.client.stats.errors;
+    const votes = () => h.client.database.raw.prepare('SELECT COUNT(*) AS n FROM suggestion_votes').get().n;
+    const votesBefore = votes();
+    const rec = await h.click(card, button.custom_id, { as: 'admin' });
+    assert.ok(h.isError(rec), 'aucun refus');
+    assert.match(h.replyText(rec), /membre de ce serveur/);
+    assert.equal(h.client.stats.errors, errorsBefore, 'compté comme erreur inattendue');
+    assert.equal(votes(), votesBefore, 'écriture en base pour un serveur quitté');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R9 : un appel refusé par les vérifications préalables ne libère pas le cooldown de l\'appel précédent', async () => {
+  const { buildOptions, wrapPath } = require('./lib/explore');
+  const h = await createHarness({ botAdministrator: false });
+  h.configureAll();
+  try {
+    // Salon où le bot ne peut pas créer de sondage (« Envoyer des sondages » refusé au bot).
+    const ch = h.fake.channels.get(IDS.channels.rules);
+    ch.permission_overwrites = [...(ch.permission_overwrites ?? []), { id: IDS.users.bot, type: 1, allow: '0', deny: String(1n << 49n) }];
+    h.client.channels.cache.get(IDS.channels.rules)?._patch?.({ permission_overwrites: ch.permission_overwrites });
+    const leaf = leavesOf(h.client.commands.get('sondage').data.toJSON())[0];
+    const options = wrapPath(leaf.path, await buildOptions(h, 'sondage', leaf.options, OVERRIDES.sondage ?? {}));
+    h.client.cooldowns.expiries.clear();
+    const first = await h.slash('sondage', options, { as: 'member', keepCooldowns: true });
+    assert.ok(!h.isError(first), h.replyText(first));
+    const refused = await h.slash('sondage', options, { as: 'member', channel: 'rules', keepCooldowns: true });
+    assert.ok(h.isError(refused) || /Doucement/.test(h.replyText(refused)), h.replyText(refused));
+    const again = await h.slash('sondage', options, { as: 'member', keepCooldowns: true });
+    assert.match(h.replyText(again), /Doucement/, `cooldown contourné : ${h.replyText(again)}`);
+  } finally {
+    await h.close();
+  }
+});

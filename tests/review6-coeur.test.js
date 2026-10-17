@@ -336,3 +336,48 @@ test('R110 : un tirage de giveaway lent ne bloque pas le scheduler (débans, rap
   await stopping;
   assert.equal(stopped, true);
 });
+
+// ---------- R10 : arrêt pendant une sauvegarde automatique, fichiers .partial ----------
+
+test('R10 : arrêt pendant une sauvegarde automatique → attente bornée, la base est quand même fermée', async () => {
+  const { GadgetClient } = require('../src/core/GadgetClient');
+  const client = new GadgetClient();
+  client.shutdownDeadlineMs = 50;
+  const order = [];
+  client.autoBackup = { stop: () => new Promise(() => {}) }; // sauvegarde bloquée (disque lent)
+  client.services = { scheduler: { stop: async () => order.push('scheduler') } };
+  client.destroy = async () => order.push('destroy');
+  client.database = { close: () => order.push('db') };
+  const done = await Promise.race([client.shutdown().then(() => true), new Promise((r) => setTimeout(() => r(false), 1_000))]);
+  assert.equal(done, true, 'arrêt bloqué par la sauvegarde en cours (garde-fou de 10 s : base jamais fermée)');
+  assert.deepEqual(order, ['scheduler', 'destroy', 'db']);
+});
+
+test('R10 : fichiers .partial abandonnés (arrêt pendant une sauvegarde) nettoyés au démarrage et à la rotation', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { rotateBackups, AutoBackup } = require('../src/database/backup');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gadget-r10-'));
+  const touch = (name, ageMs) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, 'x');
+    const t = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(file, t, t);
+    return file;
+  };
+  try {
+    const stale = touch('gadget-20260101-0000.sqlite.partial', 3_600_000);
+    const live = touch('gadget-20260101-0100.sqlite.partial', 1_000); // sauvegarde en cours (autre processus)
+    rotateBackups(dir, 'gadget', 14);
+    assert.equal(fs.existsSync(stale), false, '.partial abandonné conservé par la rotation');
+    assert.equal(fs.existsSync(live), true, 'sauvegarde en cours supprimée');
+    const stale2 = touch('gadget-20260102-0000.sqlite.partial', 3_600_000);
+    const auto = new AutoBackup({ database: { raw: null }, intervalHours: 24, dir, stem: 'gadget', keep: 14 });
+    auto.start();
+    auto.stop();
+    assert.equal(fs.existsSync(stale2), false, '.partial abandonné conservé au démarrage');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

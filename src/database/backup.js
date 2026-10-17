@@ -9,6 +9,11 @@ const logger = createLogger('db:backup');
 const HOUR_MS = 3_600_000;
 /** Délai minimal avant la première sauvegarde automatique après le démarrage. */
 const FIRST_RUN_MIN_DELAY_MS = 60_000;
+/**
+ * Un `.partial` non modifié depuis 10 minutes est abandonné (arrêt ou plantage pendant la
+ * copie) : une sauvegarde en cours l'écrit en continu (autre processus : npm run backup:db).
+ */
+const STALE_PARTIAL_MS = 10 * 60_000;
 
 const pad = (n) => String(n).padStart(2, '0');
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -43,12 +48,36 @@ function listBackups(dir, stem) {
   return names.filter((n) => re.test(n)).sort();
 }
 
-/** Ne garde que les `keep` sauvegardes les plus récentes. Renvoie les fichiers supprimés. */
+/** Supprime les copies `.partial` abandonnées (jamais une copie en cours). Renvoie les fichiers supprimés. */
+function cleanStalePartials(dir, stem, now = Date.now()) {
+  const re = new RegExp(`^${escapeRe(stem)}-\\d{8}-\\d{4}\\.sqlite\\.partial$`);
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const removed = [];
+  for (const name of names.filter((n) => re.test(n))) {
+    try {
+      const file = path.join(dir, name);
+      if (now - fs.statSync(file).mtimeMs < STALE_PARTIAL_MS) continue;
+      fs.rmSync(file, { force: true });
+      removed.push(name);
+    } catch {
+      /* fichier disparu entre-temps */
+    }
+  }
+  return removed;
+}
+
+/** Ne garde que les `keep` sauvegardes les plus récentes (et nettoie les `.partial` abandonnés). Renvoie les sauvegardes supprimées. */
 function rotateBackups(dir, stem, keep) {
   const max = Math.max(1, Math.floor(Number(keep) || 1));
   const files = listBackups(dir, stem);
   const removed = files.slice(0, Math.max(0, files.length - max));
   for (const name of removed) fs.rmSync(path.join(dir, name), { force: true });
+  cleanStalePartials(dir, stem);
   return removed;
 }
 
@@ -121,6 +150,9 @@ class AutoBackup {
 
   start() {
     if (this.timer || this.stopped) return;
+    // Copie interrompue lors d'un arrêt précédent (garde-fou, plantage) : jamais réutilisée.
+    const stale = cleanStalePartials(this.dir, this.stem);
+    if (stale.length) logger.info(`${stale.length} sauvegarde(s) interrompue(s) (.partial) supprimée(s).`);
     this.#schedule(this.firstDelay());
     logger.info(`Sauvegarde automatique activée (toutes les ${this.intervalMs / HOUR_MS} h, ${this.keep} conservées, ${this.dir})`);
   }
@@ -162,4 +194,4 @@ class AutoBackup {
   }
 }
 
-module.exports = { backupDatabase, rotateBackups, listBackups, backupFileName, backupStem, defaultBackupDir, AutoBackup };
+module.exports = { backupDatabase, rotateBackups, cleanStalePartials, listBackups, backupFileName, backupStem, defaultBackupDir, AutoBackup };

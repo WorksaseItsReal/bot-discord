@@ -89,10 +89,14 @@ async function handleCommand(client, interaction) {
 
   const cooldownKey = `${command.data.name}:${interaction.user.id}`;
   const started = Date.now();
+  // Cooldown consommé par CETTE exécution ? Seul celui-là est libéré en cas d'échec : un appel
+  // refusé par preflight ne doit pas libérer le cooldown d'une exécution précédente réussie.
+  let consumed = false;
   try {
     preflight(client, interaction, command);
 
     const remaining = client.cooldowns.hit(cooldownKey, command.cooldown ?? DEFAULT_COOLDOWN_MS);
+    consumed = remaining === 0;
     if (remaining > 0) {
       await interaction.reply({
         embeds: [status.warn(`Doucement ! Vous pourrez réutiliser **${commandLabel(command)}** ${discordTimestamp(Date.now() + remaining, 'R')}.`)],
@@ -105,7 +109,7 @@ async function handleCommand(client, interaction) {
     await command.execute(interaction, client);
     client.stats.commandsRun += 1;
   } catch (err) {
-    client.cooldowns.release(cooldownKey);
+    if (consumed) client.cooldowns.release(cooldownKey);
     await reportError(client, interaction, err, `/${interaction.commandName}`);
   } finally {
     const elapsed = Date.now() - started;
@@ -144,6 +148,11 @@ async function handleComponent(client, interaction) {
     if (!componentExistsOnMessage(interaction)) throw new UserError('Ce bouton est invalide.');
     if (handler.guildOnly !== false && !interaction.inGuild()) {
       throw new UserError('Cette action n\'est disponible que sur un serveur.');
+    }
+    // Bot retiré du serveur (ses panneaux restent) : refus propre, comme pour les commandes,
+    // avant tout gestionnaire (interaction.guild vaut null ; aucune écriture en base).
+    if (interaction.inGuild() && !interaction.guild) {
+      throw new UserError('Je dois être membre de ce serveur pour exécuter cette action. Invitez-moi avec `/invite`.');
     }
     await handler.execute(interaction, client);
   } catch (err) {

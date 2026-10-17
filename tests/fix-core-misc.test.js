@@ -123,12 +123,14 @@ test('ConfigService : JSON corrompu sauvegardé avant écrasement', () => {
   assert.equal(stored._corruptBackup.raw, '{"locale":"en", oops');
 });
 
-test('ConfigService : markLeft sans config stockée ne crée pas de ligne', () => {
+// Revue n° 6 (R2) : un serveur sans config peut avoir d'autres données (sanctions, niveaux…)
+// à purger 30 jours après le départ : le départ est daté dans une ligne minimale.
+test('ConfigService : markLeft sans config stockée date quand même le départ', () => {
   const { db } = memoryDb();
   const repo = new GuildConfigRepository(db);
   const svc = new ConfigService(repo);
-  assert.equal(svc.markLeft('none'), false);
-  assert.equal(repo.get('none'), null);
+  assert.equal(svc.markLeft('none', 1234), true);
+  assert.deepEqual(repo.get('none'), { _leftAt: 1234 });
 });
 
 // ---------- CommandHandler ----------
