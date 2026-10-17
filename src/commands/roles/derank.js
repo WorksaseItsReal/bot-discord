@@ -1,7 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { listOrMore } = require('../../utils/embeds');
+const { listOrMore, truncate } = require('../../utils/embeds');
 const { card, field, wide, ICONS, userLine, status } = require('../../utils/ui');
 const { assertCanModerate } = require('../../utils/permissions');
 const { confirm } = require('../../utils/confirmation');
@@ -14,7 +14,7 @@ module.exports = {
     .setDescription('Retire tous les rôles d\'un membre.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
     .addUserOption((o) => o.setName('membre').setDescription('Membre à qui retirer tous les rôles').setRequired(true))
-    .addStringOption((o) => o.setName('raison').setDescription('Raison du derank (visible dans les logs)')),
+    .addStringOption((o) => o.setName('raison').setDescription('Raison du derank (visible dans les logs)').setMaxLength(512)),
 
   async execute(interaction, client) {
     const user = interaction.options.getUser('membre');
@@ -38,7 +38,10 @@ module.exports = {
       });
       if (!ok) return undefined;
     }
-    await member.roles.remove(removable, reason || `Derank par ${interaction.user.tag}`);
+    // Raison du journal d'audit : 512 caractères au plus (au-delà, Discord refuse la requête).
+    await member.roles.remove(removable, truncate(reason || `Derank par ${interaction.user.tag}`, 500));
+    // Rôles temporaires retirés : leur ligne est close (sinon rendus au retour du membre).
+    for (const roleId of removable.keys()) client?.services?.tempRoles?.closeManual?.(interaction.guild.id, member.id, roleId);
 
     const mentions = [...removable.sort((a, b) => b.position - a.position).values()].map((r) => `${r}`);
     const fields = [
@@ -47,7 +50,7 @@ module.exports = {
       field(ICONS.count, 'Rôles retirés', `**${removable.size}**`),
       wide(ICONS.role, 'Rôles retirés', listOrMore(mentions, 25, ' ')),
       kept.size ? wide(ICONS.lock, 'Conservés (trop hauts ou gérés)', listOrMore([...kept.values()].map((r) => `${r}`), 15, ' ')) : null,
-      wide(ICONS.reason, 'Raison', reason ?? '*Aucune raison fournie*'),
+      wide(ICONS.reason, 'Raison', reason ? truncate(reason, 1024) : '*Aucune raison fournie*'),
     ];
     const embed = (section) => card({
       tone: 'caution',

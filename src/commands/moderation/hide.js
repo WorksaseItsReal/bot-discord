@@ -1,19 +1,25 @@
 'use strict';
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { ICONS, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { field, ICONS, actionButton, deleteButton, buttonRows, ButtonStyle } = require('../../utils/ui');
 const { channelCard, channelForButton, channelForCommand } = require('../../services/LockdownService');
 const { requirePermission } = require('../../services/ModerationService');
 
-/** Masque le salon (l'état d'origine de ViewChannel est sauvegardé pour /unhide). */
+/**
+ * Masque le salon (l'état d'origine de ViewChannel est sauvegardé pour /unhide). Catégorie :
+ * ses salons synchronisés sont masqués avec elle.
+ * @returns {Promise<number>} salons masqués avec la catégorie
+ */
 function hide(client, channel, user) {
   return client.services.lockdown.hideChannel(channel, `Hide par ${user.tag}`);
 }
 
-/** Carte « Salon masqué » + bouton inverse « Afficher ». */
-function render(channel, moderator, ownerId) {
+/** Carte « Salon masqué » (+ salons de la catégorie masqués avec elle) + bouton inverse « Afficher ». */
+function render(channel, moderator, ownerId, children = 0) {
   return {
-    embeds: [channelCard('hide', channel, moderator)],
+    embeds: [channelCard('hide', channel, moderator, [
+      children ? field(ICONS.count, 'Salons de la catégorie masqués', `**${children}**`) : null,
+    ])],
     components: buttonRows(
       actionButton({ command: 'unhide', action: 'run', args: [channel.id, ownerId], label: 'Afficher', emoji: ICONS.visible, style: ButtonStyle.Success }),
       deleteButton(ownerId),
@@ -35,8 +41,10 @@ module.exports = {
 
   async execute(interaction, client) {
     const channel = channelForCommand(interaction, 'salon', { overwrites: true });
-    await hide(client, channel, interaction.user);
-    await interaction.reply(render(channel, interaction.user, interaction.user.id));
+    // Catégorie : un appel par salon synchronisé, plus de 3 s possible.
+    await interaction.deferReply();
+    const children = await hide(client, channel, interaction.user);
+    await interaction.editReply(render(channel, interaction.user, interaction.user.id, children));
   },
 
   buttons: {
@@ -44,8 +52,9 @@ module.exports = {
     async run(interaction, client, [channelId, ownerId]) {
       requirePermission(interaction, 'ManageChannels');
       const channel = await channelForButton(interaction, channelId, { overwrites: true });
-      await hide(client, channel, interaction.user);
-      await interaction.update(render(channel, interaction.user, ownerId));
+      await interaction.deferUpdate();
+      const children = await hide(client, channel, interaction.user);
+      await interaction.editReply(render(channel, interaction.user, ownerId, children));
     },
   },
 };

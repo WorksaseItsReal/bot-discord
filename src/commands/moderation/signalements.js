@@ -16,7 +16,7 @@ const { requirePermission, needPermission } = require('../../services/Moderation
 const { REPORT_COOLDOWN_MS, REPORT_TIMEOUT_MS, MAX_REPORT_REASON, REPORT_ICON, STATUS, TEXT_TYPES, messageLink, normalizeReportReason } = require('../../services/ReportService');
 const { snowflake } = require('../../utils/buttonGuard');
 const { canActOnByHierarchy } = require('../../utils/permissions');
-const { applyEscalation } = require('./warn');
+const { applyEscalation, serialWarn } = require('./warn');
 const { UserError } = require('../../core/errors');
 
 /**
@@ -367,11 +367,14 @@ module.exports = {
         run: async () => {
           const member = await targetMember(guild, report);
           if (!member) throw new UserError('Ce membre n\'est plus sur le serveur.');
-          const { id } = await moderation.warn(guild, member, interaction.member, sanctionReason(report));
-          const { count } = strikes.add(guild.id, member.id, 1);
-          const step = strikes.pendingEscalation(guild.id, count, moderation.appliedEscalationLevel(guild.id, member.id, strikes.activeSince(guild.id)));
-          const escalation = step ? await applyEscalation(client, interaction, member, step) : null;
-          return [`Sanction #${id} · ${count} strike(s)`, escalation?.text].filter(Boolean).join(' · ');
+          // Sérialisé avec /warn : un palier d'escalade n'est jamais appliqué deux fois.
+          return serialWarn(guild.id, member.id, async () => {
+            const { id } = await moderation.warn(guild, member, interaction.member, sanctionReason(report));
+            const { count } = strikes.add(guild.id, member.id, 1);
+            const step = strikes.pendingEscalation(guild.id, count, moderation.appliedEscalationLevel(guild.id, member.id, strikes.activeSince(guild.id)));
+            const escalation = step ? await applyEscalation(client, interaction, member, step) : null;
+            return [`Sanction #${id} · ${count} strike(s)`, escalation?.text].filter(Boolean).join(' · ');
+          });
         },
       });
       await interaction.editReply(reports.cardPayload(guild, updated));

@@ -103,14 +103,14 @@ module.exports = {
     }
     running.add(guildId);
     try {
-      await run(interaction, { action, role, target });
+      await run(interaction, client, { action, role, target });
     } finally {
       running.delete(guildId);
     }
   },
 };
 
-async function run(interaction, { action, role, target }) {
+async function run(interaction, client, { action, role, target }) {
   // Après une confirmation, l'interaction est déjà acquittée : la progression remplace la demande.
   if (!interaction.deferred && !interaction.replied) await interaction.deferReply();
   const edit = replyEditor(interaction);
@@ -136,7 +136,11 @@ async function run(interaction, { action, role, target }) {
     await Promise.all(
       batch.map((m) =>
         (action === 'add' ? m.roles.add(role) : m.roles.remove(role))
-          .then(() => (done += 1))
+          .then(() => {
+            done += 1;
+            // Rôle temporaire retiré : sa ligne est close (sinon rendu au retour du membre).
+            if (action === 'remove') client?.services?.tempRoles?.closeManual?.(interaction.guild.id, m.id, role.id);
+          })
           .catch(() => (failed += 1)),
       ),
     );

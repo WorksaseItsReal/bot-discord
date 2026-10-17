@@ -2,7 +2,7 @@
 
 const { card, field, ICONS, status, subtext } = require('../utils/ui');
 const { resetSelectMenu } = require('../utils/components');
-const { hasForbiddenPermissions } = require('../commands/roles/rolemenu');
+const { hasForbiddenPermissions, reservedRoleReason } = require('../commands/roles/rolemenu');
 
 /**
  * Gestionnaire du select menu de rôles auto-attribuables.
@@ -50,7 +50,8 @@ async function handle(interaction, client) {
     const has = interaction.member.roles.cache.has(roleId);
     // Rôle supprimé ou passé au-dessus du bot : rien n'est possible. Rôle devenu sensible :
     // on ne l'ATTRIBUE plus, mais un membre peut toujours l'abandonner.
-    if (!role || role.managed || role.position >= me.roles.highest.position || (!has && hasForbiddenPermissions(role))) {
+    // Rôle de mute ou de vérification (menu publié avant qu'il le devienne) : ni ajouté ni retiré.
+    if (!role || role.managed || role.position >= me.roles.highest.position || (!has && hasForbiddenPermissions(role)) || reservedRoleReason(client, interaction.guild, role)) {
       failed.push(roleId);
       continue;
     }

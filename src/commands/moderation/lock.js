@@ -8,8 +8,11 @@ const { UserError } = require('../../core/errors');
 const { timedDuration } = require('../../services/TimedLockService');
 const { requirePermission } = require('../../services/ModerationService');
 
-/** Salons où l'on peut écrire : textuels, annonces, forums, texte des vocaux. */
-const LOCK_CHANNEL_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice];
+/** Salons où l'on peut écrire : textuels, annonces, forums, médias, texte des vocaux et des conférences. */
+const LOCK_CHANNEL_TYPES = [
+  ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia,
+  ChannelType.GuildVoice, ChannelType.GuildStageVoice,
+];
 
 /** Carte « Salon verrouillé » (+ levée automatique) + bouton inverse « Déverrouiller ». */
 function render(channel, moderator, ownerId, until = null) {
@@ -58,7 +61,7 @@ module.exports = {
   LOCK_CHANNEL_TYPES,
   data: new SlashCommandBuilder()
     .setName('lock')
-    .setDescription('Verrouille un salon (empêche @everyone d\'écrire).')
+    .setDescription('Verrouille un salon (les membres ne peuvent plus écrire).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
     .addChannelOption((o) => o.setName('salon').setDescription('Salon (par défaut: actuel)').addChannelTypes(...LOCK_CHANNEL_TYPES))
     .addStringOption((o) => o.setName('duree').setDescription('Déverrouiller automatiquement après (ex : 30m, 2h, 1d). Vide = permanent').setMaxLength(20)),

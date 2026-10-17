@@ -32,13 +32,16 @@ module.exports = {
     if (entry.action === AuditLogEvent.MemberRoleUpdate) {
       const added = entry.changes?.find((c) => c.key === '$add')?.new ?? [];
       const removed = entry.changes?.find((c) => c.key === '$remove')?.new ?? [];
-      // Rôle Muted retiré à la main (pas par le bot) : le mute en base est levé, sinon
-      // il serait réappliqué au retour du membre puis « levé » par le scheduler.
-      if (!isBot && removed.length) {
-        const mutedRoleId = client.services.moderation?.mutedRole?.(guild)?.id;
-        if (mutedRoleId && removed.some((r) => r.id === mutedRoleId)) {
-          client.services.moderation.liftedOutside?.(guild.id, entry.targetId, 'mute', entry.executorId ?? null, entry.createdTimestamp ?? Date.now());
-        }
+      // Rôle Muted retiré hors de /unmute (à la main, ou via le bot par /role remove, /massrole…) :
+      // le mute en base est levé, sinon il serait réappliqué au retour du membre puis « levé » par
+      // le scheduler. /unmute et la levée automatique ont déjà clos la ligne : rien ne change.
+      const moderation = client.services.moderation;
+      const mutedRoleId = removed.length ? moderation?.mutedRole?.(guild)?.id : null;
+      if (mutedRoleId && removed.some((r) => r.id === mutedRoleId) && !(isBot && moderation.isRecentBotAction?.('unmute', guild.id, entry.targetId))) {
+        moderation.liftedOutside?.(guild.id, entry.targetId, 'mute', entry.executorId ?? null, entry.createdTimestamp ?? Date.now(), {
+          // Retrait par le bot d'un mute échu : c'est la levée automatique, qui clôt sa ligne elle-même.
+          ...(isBot ? { reason: 'Rôle Muted retiré via le bot', keepDue: true } : {}),
+        });
       }
       if (!logging.wouldLog(guild.id, 'members', { event: 'memberRoles' })) return;
       if (!added.length && !removed.length) return;

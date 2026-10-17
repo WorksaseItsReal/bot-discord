@@ -259,6 +259,18 @@ function isEnforced(s, now = Date.now()) {
   return s.type === 'mute' || s.type === 'ban';
 }
 
+/** Sanctions levées par le bot à leur échéance (le ban temporaire et le rôle Muted restent sinon). */
+const LIFTED_ON_EXPIRY = new Set(['tempban', 'mute']);
+
+/**
+ * true si la sanction est échue mais pas encore levée : la levée automatique n'a pas encore eu
+ * lieu (prochain passage du scheduler) ou a échoué (bot hors ligne, permission retirée). Le ban ou
+ * le rôle Muted est toujours en place : la ligne ne doit pas être supprimée. Pur.
+ */
+function awaitingLift(s, now = Date.now()) {
+  return Boolean(s?.active && s.expires_at && s.expires_at <= now && LIFTED_ON_EXPIRY.has(s.type));
+}
+
 /**
  * État lisible d'une sanction. Pur.
  *  - 'active'   : en vigueur (expiration future, mute sans échéance, ban définitif non levé)
@@ -278,4 +290,4 @@ function sanctionState(s, now = Date.now()) {
   return ONE_SHOT_TYPES.has(s.type) ? 'done' : 'revoked';
 }
 
-module.exports = { SanctionRepository, isEnforced, sanctionState, ONE_SHOT_TYPES };
+module.exports = { SanctionRepository, isEnforced, awaitingLift, sanctionState, ONE_SHOT_TYPES };

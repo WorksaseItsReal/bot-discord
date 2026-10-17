@@ -8,7 +8,7 @@ const { card, field, wide, ICONS, userLine, subtext, buttonRows, deleteButton, a
 const { permissionLabel } = require('../utils/permissionNames');
 const { snowflake, SNOWFLAKE } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
-const { sanctionState } = require('../database/repositories/SanctionRepository');
+const { sanctionState, awaitingLift } = require('../database/repositories/SanctionRepository');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('moderation');
@@ -16,16 +16,26 @@ const logger = createLogger('moderation');
 /** Durée pendant laquelle une action du bot est reconnue dans les événements Discord (anti-doublon de logs). */
 const BOT_ACTION_TTL_MS = 15_000;
 
-/** Refus posés par le rôle Muted, selon le type de salon. */
 /** Rattrapage en arrière-plan des refus du rôle Muted : au plus une fois par période. */
 const MUTED_RESYNC_MS = 10 * 60 * 1000;
 
+/**
+ * Refus posés par le rôle Muted, selon le type de salon. Créer un fil publie son nom dans le
+ * salon : refusé aussi. En vocal et en conférence : parler, partager son écran et demander la
+ * parole. Les salons médias fonctionnent comme les forums (SendMessages = créer un post). Les
+ * refus manquants sont posés par le rattrapage (syncMutedRole).
+ */
 const MUTE_DENIES = {
-  [ChannelType.GuildText]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
-  [ChannelType.GuildAnnouncement]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildText]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads'],
+  [ChannelType.GuildAnnouncement]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads', 'CreatePublicThreads'],
   [ChannelType.GuildForum]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
-  [ChannelType.GuildVoice]: ['SendMessages', 'AddReactions', 'Speak'],
-  [ChannelType.GuildCategory]: ['SendMessages', 'AddReactions', 'Speak', 'SendMessagesInThreads'],
+  [ChannelType.GuildMedia]: ['SendMessages', 'AddReactions', 'SendMessagesInThreads'],
+  [ChannelType.GuildVoice]: ['SendMessages', 'AddReactions', 'Speak', 'Stream'],
+  [ChannelType.GuildStageVoice]: ['SendMessages', 'AddReactions', 'Speak', 'Stream', 'RequestToSpeak'],
+  [ChannelType.GuildCategory]: [
+    'SendMessages', 'AddReactions', 'Speak', 'Stream', 'RequestToSpeak',
+    'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads',
+  ],
 };
 
 /**
@@ -380,6 +390,8 @@ class ModerationService {
     this.recentBotActions = new Map();
     /** @type {Map<string, number>} dernier rattrapage des refus du rôle Muted, par serveur */
     this.mutedSyncAt = new Map();
+    /** @type {Map<string, Promise<import('discord.js').Role>>} création / adoption du rôle Muted en cours, par serveur */
+    this.mutedRoleSetups = new Map();
   }
 
   /** Marque une action du bot (avant l'appel API). */
@@ -423,29 +435,40 @@ class ModerationService {
    * la première fois) : pas de parcours de tous les salons à chaque /mute.
    */
   async ensureMutedRole(guild) {
+    // Création / adoption déjà en cours (deux /mute simultanés) : le même rôle pour tous, sinon
+    // deux rôles « Muted » seraient créés et le premier membre resterait muet à vie.
+    const pending = this.mutedRoleSetups.get(guild.id);
+    if (pending) return pending;
     const cfg = this.config.get(guild.id);
     const roleId = cfg.moderation.mutedRoleId;
-    let role = roleId ? guild.roles.cache.get(roleId) : guild.roles.cache.find((r) => r.name === 'Muted');
-    let setup = false;
-    if (!role) {
-      role = await guild.roles.create({ name: 'Muted', colors: { primaryColor: 0x607d8b }, reason: 'Rôle de mute Inspecteur Gadget' });
-      setup = true;
+    const role = roleId ? guild.roles.cache.get(roleId) : guild.roles.cache.find((r) => r.name === 'Muted');
+    if (!role || cfg.moderation.mutedRoleId !== role.id) {
+      const setup = this.#setupMutedRole(guild, role);
+      this.mutedRoleSetups.set(guild.id, setup);
+      try {
+        return await setup;
+      } finally {
+        if (this.mutedRoleSetups.get(guild.id) === setup) this.mutedRoleSetups.delete(guild.id);
+      }
     }
-    if (cfg.moderation.mutedRoleId !== role.id) {
-      this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
-      setup = true;
-    }
-    // Création/adoption : synchronisation complète attendue. Sinon, rattrapage en arrière-plan
-    // (au plus toutes les 10 min) des salons créés depuis ou devenus gérables : syncMutedRole
-    // ignore les salons déjà conformes et ceux où le bot n'a pas les droits.
+    // Rattrapage en arrière-plan (au plus toutes les 10 min) des salons créés depuis ou devenus
+    // gérables : syncMutedRole ignore les salons déjà conformes et ceux où le bot n'a pas les droits.
     const last = this.mutedSyncAt.get(guild.id) ?? 0;
-    if (setup) {
-      this.mutedSyncAt.set(guild.id, Date.now());
-      await this.syncMutedRole(guild, role);
-    } else if (Date.now() - last > MUTED_RESYNC_MS) {
+    if (Date.now() - last > MUTED_RESYNC_MS) {
       this.mutedSyncAt.set(guild.id, Date.now());
       this.syncMutedRole(guild, role).catch((err) => logger.debug('Synchronisation du rôle Muted :', err?.message));
     }
+    return role;
+  }
+
+  /** Création (ou adoption) du rôle Muted, puis synchronisation complète des refus. */
+  async #setupMutedRole(guild, existing) {
+    const role = existing ?? await guild.roles.create({ name: 'Muted', colors: { primaryColor: 0x607d8b }, reason: 'Rôle de mute Inspecteur Gadget' });
+    if (this.config.get(guild.id).moderation.mutedRoleId !== role.id) {
+      this.config.update(guild.id, { moderation: { mutedRoleId: role.id } });
+    }
+    this.mutedSyncAt.set(guild.id, Date.now());
+    await this.syncMutedRole(guild, role);
     return role;
   }
 
@@ -462,10 +485,14 @@ class ModerationService {
       if (!denies || !channel.permissionOverwrites) continue;
       const perms = me ? channel.permissionsFor?.(me) : null;
       if (!perms?.has?.(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.ManageRoles)) continue;
+      // Discord refuse qu'un bot pose un refus qu'il n'a pas lui-même sur le serveur (demander la
+      // parole, partager son écran…) : la surcharge entière serait rejetée. Seules ses permissions
+      // sont donc refusées, le reste du salon est quand même couvert.
+      const wanted = denies.filter((p) => !me.permissions?.has || me.permissions.has(PermissionFlagsBits[p]));
       const ow = channel.permissionOverwrites.cache.get(role.id);
-      if (ow && denies.every((p) => ow.deny?.has?.(PermissionFlagsBits[p]))) continue;
+      if (!wanted.length || (ow && wanted.every((p) => ow.deny?.has?.(PermissionFlagsBits[p])))) continue;
       const ok = await channel.permissionOverwrites
-        .edit(role, Object.fromEntries(denies.map((p) => [p, false])), { reason: 'Configuration mute' })
+        .edit(role, Object.fromEntries(wanted.map((p) => [p, false])), { reason: 'Configuration mute' })
         .then(() => true, () => false);
       if (ok) edited += 1;
     }
@@ -511,7 +538,9 @@ class ModerationService {
       await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
       return { ok: true, dbOnly: true };
     }
-    await targetMember.roles.remove(role, reason || undefined);
+    // Marqué : le journal d'audit (retrait du rôle Muted par le bot) ne lève pas la ligne à la place
+    // de cette action, qui l'enregistre avec son auteur et sa raison.
+    await this.#asBot('unmute', guild.id, targetMember.id, () => targetMember.roles.remove(role, reason || undefined));
     this.#deactivateActive(guild.id, targetMember.id, 'mute', { by: moderator.id, reason });
     await this.logging.send(guild.id, 'moderation', sanctionCard({ type: 'unmute', user: targetMember.user, moderator, reason }), undefined, { event: 'revocation' });
     return { ok: true };
@@ -734,13 +763,16 @@ class ModerationService {
    * Sanction levée HORS du bot (rôle Muted retiré, timeout retiré par un tiers) :
    * la ligne active est désactivée pour ne pas être réappliquée ni levée plus tard.
    * @param {'mute'|'timeout'} type
+   * @param {{ reason?: string, keepDue?: boolean }} [opts] motif enregistré (par défaut « Levé hors
+   *   du bot ») ; keepDue : les sanctions déjà échues sont laissées à la levée automatique
    * @returns {number} lignes désactivées
    */
-  liftedOutside(guildId, userId, type, executorId = null, before = Date.now()) {
+  liftedOutside(guildId, userId, type, executorId = null, before = Date.now(), { reason, keepDue = false } = {}) {
     // Seules les sanctions ANTÉRIEURES à l'action manuelle sont levées : un événement d'audit
     // reçu en retard ne doit pas annuler une sanction posée juste après (ex. remute immédiat).
-    const rows = (this.sanctions.listActive?.(guildId, userId) ?? []).filter((r) => r.type === type && r.created_at <= before);
-    for (const r of rows) this.sanctions.revoke(r.id, { by: executorId, reason: 'Levé hors du bot' });
+    const rows = (this.sanctions.listActive?.(guildId, userId) ?? [])
+      .filter((r) => r.type === type && r.created_at <= before && !(keepDue && r.expires_at && r.expires_at <= before));
+    for (const r of rows) this.sanctions.revoke(r.id, { by: executorId, reason: reason ?? 'Levé hors du bot' });
     return rows.length;
   }
 
@@ -862,7 +894,8 @@ class ModerationService {
    */
   async lift(guild, sanction, moderator, reason) {
     const lift = LIFTS[sanction?.type];
-    if (!lift || sanctionState(sanction) !== 'active') throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
+    // Échue mais pas encore levée (levée automatique en attente ou en échec) : levable aussi.
+    if (!lift || (sanctionState(sanction) !== 'active' && !awaitingLift(sanction))) throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
     const userId = sanction.user_id;
     if (lift.type === 'unban') {
       if (!guild.members?.me?.permissions?.has(PermissionFlagsBits.BanMembers)) {

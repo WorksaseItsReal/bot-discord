@@ -18,5 +18,13 @@ module.exports = {
       logger.warn(`Impossible de dater le départ du serveur ${guild.id} :`, err?.message);
       client.services.config.invalidate(guild.id);
     }
+    // États de verrouillage / masquage oubliés : le bot ne voit plus les salons changer pendant son
+    // absence ; à son retour, ils annonceraient un lockdown fantôme et une levée rouvrirait des
+    // salons passés en lecture seule entre-temps.
+    try {
+      client.repositories?.locks?.deleteGuild?.(guild.id);
+    } catch (err) {
+      logger.warn(`Impossible d'oublier les verrouillages du serveur ${guild.id} :`, err?.message);
+    }
   },
 };
