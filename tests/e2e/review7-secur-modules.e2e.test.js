@@ -177,3 +177,55 @@ test('S19 : boucle réelle (le salon recréé supprimé à chaque fois) → le d
     await h.close();
   }
 });
+
+/* -------------------------------------------------------------------- */
+/* S2 : /backup restore pendant que la file d'annulation travaille         */
+/* -------------------------------------------------------------------- */
+
+test('S2 : /backup restore pendant la file d\'annulation (429 sur les membres) → aucun doublon, configuration et membres sur la copie restaurée', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({
+      logChannels: { security: IDS.channels.logs },
+      automod: { enabled: false },
+      antiraid: { enabled: false },
+      suggestions: { channelId: IDS.channels.general },
+      secur: { modules: { channelDelete: { mode: 'on' }, roleDelete: { mode: 'on' } } },
+    });
+    const backup = h.client.services.backup;
+    const { id } = backup.create(h.guild, h.client.users.cache.get(IDS.users.owner), 'avant');
+    // Limite de débit sur l'attribution des rôles par le bot : la file reste occupée.
+    h.fake.inject({ match: (c) => c.method === 'PUT' && /\/guilds\/\d+\/members\/\d+\/roles\/\d+$/.test(c.route) && !c.actor }, { status: 429, retryAfter: 2_500, times: 2 });
+    const actorId = IDS.users.admin;
+    await Promise.all([
+      h.fake.perform('DELETE', `/guilds/${h.guild.id}/roles/${IDS.roles.member}`, undefined, { actorId }),
+      h.fake.perform('DELETE', `/guilds/${h.guild.id}/roles/${IDS.roles.gamer}`, undefined, { actorId }),
+      h.fake.perform('DELETE', `/channels/${IDS.channels.general}`, undefined, { actorId }),
+      h.fake.perform('DELETE', `/channels/${IDS.channels.rules}`, undefined, { actorId }),
+    ]);
+    await sleep(400);
+    const queue = h.client.services.secur.queues.get(h.guild.id);
+    assert.ok(queue.size > 0, 'file déjà vide : scénario non reproduit');
+    const rec = await h.slash('backup', [{ name: 'restore', type: 1, options: [{ name: 'id', type: 3, value: id }] }], { as: 'owner', channel: 'staff' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    const go = await h.confirm(rec);
+    assert.ok(go && !h.isError(go), go ? h.replyText(go) : 'pas de confirmation');
+    for (let i = 0; i < 40 && queue.busy; i += 1) await sleep(250);
+    await h.settle({ timeout: 4_000 });
+
+    const named = (map, name) => [...map.values()].filter((x) => x.name === name);
+    assert.equal(named(h.fake.roles, 'Joueur').length, 1, '@Joueur en double');
+    assert.equal(named(h.fake.roles, 'Membre').length, 1, '@Membre en double');
+    assert.equal(named(h.fake.channels, 'général').length, 1, '#général en double');
+    assert.equal(named(h.fake.channels, 'règles').length, 1, '#règles en double');
+    const [general] = named(h.fake.channels, 'général');
+    assert.equal(h.client.services.config.get(h.guild.id).suggestions.channelId, general.id, 'configuration sur un salon disparu');
+    const [joueur] = named(h.fake.roles, 'Joueur');
+    assert.ok(rolesOf(h, IDS.users.member).includes(joueur.id), 'membre privé du rôle restauré');
+    // Une restauration suivante ne trouve aucun homonyme à départager.
+    const again = await backup.restore(h.guild, id);
+    assert.deepEqual(again.ambiguous, []);
+  } finally {
+    await h.close();
+  }
+});

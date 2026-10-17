@@ -4,6 +4,7 @@ const { ChannelType, OverwriteType, PermissionFlagsBits } = require('discord.js'
 const { shortId } = require('../utils/random');
 const { UserError } = require('../core/errors');
 const { AUTO_BACKUP_NAME } = require('../database/repositories/BackupRepository');
+const { storeFor: securStore } = require('./secur/structure');
 
 /**
  * Quotas par serveur, comptés séparément : les sauvegardes automatiques ne
@@ -333,6 +334,15 @@ class BackupService {
    */
   async #restore(guild, backup, id, { syncPermissions = false } = {}) {
     assertRestorePermissions(guild);
+    // Secur : sa file d'annulation (en pause pendant la restauration) retrouve ces copies par
+    // l'identifiant d'origine au lieu d'en recréer une seconde.
+    const remap = (oldId, newId) => {
+      try {
+        if (oldId && newId) securStore(guild.client).setRemap(guild.id, oldId, newId);
+      } catch {
+        /* au mieux */
+      }
+    };
     const data = backup.data;
     let createdRoles = 0;
     let createdChannels = 0;
@@ -361,7 +371,10 @@ class BackupService {
       if (findExistingRole(guild, role, claimedRoles)) continue; // homonymes : rien n'est recréé
       await guild.roles
         .create({ name: role.name, colors: { primaryColor: role.color ?? 0 }, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions), reason: `Restauration backup ${id}` })
-        .then(() => (createdRoles += 1), fail('role', role.name));
+        .then((r) => {
+          createdRoles += 1;
+          remap(role.id, r?.id);
+        }, fail('role', role.name));
     }
 
     // Rôles recréés : Discord les place tout en bas. Un seul appel remet l'ordre relatif
@@ -386,6 +399,7 @@ class BackupService {
         .create({ name: cat.name, type: ChannelType.GuildCategory, permissionOverwrites: resolveOverwrites(cat.overwrites, guild, skippedOverwrites, ctx) })
         .then((c) => {
           createdChannels += 1;
+          remap(cat.id, c?.id);
           if (c?.id) createdIds.add(c.id);
         }, fail('channel', cat.name));
     }
@@ -409,6 +423,7 @@ class BackupService {
         })
         .then((c) => {
           createdChannels += 1;
+          remap(ch.id, c?.id);
           return c;
         }, fail('channel', ch.name));
       if (created && ch.parentName && !parent) orphans.push([created, ch]);

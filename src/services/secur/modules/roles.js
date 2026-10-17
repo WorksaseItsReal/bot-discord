@@ -70,12 +70,16 @@ async function recreate(guild, snap, ctx, store) {
   const label = `@${snap.name ?? snap.id}`;
   const already = ctx.idMap?.get(snap.id);
   if (already && guild.roles.cache.has(already)) return { ok: true };
+  // Déjà recréé hors de cet incident (restauration /backup), suivi par l'identifiant d'origine
+  // (jamais par le nom) : cette copie reçoit membres, surcharges et références, sans doublon.
+  const twinId = store.remapOf(guild.id, snap.id);
+  const twin = twinId ? guild.roles.cache.get(twinId) ?? null : null;
   const protectedKind = St.protectedRoleKind(snap);
   if (protectedKind) return { ok: false, note: `Rôle ${label} jamais recréé : ${protectedKind === 'managed' ? 'rôle géré (bot, intégration ou booster)' : 'rôle d\'abonnement ou lié'}.` };
   if (snap.source !== 'cache') return { ok: false, note: `Rôle ${label} jamais recréé : aucun instantané fiable.` };
   const me = guild.members?.me;
   if (!me?.permissions?.has?.(PermissionFlagsBits.ManageRoles)) return { ok: false, note: `Rôle ${label} non recréé : il me manque « Gérer les rôles ».` };
-  if (!St.takeBudget(ctx, 'roles', St.MAX_ROLE_RECREATIONS)) return { ok: false, note: `Plafond de ${St.MAX_ROLE_RECREATIONS} recréations de rôles atteint pour cet incident : restaurez le reste avec /backup.` };
+  if (!twin && !St.takeBudget(ctx, 'roles', St.MAX_ROLE_RECREATIONS)) return { ok: false, note: `Plafond de ${St.MAX_ROLE_RECREATIONS} recréations de rôles atteint pour cet incident : restaurez le reste avec /backup.` };
   const botAdmin = me.permissions.has(PermissionFlagsBits.Administrator);
   const options = St.buildRoleCreate(snap, {
     botAdmin,
@@ -85,11 +89,13 @@ async function recreate(guild, snap, ctx, store) {
     maxPosition: (me.roles?.highest?.position ?? 1) - 1,
     reason: REASON,
   });
-  let role;
-  try {
-    role = await guild.roles.create(options);
-  } catch (e) {
-    return { ok: false, note: `Rôle ${label} non recréé : ${String(e?.message ?? e).slice(0, 120)}.` };
+  let role = twin;
+  if (!role) {
+    try {
+      role = await guild.roles.create(options);
+    } catch (e) {
+      return { ok: false, note: `Rôle ${label} non recréé : ${String(e?.message ?? e).slice(0, 120)}.` };
+    }
   }
   ctx.idMap?.set(snap.id, role.id);
   store.setRemap(guild.id, snap.id, role.id);
@@ -133,7 +139,7 @@ async function recreate(guild, snap, ctx, store) {
     d.total = (d.total ?? 0) + (snap.members?.length ?? 0);
     d.overwrites = (d.overwrites ?? 0) + overwrites;
     d.refs = (d.refs ?? 0) + configRefs;
-    d.lost = (d.lost ?? 0) + (!botAdmin && St.toBig(snap.permissions) !== options.permissions ? 1 : 0);
+    d.lost = (d.lost ?? 0) + (!twin && !botAdmin && St.toBig(snap.permissions) !== options.permissions ? 1 : 0);
   }, (d) => `Rôles recréés : ${d.count} (membres rendus : ${d.members}/${d.total}${d.total > St.MAX_ROLE_MEMBERS_RESTORED ? `, ${St.MAX_ROLE_MEMBERS_RESTORED} au plus par rôle` : ''} ; surcharges : ${d.overwrites} ; références de configuration : ${d.refs})${d.lost ? ` — ${d.lost} rôle(s) recréé(s) avec moins de permissions (je ne peux pas donner celles que je n'ai pas)` : ''}.`);
   return { ok: true };
 }

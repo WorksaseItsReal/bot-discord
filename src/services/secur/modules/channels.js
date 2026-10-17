@@ -64,6 +64,24 @@ async function recreate(guild, snap, ctx, store, executorId) {
   const label = `#${snap.name ?? snap.id}`;
   const already = ctx.idMap?.get(snap.id);
   if (already && guild.channels.cache.has(already)) return { ok: true };
+  // Déjà recréé hors de cet incident (restauration /backup, incident précédent), suivi par
+  // l'identifiant d'origine (jamais par le nom) : configuration rebranchée sur cette copie.
+  const twin = store.remapOf(guild.id, snap.id);
+  if (twin && guild.channels.cache.has(twin)) {
+    ctx.idMap?.set(snap.id, twin);
+    if (snap.bundle) {
+      try {
+        channelRemap.restore(snap.bundle, twin);
+        St.replugConfig(ctx.client?.services?.config, guild.id, snap.bundle.configPaths, snap.id, twin);
+      } catch {
+        /* au mieux */
+      }
+    }
+    St.noteSummary(ctx, 'channels:twin', (d) => {
+      d.count = (d.count ?? 0) + 1;
+    }, (d) => `Salons déjà restaurés (par /backup) : ${d.count} — configuration rebranchée sur ces copies, aucun doublon créé.`);
+    return { ok: true };
+  }
   if (snap.kind !== 'normal') {
     const why = snap.kind ? `c'était un ${St.KIND_LABELS[snap.kind] ?? snap.kind}` : 'son type (ticket, ModMail…) n\'a pas pu être déterminé';
     return { ok: false, note: `Salon ${label} jamais recréé : ${why}.` };
