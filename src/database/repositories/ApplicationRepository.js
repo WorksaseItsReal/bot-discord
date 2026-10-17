@@ -81,6 +81,7 @@ class ApplicationRepository {
     this.setCardStmt = db.prepare('UPDATE applications SET card_channel_id = ?, card_message_id = ? WHERE id = ? AND guild_id = ?');
     this.setNoteStmt = db.prepare('UPDATE applications SET note = ? WHERE id = ? AND guild_id = ?');
     this.setInterviewStmt = db.prepare('UPDATE applications SET interview_channel_id = ? WHERE id = ? AND guild_id = ?');
+    this.byInterviewStmt = db.prepare('SELECT * FROM applications WHERE guild_id = ? AND interview_channel_id = ? ORDER BY id DESC LIMIT 1');
     this.deleteAppStmt = db.prepare('DELETE FROM applications WHERE id = ? AND guild_id = ?');
   }
 
@@ -225,6 +226,12 @@ class ApplicationRepository {
 
   setInterview(guildId, id, channelId) {
     this.setInterviewStmt.run(channelId, id, guildId);
+  }
+
+  /** Candidature dont l'entretien a lieu dans ce salon (ticket ou fil), ou null. */
+  getByInterviewChannel(guildId, channelId) {
+    const row = channelId ? this.byInterviewStmt.get(guildId, channelId) : null;
+    return row ? this.getApplication(guildId, row.id) : null;
   }
 
   /** Supprime une candidature (carte jamais publiée). */

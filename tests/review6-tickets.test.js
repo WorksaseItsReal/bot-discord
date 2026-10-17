@@ -148,3 +148,18 @@ test('R66 transcripts : messages transférés (texte et fichiers) repris par la 
   assert.match(line, /preuve\.png/);
   assert.deepEqual(attachmentsOf(message).map((a) => a.name), ['preuve.png']);
 });
+
+// ---------------------------------------------------------------- R71
+
+test('R71 carte de candidature : lien d\'entretien seulement si son salon existe, sinon « Entretien » de retour', () => {
+  const { ApplicationService } = require('../src/services/ApplicationService');
+  const service = new ApplicationService({ client: {}, applications: {}, config: { get: () => ({}) }, logging: null });
+  const app = { id: 3, guild_id: 'g', form_id: 1, form_name: 'F', user_id: USER, status: 'pending', created_at: Date.now(), answers: [], interview_channel_id: '400000000000000003' };
+  const ids = (payload) => payload.components.flatMap((r) => json(r).components.map((c) => c.custom_id ?? c.url));
+  const gone = service.cardPayload({ id: 'g', channels: { cache: new Collection() } }, app);
+  assert.ok(ids(gone).includes('cmd:candidatures:interview:3'), 'bouton « Entretien » masqué après la fin de l\'entretien');
+  assert.doesNotMatch(JSON.stringify(json(gone.embeds[0])), /400000000000000003/, 'lien mort');
+  const live = service.cardPayload({ id: 'g', channels: { cache: new Collection([['400000000000000003', {}]]) } }, app);
+  assert.ok(ids(live).some((x) => /400000000000000003/.test(x ?? '')));
+  assert.ok(!ids(live).includes('cmd:candidatures:interview:3'));
+});

@@ -122,11 +122,11 @@ module.exports = {
       return interaction.editReply(await tickets.transcriptPayload(interaction.channel, { userId: interaction.user.id }));
     }
     if (action === 'close') {
-      tickets.assertParticipant(interaction.member, record);
+      tickets.assertCanClose(interaction.member, record);
       return interaction.reply(closeConfirmation(client, interaction.guild ?? interaction.guildId));
     }
     if (action === 'closeconfirm') {
-      tickets.assertParticipant(interaction.member, record);
+      tickets.assertCanClose(interaction.member, record);
       // Un second clic pendant le délai est refusé par le service (UserError).
       await tickets.close(interaction.channel, interaction.user, {
         delayMs: 5000,

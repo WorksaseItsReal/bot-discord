@@ -493,3 +493,52 @@ test('R70 tickets fantômes : réinvitation (guildCreate) et salon supprimé à 
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R71
+
+test('R71 entretien de candidature : fermé par l\'équipe seulement, sans notation ; la carte retrouve « Entretien »', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const service = h.client.services.applications;
+    const form = service.createForm(h.guild.id, { name: 'Recrutement', questions: [{ label: 'Âge ?', long: false }] });
+    service.updateForm(h.guild.id, form.id, { reviewChannelId: IDS.channels.staff, panelChannelId: IDS.channels.general, open: true });
+    const { form: published } = await service.publishPanel(h.guild, service.form(h.guild.id, form.id));
+    let mark = h.fake.messageLog.length;
+    const open = await h.click(h.message(published.panel_message_id), `cmd:candidature:apply:${form.id}`, { as: 'member' });
+    await h.submitModal(open, { q0: '25 ans' }, { as: 'member' });
+    const cardMsg = messagesIn(h, IDS.channels.staff, mark).find((m) => m.author.id === h.client.user.id);
+    const app = h.client.repositories.applications.listPending(h.guild.id)[0];
+    const before = new Set(h.fake.channels.keys());
+    const iv = await h.click(cardMsg, `cmd:candidatures:interview:${app.id}`, { as: 'admin' });
+    assert.ok(!h.isError(iv), h.replyText(iv));
+    const ticketId = [...h.fake.channels.keys()].find((k) => !before.has(k));
+    assert.ok(h.client.repositories.tickets.getByChannel(ticketId), 'entretien non ouvert en ticket');
+    const welcome = messagesIn(h, ticketId).find((m) => buttonIds(m).includes('ticket:close'));
+
+    // Le candidat ne peut pas clore son entretien (bouton ni commande).
+    const self = await h.click(welcome, 'ticket:close', { as: 'member' });
+    assert.ok(h.isError(self), 'le candidat a pu fermer son entretien');
+    const selfCmd = await h.slash('ticket', sub('close'), { as: 'member', channel: ticketId });
+    assert.ok(h.isError(selfCmd));
+
+    // L'équipe ferme : pas de MP de notation au candidat ; la carte propose à nouveau « Entretien ».
+    mark = h.fake.messageLog.length;
+    const close = await h.click(welcome, 'ticket:close', { as: 'mod' });
+    await h.click(h.message(close.original), 'ticket:closeconfirm', { as: 'mod' });
+    await sleep(5_400);
+    await h.settle();
+    assert.ok(!h.fake.channels.has(ticketId));
+    const dms = messagesIn(h, h.dmChannel('member').id, mark);
+    assert.ok(!dms.some((m) => buttonIds(m).some((b) => b.startsWith('cmd:tickets:rate:'))), 'MP de notation envoyé pour un entretien');
+    await h.waitFor(() => buttonIds(h.message(cardMsg.id)).includes(`cmd:candidatures:interview:${app.id}`));
+    const card = h.message(cardMsg.id);
+    assert.ok(buttonIds(card).includes(`cmd:candidatures:interview:${app.id}`), `boutons : ${buttonIds(card)}`);
+    assert.doesNotMatch(embedText(card), new RegExp(`<#${ticketId}>`), 'lien mort vers l\'entretien');
+    const again = await h.click(card, `cmd:candidatures:interview:${app.id}`, { as: 'admin' });
+    assert.ok(!h.isError(again), h.replyText(again));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

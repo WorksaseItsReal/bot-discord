@@ -280,6 +280,8 @@ test('cardPayload : limites Discord avec 5 réponses longues ; actions retirées
   const total = (e.title?.length ?? 0) + (e.description?.length ?? 0) + (e.footer?.text?.length ?? 0) + (e.author?.name?.length ?? 0) + e.fields.reduce((n, f) => n + f.name.length + f.value.length, 0);
   assert.ok(total <= 6000, `embed de ${total} caractères`);
   for (const r of components) for (const c of json(r).components) assert.ok(!c.custom_id || c.custom_id.length <= 100);
+  // Revue 6 (R71) : le lien vers l'entretien n'apparaît que si son salon existe encore.
+  guild.channels.cache.set('400000000000000003', { id: '400000000000000003', type: ChannelType.GuildText });
   const decided = service.cardPayload(guild, { ...app, status: 'rejected', reviewer_id: ADMIN, decided_at: Date.now(), reason: 'Non', interview_channel_id: '400000000000000003' });
   const ids = decided.components.flatMap((r) => json(r).components.map((c) => c.custom_id ?? c.url));
   assert.ok(!ids.some((x) => /accept|reject|interview:/.test(x ?? '')), 'actions encore proposées');

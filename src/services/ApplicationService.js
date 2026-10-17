@@ -179,6 +179,17 @@ class ApplicationService {
     this.opening = new Set();
     /** Dernier ping du rôle par formulaire (ms) : un candidat ne peut pas pinguer l'équipe en boucle. */
     this.lastPings = new Map();
+    // Tickets d'entretien : reconnus par le service des tickets (fermeture réservée à l'équipe,
+    // sans notation) ; leur fermeture remet à jour la carte de la candidature.
+    if (tickets) {
+      tickets.interviews = {
+        lookup: (guildId, channelId) => this.applications.getByInterviewChannel?.(guildId, channelId) ?? null,
+        closed: async (guild, app) => {
+          const fresh = this.applications.getApplication(guild.id, app.id) ?? app;
+          await this.refreshCard(guild, fresh);
+        },
+      };
+    }
   }
 
   // ------------------------------------------------------------ formulaires
@@ -444,6 +455,8 @@ class ApplicationService {
    */
   cardPayload(guild, app, { fit = false } = {}) {
     const st = STATUS[app.status] ?? STATUS.pending;
+    // Entretien terminé (salon supprimé) : ni lien mort, et le bouton « Entretien » revient.
+    const interviewOpen = Boolean(app.interview_channel_id && guild.channels?.cache?.has?.(app.interview_channel_id));
     const decided = app.status !== 'pending' && app.decided_at;
     const by = app.status === 'withdrawn' ? ' par le candidat' : app.reviewer_id ? ` par <@${app.reviewer_id}>` : '';
     const embed = card({
@@ -453,7 +466,7 @@ class ApplicationService {
       title: `Candidature #${app.id} · ${truncate(app.form_name, 100)}`,
       description: [
         `${st.emoji} **${st.label}**${decided ? `${by} ${discordTimestamp(app.decided_at, 'R')}` : ''}`,
-        app.interview_channel_id ? `${INTERVIEW_ICON} Entretien : <#${app.interview_channel_id}>` : null,
+        interviewOpen ? `${INTERVIEW_ICON} Entretien : <#${app.interview_channel_id}>` : null,
       ],
       fields: [
         field(ICONS.user, 'Candidat', `<@${app.user_id}>\n${code(app.user_id)}`),
@@ -468,7 +481,7 @@ class ApplicationService {
     });
     const pending = app.status === 'pending';
     const act = (action, label, emoji, style) => actionButton({ command: 'candidatures', action, args: [app.id], label, emoji, style });
-    const interview = app.interview_channel_id ? linkButton('Entretien', `https://discord.com/channels/${guild.id}/${app.interview_channel_id}`, INTERVIEW_ICON) : null;
+    const interview = interviewOpen ? linkButton('Entretien', `https://discord.com/channels/${guild.id}/${app.interview_channel_id}`, INTERVIEW_ICON) : null;
     const components = buttonRows(
       pending ? act('accept', 'Accepter', ICONS.success, ButtonStyle.Success) : null,
       pending ? act('reject', 'Refuser', ICONS.error, ButtonStyle.Danger) : null,

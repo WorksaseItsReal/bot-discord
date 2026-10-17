@@ -247,6 +247,12 @@ class TicketService {
     this.logging = logging;
     /** Notation des tickets (TicketRatingService, facultatif) : prévenu à chaque fermeture. */
     this.ratings = ratings;
+    /**
+     * Tickets d'entretien de candidature (branché par ApplicationService) :
+     * lookup(guildId, channelId) → candidature | null ; closed(guild, candidature) après suppression.
+     * @type {{ lookup: (guildId: string, channelId: string) => object|null, closed: (guild: object, app: object) => Promise<void> } | null}
+     */
+    this.interviews = null;
     /** Créations en cours (`guildId:userId`) : évite les doublons sur double-clic. */
     this.creating = new Set();
     /** Salons de ticket en cours de fermeture. */
@@ -315,6 +321,23 @@ class TicketService {
   assertParticipant(member, ticket) {
     if (member?.id === ticket.user_id || this.isStaff(member)) return;
     throw new UserError('Seuls l\'auteur du ticket et le support peuvent faire cela.');
+  }
+
+  /** Candidature dont ce ticket est l'entretien, ou null. */
+  interviewOf(ticket) {
+    try {
+      return this.interviews?.lookup(ticket.guild_id, ticket.channel_id) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fermeture : auteur ou support ; un entretien de candidature n'est clos que par l'équipe. */
+  assertCanClose(member, ticket) {
+    if (member?.id === ticket.user_id && !this.isStaff(member) && this.interviewOf(ticket)) {
+      throw new UserError('Cet entretien de candidature sera clos par l\'équipe.');
+    }
+    this.assertParticipant(member, ticket);
   }
 
   /**
@@ -731,11 +754,15 @@ class TicketService {
     // d'archive seulement (ni statistique ni MP de notation en double).
     const alreadyClosed = ticket.status === 'closed';
     const closedAt = alreadyClosed ? ticket.closed_at ?? Date.now() : Date.now();
+    // Entretien de candidature : ni statistique de support ni MP de notation au candidat.
+    const interview = this.interviewOf(ticket);
     if (!alreadyClosed) {
       this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
-      this.bumpStat(channel.guild.id, 'closed');
-      // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
-      this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
+      if (!interview) {
+        this.bumpStat(channel.guild.id, 'closed');
+        // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
+        this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
+      }
     }
 
     if (cfg.logChannel) {
@@ -779,6 +806,8 @@ class TicketService {
     }
     this.tickets.delete(channel.id);
     await channel.delete().catch(() => {});
+    // Carte de la candidature remise à jour (plus de lien mort, bouton « Entretien » de retour).
+    if (interview) await Promise.resolve(this.interviews?.closed(channel.guild, interview)).catch(() => {});
   }
 
   /**

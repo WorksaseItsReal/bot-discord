@@ -63,7 +63,7 @@ module.exports = {
     if (!record) throw new UserError('Cette commande doit être utilisée dans un salon de ticket.');
 
     if (sub === 'close') {
-      tickets.assertParticipant(interaction.member, record);
+      tickets.assertCanClose(interaction.member, record);
       return tickets.close(interaction.channel, interaction.user, {
         delayMs: 5000,
         onAccepted: () =>
