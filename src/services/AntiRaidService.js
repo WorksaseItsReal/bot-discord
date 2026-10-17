@@ -48,6 +48,13 @@ const DANGEROUS_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.ManageChannels,
   PermissionFlagsBits.BanMembers,
   PermissionFlagsBits.ManageGuild,
+  // Autres outils de nuke : expulsions, exclusions, webhooks (spam), émojis/autocollants, purge, pings de masse.
+  PermissionFlagsBits.KickMembers,
+  PermissionFlagsBits.ModerateMembers,
+  PermissionFlagsBits.ManageWebhooks,
+  PermissionFlagsBits.ManageGuildExpressions,
+  PermissionFlagsBits.ManageMessages,
+  PermissionFlagsBits.MentionEveryone,
 ]);
 
 const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements', kick: 'Expulsions' };
@@ -579,11 +586,16 @@ class AntiRaidService {
         return { ok: false, note: 'Le retrait des rôles a échoué (permission ou hiérarchie).' };
       }
       const dangerous = remaining.filter((r) => r.permissions?.any?.(DANGEROUS_PERMISSIONS));
-      if (dangerous.length) {
-        return {
-          ok: false,
-          note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${dangerous.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)).join(', ')}.`,
-        };
+      // Surcharges de salon propres à l'auteur : le retrait des rôles ne les touche pas.
+      const overwrites = [...(guild.channels?.cache?.values?.() ?? [])]
+        .filter((c) => c.permissionOverwrites?.cache?.get?.(member.id)?.allow?.any?.(DANGEROUS_PERMISSIONS));
+      if (dangerous.length || overwrites.length) {
+        const via = [
+          ...dangerous.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)),
+          ...overwrites.slice(0, 5).map((c) => `la surcharge de ${c}`),
+          overwrites.length > 5 ? `${overwrites.length - 5} autre(s) salon(s)` : null,
+        ].filter(Boolean);
+        return { ok: false, note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${via.join(', ')}.` };
       }
       return { ok: true };
     }

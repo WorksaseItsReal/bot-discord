@@ -255,3 +255,58 @@ test('R31 : un rôle géré déjà whitelisté (ancienne configuration) ne donne
   await antiraidCmd.buttons.wlroles(w.interaction([TRUSTED]), w.client);
   assert.deepEqual(w.config.get(G).whitelist.roles, [TRUSTED]);
 });
+
+// ---------------------------------------------------------------- R33
+
+const { PermissionFlagsBits: P } = require('discord.js');
+
+/** Auteur d'un nuke dont un rôle (ou une surcharge de salon) échappe au retrait des rôles. */
+function stripWorld({ highPerms = 0n, overwrite = null } = {}) {
+  const alerts = [];
+  const role = (id, perms, editable) => ({ id, editable, permissions: new PermissionsBitField(perms), toString: () => `<@&${id}>` });
+  const everyone = role(G, 0n, false);
+  const roles = new Collection([[G, everyone], ['r-mod', role('r-mod', P.ManageChannels, true)]]);
+  if (highPerms) roles.set('r-haut', role('r-haut', highPerms, false));
+  let removed = null;
+  const member = {
+    id: 'nuker',
+    user: { id: 'nuker', tag: 'nuker', toString: () => '<@nuker>', displayAvatarURL: () => null },
+    roles: { cache: roles, remove: async (r) => { removed = [...r.keys()]; } },
+  };
+  const channels = new Collection();
+  if (overwrite) {
+    channels.set('c1', { id: 'c1', toString: () => '<#c1>', permissionOverwrites: { cache: new Collection([['nuker', { id: 'nuker', type: 1, allow: new PermissionsBitField(overwrite) }]]) } });
+  }
+  const guild = { id: G, ownerId: 'owner', members: { fetch: async () => member, cache: new Map() }, roles: { everyone, cache: roles }, channels: { cache: channels } };
+  const cfg = { antiraid: { enabled: true, channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, kickThreshold: 0, destructiveWindowSeconds: 10, punishExecutor: 'strip' }, whitelist: { users: [], roles: [] } };
+  const service = new AntiRaidService({ client: { user: { id: 'bot' }, services: {}, channels: { fetch: async () => null } }, config: { get: () => cfg }, logging: { send: async (_g, _c, e) => { alerts.push(json(e)); return true; } } });
+  const run = async () => {
+    for (let i = 0; i < 3; i += 1) await service.handleDestructive(guild, 'nuker', 'channelDelete');
+    return { removed: () => removed, alert: alerts[0] };
+  };
+  return { run };
+}
+
+const fieldOf = (alert, re) => alert?.fields?.find((f) => re.test(f.name))?.value ?? null;
+
+test('R33 : « Rôles retirés » non déclaré réussi quand l\'auteur garde Expulser, Webhooks, Expressions, Exclure', async () => {
+  const { run } = stripWorld({ highPerms: P.KickMembers | P.ManageWebhooks | P.ManageGuildExpressions | P.ModerateMembers });
+  const { removed, alert } = await run();
+  assert.deepEqual(removed(), ['r-mod']);
+  assert.match(fieldOf(alert, /Sanction/), /Aucune/, 'sanction déclarée réussie');
+  assert.match(fieldOf(alert, /Attention/) ?? '', /r-haut/);
+});
+
+test('R33 : surcharge de salon propre à l\'auteur (Gérer les salons) signalée après le retrait des rôles', async () => {
+  const { run } = stripWorld({ overwrite: P.ManageChannels | P.ViewChannel });
+  const { alert } = await run();
+  assert.match(fieldOf(alert, /Sanction/), /Aucune/, 'sanction déclarée réussie');
+  assert.match(fieldOf(alert, /Attention/) ?? '', /<#c1>/);
+});
+
+test('R33 : retrait complet → sanction réussie, sans note', async () => {
+  const { run } = stripWorld({ overwrite: P.ViewChannel | P.SendMessages });
+  const { alert } = await run();
+  assert.match(fieldOf(alert, /Sanction/), /Rôles retirés/);
+  assert.equal(fieldOf(alert, /Attention/), null);
+});
