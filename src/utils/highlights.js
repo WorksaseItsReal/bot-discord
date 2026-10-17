@@ -1,5 +1,7 @@
 'use strict';
 
+const { neutralizeMaskedLinks } = require('./safeText');
+
 /**
  * Alertes de mots-clés (/alertes) : briques pures (normalisation, index, recherche).
  * Aucun accès Discord ni base ici.
@@ -107,9 +109,13 @@ function findMatches(index, text) {
   return hits;
 }
 
-/** Extrait cité d'un message (« > » devant chaque ligne), borné en lignes et en caractères. Pur. */
+/**
+ * Extrait cité d'un message (« > » devant chaque ligne), borné en lignes et en caractères.
+ * Liens masqués neutralisés : relayé en MP par le bot, un « [texte](url) » ne doit jamais
+ * devenir un lien déguisé. Pur.
+ */
 function quoteExcerpt(text, { maxChars = 700, maxLines = 8 } = {}) {
-  const clean = String(text ?? '').replace(/```/g, 'ˋˋˋ').trim();
+  const clean = neutralizeMaskedLinks(String(text ?? '').replace(/```/g, 'ˋˋˋ').trim());
   if (!clean) return '';
   const lines = clean.split('\n');
   let out = lines.slice(0, maxLines).map((l) => `> ${l}`).join('\n');

@@ -17,6 +17,7 @@ const Welcome = require('../src/services/WelcomeService');
 const Levels = require('../src/services/LevelService');
 const Birthdays = require('../src/services/BirthdayService');
 const { safeName, neutralizeMaskedLinks } = require('../src/utils/safeText');
+const { quoteExcerpt } = require('../src/utils/highlights');
 
 const GUILD = '100000000000000001';
 
@@ -144,4 +145,12 @@ test('R82 reroll : double clic ou deux organisateurs → un seul nouveau tirage,
   assert.match(results.find((r) => r.status === 'rejected').reason.message, /vient d'être fait|patientez/i);
   assert.equal(sent.length - before, 1, 'deux annonces de gagnants (deux pings)');
   assert.equal(repo.winners(id).length, 2, 'gagnants mémorisés : premier tirage + un reroll');
+});
+
+// ---------------------------------------------------------------- R114 : extrait des alertes
+
+test('R114 alertes : l\'extrait relayé en MP ne rend jamais un lien masqué cliquable', () => {
+  const out = quoteExcerpt(`gadget ici ${EVIL}\net [support](https://discord-help.example.ru)`);
+  assert.ok(!clickable(out), out);
+  assert.match(out, /^> gadget ici/);
 });
