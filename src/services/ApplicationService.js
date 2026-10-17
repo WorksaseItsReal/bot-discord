@@ -177,6 +177,8 @@ class ApplicationService {
     this.tickets = tickets;
     /** Entretiens en cours d'ouverture (`guildId:id`) : anti double clic. */
     this.opening = new Set();
+    /** Panneaux en cours de publication (`guildId:formId`) : un double clic ne publie qu'un panneau. */
+    this.publishing = new Set();
     /** Dernier ping du rôle par formulaire (ms) : un candidat ne peut pas pinguer l'équipe en boucle. */
     this.lastPings = new Map();
     // Tickets d'entretien : reconnus par le service des tickets (fermeture réservée à l'équipe,
@@ -324,7 +326,19 @@ class ApplicationService {
    * Publie (ou met à jour) le panneau dans son salon.
    * @returns {Promise<{ form: object, updated: boolean, url: string }>}
    */
-  async publishPanel(guild, form) {
+  async publishPanel(guild, current) {
+    const key = `${guild.id}:${current.id}`;
+    if (this.publishing.has(key)) throw new UserError('Le panneau est déjà en cours de publication : patientez un instant.');
+    this.publishing.add(key);
+    try {
+      // Relu : une publication précédente a pu mémoriser son panneau entre-temps.
+      return await this.#publishPanel(guild, this.applications.getForm(guild.id, current.id) ?? current);
+    } finally {
+      this.publishing.delete(key);
+    }
+  }
+
+  async #publishPanel(guild, form) {
     if (!form.panel_channel_id) throw new UserError('Choisissez d\'abord le salon du panneau.');
     const channel = guild.channels?.cache?.get(form.panel_channel_id) ?? (await guild.channels?.fetch?.(form.panel_channel_id).catch(() => null));
     if (!channel?.send || !TEXT_TYPES.includes(channel.type)) throw new UserError('Le salon du panneau est introuvable : choisissez-en un autre.');

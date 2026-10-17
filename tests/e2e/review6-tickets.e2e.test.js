@@ -622,3 +622,39 @@ test('R74 salon des transcripts visible par @everyone : refusé (/tickets et /mo
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R108
+
+test('R108 double clic sur « Publier » (panneaux /tickets et /candidatures) : un seul panneau, mémorisé', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.fake.latency = 3;
+    const panelsIn = (mark, prefix) => messagesIn(h, IDS.channels.general, mark).filter((m) => m.author.id === h.client.user.id && buttonIds(m).some((b) => b.startsWith(prefix)));
+    h.configure({ tickets: { panelChannelId: IDS.channels.general, panelMessageId: null } });
+    const dash = await h.slash('tickets');
+    let mark = h.fake.messageLog.length;
+    const dmsg = h.messagesOf(dash).at(-1);
+    await Promise.all([h.click(dmsg, 'cmd:tickets:publish'), h.click(dmsg, 'cmd:tickets:publish')]);
+    await h.settle();
+    const panels = panelsIn(mark, 'ticket:create');
+    assert.equal(panels.length, 1, `${panels.length} panneaux de tickets publiés`);
+    assert.equal(h.client.services.config.get(h.guild.id).tickets.panelMessageId, panels[0].id);
+
+    const service = h.client.services.applications;
+    const form = service.createForm(h.guild.id, { name: 'Recrutement', questions: [{ label: 'Âge ?', long: false }] });
+    service.updateForm(h.guild.id, form.id, { reviewChannelId: IDS.channels.staff, panelChannelId: IDS.channels.general, open: true });
+    const home = await h.slash('candidatures');
+    const formV = await h.click(h.messagesOf(home).at(-1), 'cmd:candidatures:pick', { values: [String(form.id)] });
+    const fmsg = h.messagesOf(formV).at(-1);
+    mark = h.fake.messageLog.length;
+    await Promise.all([h.click(fmsg, `cmd:candidatures:publish:${form.id}`), h.click(fmsg, `cmd:candidatures:publish:${form.id}`)]);
+    await h.settle();
+    const cpanels = panelsIn(mark, `cmd:candidature:apply:${form.id}`);
+    assert.equal(cpanels.length, 1, `${cpanels.length} panneaux de candidature publiés`);
+    assert.equal(service.form(h.guild.id, form.id).panel_message_id, cpanels[0].id);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

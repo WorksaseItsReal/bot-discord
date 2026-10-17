@@ -35,6 +35,8 @@ const { describeApiError } = require('../../core/apiErrors');
  */
 
 const SECTION = 'tickets';
+/** Publications du panneau en cours (serveur) : un double clic ne publie jamais deux panneaux. */
+const publishing = new Set();
 const TEXT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
 const MAX_STAFF = 10;
 const MAX_LIMIT = 10;
@@ -554,6 +556,41 @@ const textValue = (interaction, id) => {
   }
 };
 
+/** Publie (ou met à jour) le panneau des tickets (verrou tenu par l'appelant). */
+async function publishPanel(interaction, client, cfg) {
+  await interaction.deferUpdate();
+  const guild = interaction.guild;
+  const channel = guild.channels?.cache?.get(cfg.panelChannelId) ?? (await guild.channels?.fetch?.(cfg.panelChannelId).catch(() => null));
+  let notice;
+  if (!channel?.send) {
+    notice = `${ICONS.error} Le salon du panneau est introuvable : choisissez-en un autre.`;
+  } else {
+    const payload = client.services.tickets.panel(guild);
+    let message = null;
+    let updated = false;
+    let failure = null;
+    const remember = (err) => {
+      failure = err;
+      return null;
+    };
+    if (cfg.panelMessageId) {
+      const existing = await channel.messages?.fetch?.(cfg.panelMessageId).catch(() => null);
+      if (existing?.edit) {
+        message = await existing.edit(payload).catch(remember);
+        updated = Boolean(message);
+      }
+    }
+    if (!message) message = await channel.send(payload).catch(remember);
+    if (message?.id) {
+      client.services.config.update(interaction.guildId, { tickets: { panelMessageId: message.id } });
+      notice = `${ICONS.success} Panneau ${updated ? 'mis à jour' : 'publié'} dans ${channel}.`;
+    } else {
+      notice = publishFailure(channel, failure);
+    }
+  }
+  await interaction.editReply(render(client, guild, 'home', notice));
+}
+
 // ---------------------------------------------------------------- commande
 
 module.exports = {
@@ -690,37 +727,14 @@ module.exports = {
       if (!cfg.panelChannelId) throw new UserError('Choisissez d\'abord le salon du panneau (section **Panneau**).');
       const cached = interaction.guild.channels?.cache?.get(cfg.panelChannelId);
       if (cached) assertAuthorCanPost(interaction, cached);
-      await interaction.deferUpdate();
-      const guild = interaction.guild;
-      const channel = guild.channels?.cache?.get(cfg.panelChannelId) ?? (await guild.channels?.fetch?.(cfg.panelChannelId).catch(() => null));
-      let notice;
-      if (!channel?.send) {
-        notice = `${ICONS.error} Le salon du panneau est introuvable : choisissez-en un autre.`;
-      } else {
-        const payload = client.services.tickets.panel(guild);
-        let message = null;
-        let updated = false;
-        let failure = null;
-        const remember = (err) => {
-          failure = err;
-          return null;
-        };
-        if (cfg.panelMessageId) {
-          const existing = await channel.messages?.fetch?.(cfg.panelMessageId).catch(() => null);
-          if (existing?.edit) {
-            message = await existing.edit(payload).catch(remember);
-            updated = Boolean(message);
-          }
-        }
-        if (!message) message = await channel.send(payload).catch(remember);
-        if (message?.id) {
-          client.services.config.update(interaction.guildId, { tickets: { panelMessageId: message.id } });
-          notice = `${ICONS.success} Panneau ${updated ? 'mis à jour' : 'publié'} dans ${channel}.`;
-        } else {
-          notice = publishFailure(channel, failure);
-        }
+      // Double clic : une seule publication à la fois (sinon deux panneaux, dont un orphelin).
+      if (publishing.has(interaction.guildId)) throw new UserError('Le panneau est déjà en cours de publication : patientez un instant.');
+      publishing.add(interaction.guildId);
+      try {
+        await publishPanel(interaction, client, cfg);
+      } finally {
+        publishing.delete(interaction.guildId);
       }
-      await interaction.editReply(render(client, guild, 'home', notice));
     },
     /** Ouvre le formulaire des motifs. */
     async reasons(interaction, client) {
