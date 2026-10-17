@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 const { card, field, ICONS, status, subtext } = require('../../utils/ui');
+const { truncate } = require('../../utils/embeds');
 const { UserError } = require('../../core/errors');
 
 /** customId du formulaire de réponse (routé vers buttons.send par components/cmd.js). */
@@ -10,6 +11,8 @@ const REPLY_MODAL_ID = 'cmd:modmail:send';
 module.exports = {
   category: 'tickets',
   assertStaffRole,
+  /** Choix du serveur à contacter : menu envoyé en MP (hors serveur). */
+  dmButtons: ['pick'],
   data: new SlashCommandBuilder()
     .setName('modmail')
     .setDescription('Système ModMail (DM ↔ staff).')
@@ -87,6 +90,26 @@ module.exports = {
   },
 
   buttons: {
+    /**
+     * cmd:modmail:pick — choix du serveur à contacter (menu en MP, membre de plusieurs serveurs).
+     * Le service revérifie que le membre fait partie du serveur choisi et que le ModMail y est actif.
+     */
+    async pick(interaction, client) {
+      if (interaction.inGuild?.()) throw new UserError('Ce menu ne s\'utilise qu\'en message privé.');
+      const guildId = interaction.values?.[0];
+      if (!/^\d{17,20}$/.test(guildId ?? '')) throw new UserError('Ce menu est invalide.');
+      await interaction.deferUpdate();
+      const { guild, failed } = await client.services.modmail.choose(interaction.user.id, guildId);
+      await interaction.editReply({
+        embeds: [
+          failed
+            ? status.warn(`Serveur choisi : **${truncate(guild.name, 100)}**, mais ${failed} message(s) n'ont pas pu être transmis. Réessayez dans quelques minutes.`, 'Message non transmis')
+            : status.ok(`Serveur choisi : **${truncate(guild.name, 100)}**. Votre message a été transmis à son équipe.`, 'Serveur choisi'),
+        ],
+        components: [],
+      });
+    },
+
     /** cmd:modmail:reply — ouvre le formulaire de réponse (staff uniquement). */
     async reply(interaction, client) {
       const { modmail } = client.services;

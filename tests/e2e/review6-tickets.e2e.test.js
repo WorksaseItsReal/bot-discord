@@ -298,3 +298,21 @@ test('R64 publication par procuration : panneaux /tickets, /candidatures et test
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R65
+
+test('R65 ModMail : le sélecteur de serveur fonctionne en MP (routeur, refus propre d\'un choix expiré)', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const { selectMenu, row } = require('../../src/utils/components');
+    const user = await h.client.users.fetch(IDS.users.target);
+    const sent = await user.send({ content: 'Choix', components: [row(selectMenu({ id: 'cmd:modmail:pick', placeholder: 'Serveur', options: [{ value: h.guild.id, label: 'Serveur' }] }))] });
+    const rec = await h.click(h.message(sent.id), 'cmd:modmail:pick', { as: 'target', values: [h.guild.id] });
+    assert.ok(h.isError(rec), h.replyText(rec));
+    assert.match(h.replyText(rec), /expiré/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
