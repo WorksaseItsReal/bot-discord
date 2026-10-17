@@ -400,3 +400,69 @@ test('R93 : /serverinfo « Salons » ne liste pas les catégories privées à un
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* R94 : /voice respecte les surcharges du vocal concerné               */
+/* ------------------------------------------------------------------ */
+
+async function privateVoice(h) {
+  const g = h.guild;
+  const priv = await g.channels.create({
+    name: 'Direction', type: ChannelType.GuildVoice,
+    permissionOverwrites: [
+      { id: g.id, type: OverwriteType.Role, deny: P.ViewChannel },
+      { id: IDS.roles.mod, type: OverwriteType.Role, deny: P.ViewChannel | P.MoveMembers | P.Connect | P.MuteMembers },
+      { id: IDS.users.target, type: OverwriteType.Member, allow: P.ViewChannel | P.Connect },
+    ],
+  });
+  await h.settle();
+  await h.voice('target', priv.id);
+  return priv;
+}
+const voiceCalls = (h) => h.fake.calls.filter((c) => c.method === 'PATCH' && c.route?.includes(`/members/${IDS.users.target}`) && c.body && ('channel_id' in c.body || 'mute' in c.body));
+
+test('R94 : /voice kick, move, mute et cleanup refusés dans un vocal fermé au modérateur', async () => {
+  const h = await setup();
+  try {
+    const priv = await privateVoice(h);
+    for (const [name, options] of [
+      ['kick', [opt('membre', 6, IDS.users.target)]],
+      ['disconnect', [opt('membre', 6, IDS.users.target)]],
+      ['move', [opt('membre', 6, IDS.users.target), opt('salon', 7, IDS.channels.voice)]],
+      ['mute', [opt('membre', 6, IDS.users.target)]],
+      ['cleanup', [opt('salon', 7, priv.id)]],
+    ]) {
+      const rec = await h.slash('voice', sub(name, options), { as: 'mod' });
+      await h.settle();
+      assert.ok(h.isError(rec) || /Vous ne pouvez pas|Aucun membre/.test(h.replyText(rec)), `/voice ${name} : ${h.replyText(rec).slice(0, 120)}`);
+    }
+    assert.deepEqual(voiceCalls(h), [], 'action envoyée à Discord dans un vocal fermé au modérateur');
+    assert.equal(h.member('target').voice.channelId, priv.id);
+  } finally {
+    await h.close();
+  }
+});
+
+test('R94 : bouton « Ramener » revérifie les droits dans le vocal où se trouve le membre', async () => {
+  const h = await setup();
+  try {
+    const g = h.guild;
+    const salle2 = await g.channels.create({ name: 'Salle 2', type: ChannelType.GuildVoice });
+    await h.settle();
+    await h.voice('target', IDS.channels.voice);
+    // Un administrateur déplace la cible : la carte offre « Ramener » (vers le vocal d'origine).
+    const moved = await h.slash('voice', sub('move', [opt('membre', 6, IDS.users.target), opt('salon', 7, salle2.id)]), { as: 'admin' });
+    await h.settle();
+    assert.match(h.replyText(moved), /Membre déplacé/);
+    // La cible rejoint ensuite un vocal fermé au modérateur, qui clique « Ramener ».
+    const priv = await privateVoice(h);
+    const before = voiceCalls(h).length;
+    const click = await h.click(h.messagesOf(moved)[0], `cmd:voice:moveback:${IDS.users.target}:${IDS.channels.voice}:${IDS.users.admin}`, { as: 'mod' });
+    await h.settle();
+    assert.ok(h.isError(click), h.replyText(click).slice(0, 120));
+    assert.equal(voiceCalls(h).length, before, 'déplacement depuis un vocal fermé au modérateur');
+    assert.equal(h.member('target').voice.channelId, priv.id);
+  } finally {
+    await h.close();
+  }
+});
