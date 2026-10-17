@@ -212,7 +212,7 @@ function moduleView(state, key) {
           noticeLine(state.notice),
           m.loaded ? readOnlyBanner(state) : `${ICONS.warning} **Non disponible** sur cette version : ce module n'est pas chargé. Ses réglages ne s'appliquent pas.`,
           `Domaine : **${m.domain}** · ${m.undoable ? 'actions annulables' : 'actions non annulables (sanction seule)'}.`,
-          m.suspendedUntil ? `⏸️ Annulations suspendues jusqu'à ${discordTimestamp(m.suspendedUntil, 'T')} (conflit d'annulation).` : null,
+          m.suspendedUntil ? `⏸️ Annulations d'un objet en conflit suspendues jusqu'à ${discordTimestamp(m.suspendedUntil, 'T')} (les autres objets restent protégés).` : null,
         ],
         fields: [
           field('🎚️', 'Mode', MODE_LABELS[m.mode] ?? m.mode),

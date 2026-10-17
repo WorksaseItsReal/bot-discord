@@ -10,7 +10,7 @@ const { PUNISH_LABELS } = require('../cards');
 function moduleLine(m) {
   if (!m.loaded) return `▫️ ${m.emoji} ${m.label} · *non disponible*`;
   const dot = { off: '⚫', on: '🟢', max: '🔴' }[m.mode] ?? '⚫';
-  const suspended = m.suspendedUntil ? ` · ⏸️ suspendu jusqu'à ${discordTimestamp(m.suspendedUntil, 'T')}` : '';
+  const suspended = m.suspendedUntil ? ` · ⏸️ conflit d'annulation jusqu'à ${discordTimestamp(m.suspendedUntil, 'T')}` : '';
   return `${dot} ${m.emoji} ${m.label}${m.mode === 'off' ? '' : ` · seuil ${m.limit}`}${suspended}`;
 }
 
