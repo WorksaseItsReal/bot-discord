@@ -230,7 +230,8 @@ test('messages : bots, webhooks, système, MP et salons ignorés exclus ; fil co
   // Écriture par lots : rien en base tant que le tampon n'est pas vidé.
   assert.equal(repo.totals(GUILD, '2000-01-01').messages, 0);
   assert.ok(repo.getSince(GUILD), 'début de collecte enregistré au premier message');
-  assert.equal(service.flush(), 3); // 2 lignes (salon, membre) + 1 heure
+  // 2 lignes (salon, membre) + 1 heure + 2 traces de présence (salons ignorés, jamais affichées : revue n° 6, R91)
+  assert.equal(service.flush(), 5);
   const rows = repo.topChannels(GUILD, '2026-10-09');
   assert.deepEqual(rows.map((r) => [r.channel_id, r.messages]), [[CH.rules, 2], [CH.general, 1]]);
   assert.deepEqual(repo.hourly(GUILD, '2026-10-09'), [{ hour: 12, messages: 3 }]);

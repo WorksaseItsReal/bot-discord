@@ -57,7 +57,9 @@ test('collecte réelle : messages, fils, bots, salons ignorés, vocal, arrivées
     const channels = Object.fromEntries(repo.topChannels(G, today()).map((c) => [c.channel_id, c.messages]));
     assert.deepEqual(channels, { [IDS.channels.general]: 3, [IDS.channels.rules]: 1 }, 'fil compté pour son salon, bot et salon ignoré exclus');
     assert.equal(repo.hourly(G, today()).reduce((n, r) => n + r.messages, 0), 4);
-    assert.equal(repo.lastActive(G).has(IDS.users.mod), false);
+    // Salon ignoré : hors statistiques, mais retenu comme dernière activité (/activite, revue n° 6 R91).
+    assert.equal(repo.lastActive(G).has(IDS.users.mod), true);
+    assert.equal(repo.topMembers(G, today()).some((m) => m.user_id === IDS.users.mod), false);
     assert.equal(repo.lastActive(G).has(IDS.users.otherBot), false);
 
     // Vocal : 5 minutes dans un salon (horloge du service avancée), puis départ.

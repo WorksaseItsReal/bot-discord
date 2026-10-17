@@ -2,6 +2,7 @@
 
 const { createLogger } = require('../core/logger');
 const { DAY_MS, dayKey, dayStart, addDays } = require('../utils/activity');
+const { PRESENCE_CHANNEL } = require('../database/repositories/ActivityRepository');
 
 const logger = createLogger('activity');
 
@@ -253,7 +254,11 @@ class ActivityService {
     const guildId = message.guild.id;
     if (!this.collecting(guildId)) return false;
     const channel = message.channel;
-    if (this.ignored(guildId, channel ?? { id: message.channelId })) return false;
+    if (this.ignored(guildId, channel ?? { id: message.channelId })) {
+      // Hors statistiques, mais le membre n'est pas inactif pour autant (/activite).
+      this.#markPresence(guildId, message.author.id, message.createdTimestamp || this.clock());
+      return false;
+    }
     // Un fil (ou un post de forum) compte pour son salon.
     const channelId = channel?.isThread?.() ? channel.parentId ?? message.channelId : message.channelId;
     const at = message.createdTimestamp || this.clock();
@@ -263,6 +268,16 @@ class ActivityService {
     inc(this.buffer.hours, `${guildId}|${day}|${new Date(at).getUTCHours()}`, 1);
     if (bufferSize(this.buffer) > MAX_BUFFER_KEYS) this.flush();
     return true;
+  }
+
+  /**
+   * Trace de présence (salon ignoré des logs) : 0 message, jamais affichée, mais retenue comme
+   * dernière activité du membre par /activite.
+   */
+  #markPresence(guildId, userId, at) {
+    this.#ensure(guildId);
+    inc(this.buffer.messages, `${guildId}|${dayKey(at)}|${PRESENCE_CHANNEL}|${userId}`, 0);
+    if (bufferSize(this.buffer) > MAX_BUFFER_KEYS) this.flush();
   }
 
   /** Arrivée ou départ d'un humain. @param {'join'|'leave'} kind */
@@ -307,6 +322,8 @@ class ActivityService {
     if (next && this.#voiceCounts(guild, newState.channel, next)) {
       this.#ensure(guild.id);
       this.sessions.set(key, { guildId: guild.id, userId: member.id, channelId: next, since: now });
+    } else if (next && next !== guild.afkChannelId && this.collecting(guild.id)) {
+      this.#markPresence(guild.id, member.id, now); // vocal ignoré des logs : présence seulement
     }
   }
 

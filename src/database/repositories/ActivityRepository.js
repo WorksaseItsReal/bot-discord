@@ -1,5 +1,12 @@
 'use strict';
 
+/**
+ * « Salon » fictif des traces de présence : activité dans un salon ignoré des logs, jamais
+ * affichée dans les statistiques (0 message, 0 s de vocal) mais comptée comme dernière activité
+ * par /activite (un membre qui n'écrit que là n'est pas inactif).
+ */
+const PRESENCE_CHANNEL = '0';
+
 /** Liste de salons retenus → paramètre JSON (null : tous les salons). Pur. */
 function allowOf(channels) {
   return Array.isArray(channels) ? JSON.stringify(channels.map(String)) : null;
@@ -77,7 +84,8 @@ class ActivityRepository {
 
     // Lectures « serveur » et « membre ». @allow : salons retenus (JSON), NULL = tous. Un lecteur
     // sans « Gérer le serveur » ne voit que les salons visibles par @everyone (confidentialité).
-    const ALLOW = '(@allow IS NULL OR channel_id IN (SELECT value FROM json_each(@allow)))';
+    // Les traces de présence (PRESENCE_CHANNEL) ne sont jamais affichées.
+    const ALLOW = `channel_id <> '${PRESENCE_CHANNEL}' AND (@allow IS NULL OR channel_id IN (SELECT value FROM json_each(@allow)))`;
     this.dailyStmt = db.prepare(
       `SELECT day, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
        WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY day ORDER BY day`,
@@ -263,7 +271,7 @@ class ActivityRepository {
     return this.rankStmt.get({ guildId, fromDay, messages, allow: allowOf(channels) }).n + 1;
   }
 
-  /** @returns {Map<string, string>} membre → dernier jour d'activité (messages ou vocal) */
+  /** @returns {Map<string, string>} membre → dernier jour d'activité (messages ou vocal, salons ignorés des logs compris) */
   lastActive(guildId) {
     return new Map(this.lastActiveStmt.all(guildId).map((r) => [r.user_id, r.day]));
   }
@@ -282,4 +290,4 @@ class ActivityRepository {
   }
 }
 
-module.exports = { ActivityRepository };
+module.exports = { ActivityRepository, PRESENCE_CHANNEL };
