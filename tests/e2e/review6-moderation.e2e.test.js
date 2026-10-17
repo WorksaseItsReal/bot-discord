@@ -449,3 +449,46 @@ test('R22 rôle Muted retiré par /role remove ou /massrole remove : le mute est
     await h.close();
   }
 });
+
+for (const via of ['derank', 'massrole']) {
+  test(`R21 /${via} retire un rôle temporaire : sa ligne est close, il n'est pas rendu au retour du membre`, async () => {
+    const h = await createHarness();
+    h.configureAll();
+    try {
+      const gid = h.guild.id;
+      const target = IDS.users.target;
+      const t = await h.slash('role', sub('temporaire', [opt('membre', 6, target), opt('role', 8, IDS.roles.gamer), opt('duree', 3, '7d')]), { as: 'admin' });
+      assert.ok(!h.isError(t), h.replyText(t));
+      assert.ok(h.client.repositories.tempRoles.activeFor(gid, target, IDS.roles.gamer));
+      const rec = via === 'derank'
+        ? await h.slash('derank', [opt('membre', 6, target)], { as: 'admin' })
+        : await h.slash('massrole', [opt('action', 3, 'remove'), opt('role', 8, IDS.roles.gamer)], { as: 'admin' });
+      await h.confirm(rec);
+      await h.waitFor(() => !h.fake.members.get(target).roles.includes(IDS.roles.gamer), { timeout: 4_000 });
+      assert.ok(!h.fake.members.get(target).roles.includes(IDS.roles.gamer));
+      assert.equal(h.client.repositories.tempRoles.activeFor(gid, target, IDS.roles.gamer) ?? null, null, 'ligne temporaire encore active');
+      const user = h.fake.users.get(target);
+      await h.memberLeave(target);
+      await h.memberJoin(user);
+      assert.ok(!h.fake.members.get(target).roles.includes(IDS.roles.gamer), 'rôle temporaire rendu au retour');
+      assert.equal(h.problemCount(), 0, h.formatProblems());
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test('R25 /derank : raison limitée à 512 caractères, raison d\'audit tronquée', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ moderation: { confirmDangerous: false } });
+  try {
+    const option = h.client.commands.get('derank').data.toJSON().options.find((o) => o.name === 'raison');
+    assert.equal(option.max_length, 512);
+    const rec = await h.slash('derank', [opt('membre', 6, IDS.users.target), opt('raison', 3, 'x'.repeat(900))], { as: 'admin' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
