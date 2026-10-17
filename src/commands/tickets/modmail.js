@@ -79,7 +79,8 @@ module.exports = {
       return interaction.editReply({ embeds: [status.ok('Votre réponse a été envoyée en message privé.', 'Réponse envoyée')] });
     }
     if (sub === 'close') {
-      assertOpenThread(client, interaction.channel.id);
+      // Ouverte, ou fermée avec un salon conservé faute d'archive (nouvelle tentative).
+      modmail.assertClosable(interaction.channel.id);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
       return modmail.close(interaction.channel, interaction.user);
     }
@@ -123,7 +124,7 @@ module.exports = {
     async close(interaction, client) {
       const { modmail } = client.services;
       modmail.assertStaff(interaction.member);
-      assertOpenThread(client, interaction.channelId);
+      modmail.assertClosable(interaction.channelId);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
       return modmail.close(interaction.channel, interaction.user);
     },
@@ -140,20 +141,15 @@ function assertStaffRole(role, guild) {
   if (role.managed) throw new UserError(`Le rôle ${role.name} est géré par une intégration : choisissez un rôle staff classique.`);
 }
 
-/** Conversation ModMail encore ouverte (sinon : double clic sur « Fermer », salon non ModMail…). */
-function assertOpenThread(client, channelId) {
-  const thread = modmailThread(client, channelId);
-  if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
-  if (thread.status !== 'open') throw new UserError('Cette conversation ModMail est déjà fermée.');
-  return thread;
-}
-
 function closingCard() {
   return card({
     tone: 'neutral',
     section: 'tickets',
     icon: ICONS.lock,
     title: 'Fermeture de la conversation',
-    description: 'Le membre est prévenu en message privé, le transcript est archivé (si un salon est configuré), puis ce salon est supprimé.',
+    description: [
+      'Le membre est prévenu en message privé, le transcript est archivé (si un salon est configuré), puis ce salon est supprimé.',
+      subtext('Si l\'archive ne peut pas être publiée, ce salon est conservé et un avertissement y est posté.'),
+    ],
   });
 }

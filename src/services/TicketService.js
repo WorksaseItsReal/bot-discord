@@ -7,6 +7,11 @@ const { card, field, wide, ICONS, userLine, code, subtext, bullets, status } = r
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 const { sendTranscriptArchive, ARCHIVE_FILE_MAX, ARCHIVE_TOTAL_MAX } = require('../utils/transcriptArchive');
+const { describeApiError } = require('../core/apiErrors');
+const { truncate } = require('../utils/embeds');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('tickets');
 
 /** Nombre maximal de messages repris dans un transcript. */
 const TRANSCRIPT_MAX = 1000;
@@ -27,6 +32,66 @@ function attachmentFields(summary) {
     field('📎', 'Pièces jointes', `**${archived}** archivée${archived > 1 ? 's' : ''}${skipped.length ? `\n${skipped.length} non archivée${skipped.length > 1 ? 's' : ''}` : ''}`),
     skipped.length ? wide(ICONS.warning, 'Non archivées', `${lines.join('\n')}${skipped.length > 10 ? `\n${subtext(`+${skipped.length - 10} autre(s) : voir la fin du transcript`)}` : ''}`) : null,
   ].filter(Boolean);
+}
+
+/** Permissions du bot nécessaires pour publier une archive (carte + fichier .txt). */
+const ARCHIVE_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.AttachFiles];
+
+/**
+ * Problème connu d'avance pour publier une archive dans le salon des transcripts (texte), ou
+ * null (salon absent du cache : vérifié à la fermeture). Pur.
+ */
+function archiveIssue(guild, channelId) {
+  const channel = channelId ? guild?.channels?.cache?.get(channelId) : null;
+  if (!channel) return null;
+  if (typeof channel.isTextBased === 'function' && !channel.isTextBased()) return 'ce n\'est pas un salon textuel';
+  const me = guild.members?.me;
+  const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
+  if (perms && !perms.has(ARCHIVE_PERMISSIONS)) return 'il me manque **Voir le salon**, **Envoyer des messages**, **Intégrer des liens** ou **Joindre des fichiers**';
+  return null;
+}
+
+/**
+ * Salon des transcripts au moment d'archiver : le salon, ou null s'il a été supprimé (confirmé
+ * par Discord, 10003 : la confirmation l'a annoncé). Toute autre erreur (accès, réseau) est levée.
+ */
+async function resolveArchiveChannel(guild, channelId) {
+  const cached = guild?.channels?.cache?.get?.(channelId);
+  if (cached) return cached;
+  try {
+    return (await guild.channels.fetch(channelId)) ?? null;
+  } catch (err) {
+    if (err?.code === 10003) return null;
+    throw err;
+  }
+}
+
+/** Cause lisible d'un échec d'archive. Pur. */
+function archiveFailureReason(err) {
+  return describeApiError(err).friendly ?? truncate(String(err?.message ?? err ?? 'erreur inconnue').replace(/\s+/g, ' '), 200);
+}
+
+/**
+ * Avertissement posté dans un salon conservé parce que son archive a échoué. Pur.
+ * @param {{ logChannelId: string, error: unknown, what?: string, components?: object[] }} opts
+ */
+function archiveFailedPayload({ logChannelId, error, what = 'Ce ticket', components = [] }) {
+  return {
+    embeds: [
+      card({
+        tone: 'warning',
+        section: 'tickets',
+        icon: ICONS.warning,
+        title: 'Archive impossible : salon conservé',
+        description: [
+          `Le transcript n'a pas pu être publié dans <#${logChannelId}>. ${what} est **fermé**, mais ce salon est conservé pour ne pas perdre l'historique.`,
+          subtext('Donnez-moi Voir le salon, Envoyer des messages, Intégrer des liens et Joindre des fichiers dans le salon des transcripts, puis refermez : l\'archive sera publiée et ce salon supprimé.'),
+        ],
+        fields: [wide(ICONS.error, 'Cause', archiveFailureReason(error))],
+      }),
+    ],
+    components,
+  };
 }
 
 /** Carte de suite d'une archive (pièces jointes envoyées en plusieurs messages). Pur. */
@@ -423,6 +488,7 @@ class TicketService {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
     this.assertStaff(staff);
+    if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé : il ne peut plus être pris en charge.');
     if (ticket.status === 'claimed') {
       throw new UserError(ticket.claimed_by ? `Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.` : 'Ce ticket est déjà pris en charge.');
     }
@@ -599,26 +665,54 @@ class TicketService {
     // sinon les téléchargements dépassent le délai d'arrêt et le salon n'est jamais supprimé.
     const archiveAttachments = cfg.archiveAttachments === true && !job.flushed;
     const { content: transcript, messages } = await this.#transcript(channel, { archiveAttachments });
-    const closedAt = Date.now();
-    this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
-    this.bumpStat(channel.guild.id, 'closed');
-    // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
-    this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
+    // Ticket déjà fermé dont le salon a été conservé (archive impossible) : nouvelle tentative
+    // d'archive seulement (ni statistique ni MP de notation en double).
+    const alreadyClosed = ticket.status === 'closed';
+    const closedAt = alreadyClosed ? ticket.closed_at ?? Date.now() : Date.now();
+    if (!alreadyClosed) {
+      this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
+      this.bumpStat(channel.guild.id, 'closed');
+      // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
+      this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
+    }
 
     if (cfg.logChannel) {
-      const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);
-      if (logCh?.isTextBased()) {
-        // Pièces jointes re-téléversées si `tickets.archiveAttachments` (échecs ignorés et listés).
-        await sendTranscriptArchive(logCh, {
-          transcript: { name: `ticket-${ticket.id}.txt`, content: transcript },
-          messages,
-          archiveAttachments,
-          guild: channel.guild,
-          fetchImpl: this.fetch,
-          signal: job.abort?.signal,
-          card: (summary) => this.closureCard(ticket, closedBy, closedAt, channel, summary),
-          continuation: (part, total) => archiveContinuationCard(`Ticket #${ticket.id}`, part, total),
-        }).catch(() => {});
+      try {
+        // null : salon des transcripts supprimé (la confirmation l'a annoncé) → fermeture sans archive.
+        const logCh = await resolveArchiveChannel(channel.guild, cfg.logChannel);
+        if (logCh && !logCh.isTextBased?.()) throw new Error('le salon des transcripts n\'est pas un salon textuel');
+        if (logCh) {
+          // Pièces jointes re-téléversées si `tickets.archiveAttachments` (échecs ignorés et listés).
+          await sendTranscriptArchive(logCh, {
+            transcript: { name: `ticket-${ticket.id}.txt`, content: transcript },
+            messages,
+            archiveAttachments,
+            guild: channel.guild,
+            fetchImpl: this.fetch,
+            signal: job.abort?.signal,
+            card: (summary) => this.closureCard(ticket, closedBy, closedAt, channel, summary),
+            continuation: (part, total) => archiveContinuationCard(`Ticket #${ticket.id}`, part, total),
+          });
+        }
+      } catch (error) {
+        // Archive impossible (accès, permissions, panne) : le salon n'est JAMAIS supprimé sans
+        // son archive. Le ticket reste fermé, le salon est conservé et le staff prévenu.
+        logger.warn(`Ticket #${ticket.id} : archive impossible dans ${cfg.logChannel}, salon conservé :`, error?.message ?? error);
+        if (typeof channel.send === 'function') {
+          await channel
+            .send(archiveFailedPayload({
+              logChannelId: cfg.logChannel,
+              error,
+              components: [
+                row(
+                  button({ id: 'ticket:close', label: 'Refermer', style: ButtonStyle.Danger, emoji: ICONS.lock }),
+                  button({ id: 'ticket:transcript', label: 'Transcript', style: ButtonStyle.Secondary, emoji: '📄' }),
+                ),
+              ],
+            }))
+            .catch(() => {});
+        }
+        return;
       }
     }
     this.tickets.delete(channel.id);
@@ -685,4 +779,8 @@ module.exports = {
   transcriptLine,
   attachmentFields,
   archiveContinuationCard,
+  archiveIssue,
+  resolveArchiveChannel,
+  archiveFailedPayload,
+  ARCHIVE_PERMISSIONS,
 };

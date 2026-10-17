@@ -6,7 +6,17 @@ const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton,
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 // transcriptLine : partagée avec les tickets (les messages ModMail sont surtout des cartes).
-const { fetchChannelHistory, channelGone, createInCategory, transcriptLine, TRANSCRIPT_MAX, attachmentFields, archiveContinuationCard } = require('./TicketService');
+const {
+  fetchChannelHistory,
+  channelGone,
+  createInCategory,
+  transcriptLine,
+  TRANSCRIPT_MAX,
+  attachmentFields,
+  archiveContinuationCard,
+  resolveArchiveChannel,
+  archiveFailedPayload,
+} = require('./TicketService');
 const { sendTranscriptArchive } = require('../utils/transcriptArchive');
 const { createLogger } = require('../core/logger');
 
@@ -321,6 +331,20 @@ class ModmailService {
     });
   }
 
+  /** Salons ModMail en cours de fermeture (double clic, nouvelle tentative d'archive). */
+  #closing = new Set();
+
+  /**
+   * Conversation fermable depuis ce salon : ouverte, ou déjà fermée mais dont le salon a été
+   * conservé faute d'archive (nouvelle tentative). Lève une UserError sinon.
+   */
+  assertClosable(channelId) {
+    const thread = this.modmail.getByChannel(channelId);
+    if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+    if (this.#closing.has(channelId)) throw new UserError('Cette conversation ModMail est déjà en cours de fermeture.');
+    return thread;
+  }
+
   /**
    * @param {import('discord.js').TextChannel} channel
    * @param {import('discord.js').User} [closedBy] auteur de la fermeture (pour l'archive)
@@ -329,13 +353,29 @@ class ModmailService {
   async close(channel, closedBy) {
     const thread = this.modmail.getByChannel(channel.id);
     if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+    if (this.#closing.has(channel.id)) return false;
+    // Conversation déjà fermée dont le salon a été conservé (archive impossible) : nouvelle
+    // tentative d'archive, sans nouveau MP au membre.
+    const retry = thread.status === 'closed';
     // Garde atomique : seul le premier appel prévient le membre et supprime le salon.
-    if (!this.modmail.close(channel.id)) return false;
+    if (!retry && !this.modmail.close(channel.id)) return false;
+    this.#closing.add(channel.id);
+    try {
+      return await this.#close(channel, thread, closedBy, retry);
+    } finally {
+      this.#closing.delete(channel.id);
+    }
+  }
+
+  async #close(channel, thread, closedBy, retry) {
     const user = await this.client.users.fetch(thread.user_id).catch(() => null);
     const guild = channel.guild ?? this.client.guilds.cache.get(thread.guild_id);
     // Archive AVANT la suppression du salon (sinon l'historique est perdu).
-    await this.#archive(channel, thread, guild, user, closedBy).catch((e) => logger.warn('Archive ModMail impossible :', e?.message));
-    if (user) {
+    let archiveError = null;
+    await this.#archive(channel, thread, guild, user, closedBy).catch((e) => {
+      archiveError = e;
+    });
+    if (user && !retry) {
       await user
         .send({
           embeds: [
@@ -353,16 +393,39 @@ class ModmailService {
         })
         .catch(() => {});
     }
+    if (archiveError) {
+      // Jamais de suppression sans archive : la conversation reste fermée, le salon est conservé
+      // et le staff prévenu (refermer après correction publie l'archive et supprime le salon).
+      const logChannelId = this.config.get(guild.id).modmail?.logChannel;
+      logger.warn(`Archive ModMail #${thread.id} impossible, salon conservé :`, archiveError?.message ?? archiveError);
+      if (typeof channel.send === 'function') {
+        await channel
+          .send(archiveFailedPayload({
+            logChannelId,
+            error: archiveError,
+            what: 'Cette conversation',
+            components: buttonRows(actionButton({ command: 'modmail', action: 'close', label: 'Refermer', emoji: ICONS.lock, style: ButtonStyle.Danger })),
+          }))
+          .catch(() => {});
+      }
+      return true;
+    }
     await channel.delete().catch(() => {});
     return true;
   }
 
-  /** Publie le transcript (.txt) dans le salon de logs ModMail configuré (`modmail.logChannel`). */
+  /**
+   * Publie le transcript (.txt) dans le salon de logs ModMail configuré (`modmail.logChannel`).
+   * @returns {Promise<boolean>} false : aucune archive à publier (pas de salon, ou salon supprimé) ;
+   *   lève une erreur si l'archive n'a pas pu être publiée.
+   */
   async #archive(channel, thread, guild, user, closedBy) {
     const logChannelId = guild ? this.config.get(guild.id).modmail?.logChannel : null;
     if (!logChannelId || typeof channel.messages?.fetch !== 'function') return false;
-    const logCh = await guild.channels.fetch(logChannelId).catch(() => null);
-    if (!logCh?.isTextBased?.()) return false;
+    // null : salon d'archive supprimé (confirmé par Discord) ; accès refusé ou panne : levé.
+    const logCh = await resolveArchiveChannel(guild, logChannelId);
+    if (!logCh) return false;
+    if (!logCh.isTextBased?.()) throw new Error('le salon des transcripts n\'est pas un salon textuel');
     const history = await fetchChannelHistory(channel, TRANSCRIPT_MAX);
     const transcript = buildTranscript(thread, channel, history);
     const count = history?.messages.length ?? 0;
