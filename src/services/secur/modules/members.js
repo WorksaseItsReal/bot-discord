@@ -22,6 +22,50 @@ const SNOWFLAKE = /^\d{17,20}$/;
 
 /** Départs d'arrivants récents : `${guildId}:${userId}` → arrivée (ms). Ordre d'insertion = ancienneté. */
 const departures = new Map();
+/**
+ * Bots à expulser dès leur arrivée : l'entrée d'audit BotAdd (28) peut arriver AVANT l'événement
+ * d'arrivée du bot. `${guildId}:${botId}` → instant (2 min au plus, 500 entrées).
+ */
+const pendingBotKicks = new Map();
+const PENDING_BOT_MS = 2 * 60_000;
+const MAX_PENDING_BOTS = 500;
+
+/** Bot à expulser à son arrivée (son ajout a déclenché le module bot avant qu'il soit là). */
+function deferBotKick(guildId, botId, now = Date.now()) {
+  const key = `${guildId}:${botId}`;
+  pendingBotKicks.delete(key);
+  pendingBotKicks.set(key, now);
+  for (const [k, at] of pendingBotKicks) {
+    if (pendingBotKicks.size <= MAX_PENDING_BOTS && now - at < PENDING_BOT_MS) break;
+    pendingBotKicks.delete(k);
+  }
+}
+
+/** Arrivée d'un bot (guildMemberAdd) : true s'il devait être expulsé (l'entrée est consommée). */
+function takeBotKick(guildId, botId, now = Date.now()) {
+  const key = `${guildId}:${botId}`;
+  const at = pendingBotKicks.get(key);
+  pendingBotKicks.delete(key);
+  return Boolean(at && now - at < PENDING_BOT_MS);
+}
+
+/** Expulse un bot ajouté sans autorisation. @returns {Promise<{ ok: boolean, note?: string }>} */
+async function kickAddedBot(guild, member, { client, service } = {}) {
+  const botId = member.id;
+  if (!member.user?.bot) return { ok: false, note: `<@${botId}> n'est pas un bot : rien expulsé.` };
+  if (member.kickable === false) return { ok: false, note: `Bot <@${botId}> non expulsable (rôle au-dessus du mien ou permission manquante).` };
+  client?.services?.welcome?.silence?.(guild.id, botId);
+  try {
+    await member.kick('Secur : bot ajouté sans autorisation');
+    service?.noteBotRemoved?.(guild, botId);
+    return { ok: true };
+  } catch (err) {
+    client?.services?.welcome?.unsilence?.(guild.id, botId);
+    if (err?.code === 10007) return { ok: true, note: `Bot <@${botId}> déjà parti.` };
+    logger.debug('Expulsion du bot ajouté :', err?.message);
+    return { ok: false, note: `Bot <@${botId}> non expulsé (${String(err?.message ?? err).slice(0, 100)}).` };
+  }
+}
 
 function pruneDepartures(now = Date.now()) {
   for (const [key, joinedAt] of departures) {
@@ -45,10 +89,10 @@ function rememberDeparture(member, now = Date.now()) {
   return true;
 }
 
-/** Serveur quitté : départs oubliés. */
+/** Serveur quitté : départs et expulsions de bots en attente oubliés. */
 function forgetGuild(guildId) {
   if (!guildId) return;
-  for (const key of departures.keys()) if (key.startsWith(`${guildId}:`)) departures.delete(key);
+  for (const map of [departures, pendingBotKicks]) for (const key of map.keys()) if (key.startsWith(`${guildId}:`)) map.delete(key);
 }
 
 /**
@@ -194,26 +238,20 @@ const bot = {
     if (ctx.moduleCfg?.mode !== 'max' && Array.isArray(ctx.cfg?.whitelist?.users) && ctx.cfg.whitelist.users.includes(botId)) return null;
     return { weight: 1, record: { botId } };
   },
-  /** Annulation : expulsion du bot ajouté (ou « déjà expulsé » par l'AntiRaid / déjà parti). */
+  /**
+   * Annulation : expulsion du bot ajouté (ou « déjà expulsé » par l'AntiRaid). Pas encore arrivé
+   * (entrée d'audit reçue avant son arrivée) : il sera expulsé à son arrivée (2 min au plus).
+   */
   async undo(guild, record, ctx) {
     const botId = record?.botId;
     if (!SNOWFLAKE.test(String(botId ?? ''))) return { ok: false, note: 'Bot ajouté sans identifiant lisible.' };
     if (ctx.service?.wasBotRemoved?.(guild.id, botId)) return { ok: true, note: `Bot <@${botId}> déjà expulsé.` };
     const member = guild.members?.cache?.get?.(botId) ?? (await guild.members?.fetch?.(botId).catch(() => null)) ?? null;
-    if (!member) return { ok: true, note: `Bot <@${botId}> déjà parti.` };
-    if (!member.user?.bot) return { ok: false, note: `<@${botId}> n'est pas un bot : rien expulsé.` };
-    if (member.kickable === false) return { ok: false, note: `Bot <@${botId}> non expulsable (rôle au-dessus du mien ou permission manquante).` };
-    ctx.client?.services?.welcome?.silence?.(guild.id, botId);
-    try {
-      await member.kick(reasonText('bot ajouté sans autorisation'));
-      ctx.service?.noteBotRemoved?.(guild, botId);
-      return { ok: true };
-    } catch (err) {
-      ctx.client?.services?.welcome?.unsilence?.(guild.id, botId);
-      if (err?.code === 10007) return { ok: true, note: `Bot <@${botId}> déjà parti.` };
-      logger.debug('Expulsion du bot ajouté :', err?.message);
-      return { ok: false, note: `Bot <@${botId}> non expulsé (${String(err?.message ?? err).slice(0, 100)}).` };
+    if (!member) {
+      deferBotKick(guild.id, botId);
+      return { ok: true, note: `Bot <@${botId}> expulsé dès son arrivée.` };
     }
+    return kickAddedBot(guild, member, ctx);
   },
   describe: (record) => (record?.botId ? `Bot <@${record.botId}> ajouté` : 'Bot ajouté'),
   targetKey: (record) => (record?.botId ? `bot:${record.botId}` : null),
@@ -233,6 +271,8 @@ const voiceKick = {
 
 module.exports = [ban, unban, kick, bot, voiceKick];
 module.exports.rememberDeparture = rememberDeparture;
+module.exports.takeBotKick = takeBotKick;
+module.exports.kickAddedBot = kickAddedBot;
 module.exports.forgetGuild = forgetGuild;
 module.exports.isRecentTarget = isRecentTarget;
 module.exports.pruneCount = pruneCount;

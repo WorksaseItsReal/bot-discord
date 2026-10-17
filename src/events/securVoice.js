@@ -20,6 +20,8 @@ const logger = createLogger('secur:voice');
  *    Approximatif par nature (débit du journal d'audit, regroupement).
  * 2. Départs d'arrivants récents (modules ban / kick) : leur arrivée est gardée 10 min, car le
  *    membre a déjà quitté le cache quand l'entrée d'audit du ban ou du kick arrive.
+ * 3. Arrivée d'un bot que le module bot a déjà refusé (entrée d'audit BotAdd reçue avant
+ *    l'arrivée) : il est expulsé tout de suite.
  */
 
 /** Délai avant la lecture du journal (Discord écrit l'entrée après l'événement vocal). Modifiable par les tests. */
@@ -149,6 +151,15 @@ module.exports = [
       if (!guild?.id || !oldState?.channelId || oldState.channelId === newState?.channelId) return;
       if (!client.services?.secur?.covers?.(guild.id, 'voiceKick')) return;
       schedule(client, guild.id);
+    },
+  },
+  {
+    // Bot dont l'ajout a déclenché le module bot AVANT son arrivée (entrée d'audit en avance).
+    name: 'guildMemberAdd',
+    async execute(client, member) {
+      if (!member?.user?.bot || !member.guild?.id || !members.takeBotKick(member.guild.id, member.id)) return;
+      const res = await members.kickAddedBot(member.guild, member, { client, service: client.services?.secur });
+      if (!res.ok) logger.warn(`Bot ${member.id} non expulsé à son arrivée : ${res.note}`);
     },
   },
   {
