@@ -79,6 +79,7 @@ test('giveaway : le reroll exclut les gagnants affichés sur la carte de fin', a
   repo.markEnded(id);
   // A (affiché sur la carte) est exclu ; B est tiré puis mémorisé, donc exclu à son tour.
   assert.deepEqual(await service.end(id, { reroll: true, guildId: 'g1' }), [B]);
+  service.lastReroll.clear(); // délai anti-double clic (revue n° 6, R82) écoulé
   await assert.rejects(service.end(id, { reroll: true, guildId: 'g1' }), /gagnants précédents/);
   assert.deepEqual(previousWinners({ embeds: [{ fields: [{ name: '🏆 Gagnants', value: `<@${A}>\n<@!${C}>` }] }] }), [A, C]);
   assert.deepEqual(previousWinners(null), []);

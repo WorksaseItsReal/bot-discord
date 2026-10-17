@@ -116,3 +116,32 @@ test('R85 cartes publiques : départ / arrivée, niveau, anniversaire ne rendent
   const bday = Birthdays.renderBirthday('Joyeux anniversaire {pseudo} {membre} sur {serveur}', { id: null, name: EVIL, server: EVIL, age: null });
   assert.ok(!clickable(bday), bday);
 });
+
+// ---------------------------------------------------------------- R82 : double reroll
+
+function giveawayWorld() {
+  const { db } = memoryDb();
+  const repo = new GiveawayRepository(db);
+  const sent = [];
+  const message = { id: 'm1', embeds: [], url: 'https://discord.com/channels/1/2/3', edit: async () => message };
+  const channel = { isTextBased: () => true, send: async (p) => { sent.push(p); return message; }, messages: { fetch: async () => message } };
+  const client = { channels: { fetch: async () => channel }, users: { fetch: async (uid) => ({ id: uid, bot: false }) }, guilds: { cache: new Map() }, repositories: {} };
+  const service = new GiveawayService({ client, giveaways: repo });
+  return { db, repo, service, sent };
+}
+
+test('R82 reroll : double clic ou deux organisateurs → un seul nouveau tirage, le second est refusé', async () => {
+  const { repo, service, sent } = giveawayWorld();
+  const id = repo.create({ guildId: GUILD, channelId: 'c', messageId: 'm1', prize: 'Nitro', winners: 1, hostId: 'h', requiredRole: null, forbiddenRole: null, endsAt: Date.now() - 1 });
+  for (let i = 0; i < 10; i += 1) repo.addEntry(id, String(200000000000000000n + BigInt(i)));
+  await service.end(id, { guildId: GUILD });
+  const before = sent.length;
+  const results = await Promise.allSettled([
+    service.end(id, { reroll: true, guildId: GUILD }),
+    service.end(id, { reroll: true, guildId: GUILD }),
+  ]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1, 'deux tirages');
+  assert.match(results.find((r) => r.status === 'rejected').reason.message, /vient d'être fait|patientez/i);
+  assert.equal(sent.length - before, 1, 'deux annonces de gagnants (deux pings)');
+  assert.equal(repo.winners(id).length, 2, 'gagnants mémorisés : premier tirage + un reroll');
+});

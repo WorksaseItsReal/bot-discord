@@ -603,3 +603,47 @@ test('R89 /projet : invitations, liens d\'arnaque et mots interdits refusés aux
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R5 (partie /giveaway create) et R82
+
+test('R5 /giveaway create : interaction acquittée avant la publication (envoi lent : pas d\'expiration ni de doublon)', async () => {
+  const h = await createHarness();
+  try {
+    const orig = h.client.rest.request.bind(h.client.rest);
+    h.client.rest.request = async (o) => {
+      if (String(o.method).toUpperCase() === 'POST' && o.fullRoute === `/channels/${IDS.channels.general}/messages`) await sleep(3_200);
+      return orig(o);
+    };
+    const rec = await h.slash('giveaway', sub('create', [opt('recompense', 3, 'Nitro'), opt('duree', 3, '1h')]), { as: 'admin', channel: 'general' });
+    await h.waitFor(() => /lancé/.test(h.replyText(rec)), { timeout: 6_000 });
+    assert.ok(rec.ackType != null && rec.ackedAt - rec.createdAt < 3_000, `acquittée après ${rec.ackedAt - rec.createdAt} ms`);
+    assert.match(h.replyText(rec), /Giveaway #\d+ lancé/);
+    assert.equal(h.client.repositories.giveaways.listActive(h.guild.id).length, 1);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R82 giveaway : double clic sur « Relancer » → un seul nouveau tirage annoncé', async () => {
+  const h = await createHarness();
+  try {
+    const rec = await h.slash('giveaway', sub('create', [opt('recompense', 3, 'Nitro'), opt('duree', 3, '1h')]), { as: 'admin', channel: 'general' });
+    assert.match(h.replyText(rec), /lancé/);
+    const g = h.client.repositories.giveaways.listActive(h.guild.id)[0];
+    for (const as of ['member', 'target', 'mod']) h.client.repositories.giveaways.addEntry(g.id, IDS.users[as]);
+    await h.slash('giveaway', sub('end', [opt('id', 4, g.id)]), { as: 'admin' });
+    const card = h.message(h.client.repositories.giveaways.get(g.id).message_id);
+    const btn = card.components.flatMap((r) => r.components).find((c) => c.custom_id === `cmd:giveaway:reroll:${g.id}`);
+    assert.ok(btn, 'bouton « Relancer » absent');
+    const mark = h.fake.messageLog.length;
+    const [a, b] = await Promise.all([h.click(card, btn.custom_id, { as: 'admin' }), h.click(card, btn.custom_id, { as: 'admin' })]);
+    await h.settle();
+    const announces = h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m && m.author.id === h.client.user.id && !(m.flags & 64) && m.channel_id === IDS.channels.general);
+    assert.equal(announces.length, 1, `annonces du nouveau tirage : ${announces.length}`);
+    assert.equal([a, b].filter((r) => h.isError(r)).length, 1);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
