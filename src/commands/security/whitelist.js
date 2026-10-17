@@ -5,6 +5,9 @@ const { card, wide, ICONS, status, actionButton, buttonRows } = require('../../u
 const { fitList } = require('../../services/LoggingService');
 const { UserError } = require('../../core/errors');
 
+/** Crochets Secur partagés avec /antiraid (verrou, blacklist, accès en attente, journal). */
+const hooks = () => require('./antiraid').securHooks;
+
 /** Carte de la whitelist, avec une ligne de retour optionnelle en tête. */
 function whitelistCard(wl, notice) {
   const users = wl.users ?? [];
@@ -71,15 +74,25 @@ module.exports = {
     // @everyone whitelisterait tout le serveur ; un rôle géré (bot, boost…) n'est pas maîtrisé par le serveur.
     if (add && role?.id === guildId) throw new UserError('Le rôle @everyone ne peut pas être whitelisté : l\'AntiRaid ne protégerait plus rien.');
     if (add && role?.managed) throw new UserError(`Le rôle ${role} est géré par une intégration : whitelistez plutôt le bot ou l'utilisateur concerné.`);
+    // Verrou de Secur : add et remove réservés aux owners (après les refus ci-dessus).
+    hooks().assertUnlocked(client, interaction);
+    if (add && user && hooks().isBlacklisted(client, guildId, user.id)) throw new UserError(`${user} est sur la blacklist de sécurité : il ne peut pas être whitelisté.`);
+    const added = add ? [user && !users.has(user.id) ? { kind: 'user', subjectId: user.id } : null, role && !roles.has(role.id) ? { kind: 'wlrole', subjectId: role.id } : null].filter(Boolean) : [];
     if (user) add ? users.add(user.id) : users.delete(user.id);
     if (role) add ? roles.add(role.id) : roles.delete(role.id);
     config.update(guildId, { whitelist: { users: [...users], roles: [...roles] } });
+    // Auteur non owner : accès EN ATTENTE (carte critique, MP, Approuver / Révoquer), créé avant la réponse.
+    const grants = hooks().startGrants(client, interaction, added);
 
     const targets = [user, role].filter(Boolean).map(String).join(' et ');
     const notice = add ? `${targets} ${user && role ? 'ajoutés' : 'ajouté'} à la whitelist.` : `${targets} ${user && role ? 'retirés' : 'retiré'} de la whitelist.`;
-    await interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], components: antiraidShortcut(interaction), ephemeral: true });
+    const pendingNote = grants.pending ? `\n${ICONS.lock} **En attente d'approbation** : n'exempte pas encore. Un owner doit l'approuver (24 h au plus).` : '';
+    await interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, `${notice}${pendingNote}`)], components: antiraidShortcut(interaction), ephemeral: true });
+    await grants.done;
     // Journal des sécurités (après la réponse) : une whitelist élargie sans trace désarme l'AntiRaid.
-    await client.services.antiraid?.logConfigChange?.(interaction.guild, interaction.user, `Whitelist (/whitelist ${sub}) : ${notice}`).catch(() => {});
+    // Accès en attente : sa carte critique tient lieu d'alerte, le journal reste un log.
+    const slice = grants.pending ? { before: {}, after: {} } : { before: { whitelist: { users: wl.users ?? [], roles: wl.roles ?? [] } }, after: { whitelist: { users: [...users], roles: [...roles] } } };
+    await hooks().journal(client, interaction, `Whitelist (/whitelist ${sub}) : ${notice}`, { ...slice, source: `/whitelist ${sub}` });
     return undefined;
   },
 };

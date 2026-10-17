@@ -243,13 +243,15 @@ test('R34 : désactivation et whitelist depuis /antiraid et /whitelist journalis
     assert.equal(h.client.services.config.get(h.guild.id).antiraid.enabled, false);
     await h.slash('whitelist', sub('add', [opt('utilisateur', 6, IDS.users.member)]), { as: 'admin' });
     await h.settle();
-    const logs = botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && titled(/AntiRaid désactivé|Réglages AntiRaid/)(m));
-    assert.equal(logs.length, 2, 'désarmement sans trace');
+    // SEC2 : journal Secur (alerte critique hors filtres) ; l'ajout d'un non-owner est un accès en attente.
+    const logs = botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && titled(/Réglage de sécurité critique|Réglages de sécurité modifiés|Accès de whitelist en attente/)(m));
+    assert.equal(logs.length, 3, 'désarmement sans trace');
+    assert.match(JSON.stringify(logs[0].embeds[0]), /AntiRaid désactivé/);
     assert.match(JSON.stringify(logs[0].embeds[0]), new RegExp(IDS.users.admin));
-    assert.match(JSON.stringify(logs[1].embeds[0]), new RegExp(IDS.users.member));
+    assert.ok(logs.slice(1).every((m) => JSON.stringify(m.embeds[0]).includes(IDS.users.member)));
     const dms = dmsTo(h, mark, IDS.users.owner);
-    assert.equal(dms.length, 1, 'propriétaire non prévenu de la désactivation');
-    assert.match(dms[0].content, /désactivé/);
+    assert.equal(dms.length, 2, 'propriétaire non prévenu (désactivation, accès en attente)');
+    assert.match(JSON.stringify(dms[0].embeds[0]), /AntiRaid désactivé/);
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
