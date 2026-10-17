@@ -1,9 +1,10 @@
 'use strict';
 
-const { PermissionFlagsBits, PermissionsBitField } = require('discord.js');
+const { PermissionFlagsBits, PermissionsBitField, escapeMarkdown } = require('discord.js');
 const { own } = require('../utils/secur');
 const { LEVELS, isAssignable, isDelegable } = require('../utils/access');
 const { card, field, ICONS } = require('../utils/ui');
+const { permissionLabel } = require('../utils/permissionNames');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('permissions');
@@ -51,6 +52,15 @@ function normalizeSettings(raw) {
   return { levels, commands, strict: src.strict === true };
 }
 
+/** Gel récursif (réglages normalisés partagés). */
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
+}
+
 /** Identifiants des rôles d'un membre (GuildMember, membre brut de l'API). Pur. */
 function roleIdsOf(member) {
   if (!member) return [];
@@ -89,15 +99,27 @@ class PermissionService {
     this.logging = logging;
     /** @type {Map<string, { at: number, entries: Map<string, object[]>|null, names: Map<string, string>, appId: string|null, error: string|null }>} */
     this.overrides = new Map();
+    /** @type {WeakMap<object, ReturnType<typeof normalizeSettings>>} réglages normalisés, par objet de configuration */
+    this.normalized = new WeakMap();
     // Méthodes passées seules à d'autres modules (isSensitiveRole({ levelOf })…) : liées.
     this.levelOf = this.levelOf.bind(this);
     this.isLevelRole = this.isLevelRole.bind(this);
     this.rankOf = this.rankOf.bind(this);
   }
 
-  /** Réglages normalisés d'un serveur. */
+  /**
+   * Réglages normalisés d'un serveur (figés, partagés : ne jamais les modifier). Mémorisés par
+   * objet de configuration : ConfigService.update produit un nouvel objet, donc un nouveau calcul.
+   */
   settings(guildId) {
-    return normalizeSettings(this.config.get(guildId)?.permissions);
+    const raw = this.config.get(guildId)?.permissions;
+    if (!raw || typeof raw !== 'object') return normalizeSettings(raw);
+    let settings = this.normalized.get(raw);
+    if (!settings) {
+      settings = deepFreeze(normalizeSettings(raw));
+      this.normalized.set(raw, settings);
+    }
+    return settings;
   }
 
   /** Nom affiché d'un niveau. */
@@ -118,11 +140,14 @@ class PermissionService {
     return this.levelOf(guildId, roleId) > 0;
   }
 
-  /** Niveau (0..3) le plus haut parmi des rôles. */
+  /** Niveau (0..3) le plus haut parmi des rôles (@everyone : jamais). */
   memberLevel(guildId, roleIds = []) {
-    let best = 0;
-    for (const id of roleIds) best = Math.max(best, this.levelOf(guildId, id));
-    return best;
+    if (!guildId) return 0;
+    const { levels } = this.settings(guildId);
+    const ids = new Set(roleIds);
+    ids.delete(guildId);
+    for (const n of [...LEVELS].reverse()) if (levels[n].roles.some((id) => ids.has(id))) return n;
+    return 0;
   }
 
   /** Niveau (1..3) auquel une commande est attribuée, 0 sinon. */
@@ -180,7 +205,7 @@ class PermissionService {
     const level = this.memberLevel(guild?.id, roleIdsOf(member));
     if (level && level === rank) {
       const role = roleIdsOf(member).find((r) => this.levelOf(guild.id, r) === level);
-      return `${this.levelName(guild.id, level)} (<@&${role}>)`;
+      return `${escapeMarkdown(this.levelName(guild.id, level))} (<@&${role}>)`;
     }
     if (rank === 3) return 'Administrateur (vaut le niveau 3)';
     return 'membre';
@@ -297,13 +322,13 @@ class PermissionService {
     try {
       const sub = interaction.options?.getSubcommand?.(false);
       const missing = new PermissionsBitField(grant.flags).toArray();
-      const { permissionLabel } = require('../utils/permissionNames');
+      const custom = this.settings(interaction.guildId).levels[grant.level]?.name;
       const embed = card({
         tone: 'info',
         section: 'security',
         icon: '🔑',
         title: 'Commande exécutée par délégation',
-        description: `${interaction.user} a utilisé **/${grant.key}${sub ? ` ${sub}` : ''}** grâce au **${this.levelName(interaction.guildId, grant.level)}**, sans la permission ${missing.map((p) => `**${permissionLabel(p)}**`).join(', ')}.`,
+        description: `${interaction.user} a utilisé **/${grant.key}${sub ? ` ${sub}` : ''}** grâce au **niveau ${grant.level}**${custom ? ` (${escapeMarkdown(custom)})` : ''}, sans la permission ${missing.map((p) => `**${permissionLabel(p)}**`).join(', ')}.`,
         fields: [
           field(ICONS.user, 'Membre', `<@${interaction.user.id}>`),
           field(ICONS.channel, 'Salon', interaction.channelId ? `<#${interaction.channelId}>` : '—'),
