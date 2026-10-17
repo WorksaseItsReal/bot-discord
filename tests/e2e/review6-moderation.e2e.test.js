@@ -228,3 +228,94 @@ test('R14 deux /warn simultanés n\'appliquent qu\'une fois le palier d\'escalad
     await h.close();
   }
 });
+
+test('R18 lockdown avec un bot sans Administrateur : le bot garde l\'écriture (logs, alertes), garde retirée à la levée', async () => {
+  const h = await createHarness({ botAdministrator: false });
+  h.configureAll();
+  const logs = IDS.channels.rules; // salon public utilisé comme salon de logs
+  h.configure({ logChannels: Object.fromEntries(['moderation', 'security', 'members', 'messages'].map((k) => [k, logs])), moderation: { confirmDangerous: false } });
+  try {
+    const before = overwritesOf(h, logs);
+    const mark = h.fake.messageLog.length;
+    const rec = await h.slash('lockall', [], { as: 'admin' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    assert.equal(can(h, IDS.users.target, logs), false, 'salon non verrouillé');
+    assert.ok(can(h, h.client.user.id, logs), 'le bot ne peut plus écrire dans son salon de logs');
+    const posted = h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m?.channel_id === logs);
+    assert.ok(posted.length >= 1, 'carte « Lockdown activé » perdue');
+    const mark2 = h.fake.messageLog.length;
+    await h.slash('warn', [opt('membre', 6, IDS.users.target), opt('raison', 3, 'test')], { as: 'admin' });
+    assert.ok(h.fake.messageLog.slice(mark2).map((id) => h.message(id)).some((m) => m?.channel_id === logs), 'log du /warn perdu pendant le lockdown');
+
+    await h.slash('unlockall', [], { as: 'admin' });
+    assert.deepEqual(overwritesOf(h, logs), before, 'garde du bot laissée après la levée');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R15 /hide avec un bot sans Administrateur : le bot garde la vue du salon, /unhide fonctionne et rend l\'état d\'origine', async () => {
+  const h = await createHarness({ botAdministrator: false });
+  h.configureAll();
+  try {
+    const ch = IDS.channels.rules;
+    const before = overwritesOf(h, ch);
+    const r1 = await h.slash('hide', [opt('salon', 7, ch)], { as: 'admin' });
+    assert.ok(!h.isError(r1), h.replyText(r1));
+    assert.equal(can(h, IDS.users.target, ch, P.ViewChannel), false, 'salon toujours visible');
+    assert.ok(can(h, h.client.user.id, ch, P.ViewChannel), 'le bot ne voit plus le salon');
+    const r2 = await h.slash('unhide', [opt('salon', 7, ch)], { as: 'admin' });
+    assert.ok(!h.isError(r2), h.replyText(r2));
+    assert.ok(can(h, IDS.users.target, ch, P.ViewChannel));
+    assert.deepEqual(overwritesOf(h, ch), before);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R19 /hide et /lock simultanés sur un salon : aucun refus n\'écrase l\'autre', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.fake.latency = 20;
+  try {
+    const ch = h.guild.channels.cache.get(IDS.channels.rules);
+    const lockdown = h.client.services.lockdown;
+    await Promise.all([lockdown.lockChannel(ch, null, 'lock'), lockdown.hideChannel(ch, 'hide')]);
+    await h.settle();
+    const ev = h.fake.channels.get(ch.id).permission_overwrites.find((o) => o.id === IDS.roles.everyone);
+    assert.ok(BigInt(ev.deny) & P.SendMessages, 'refus d\'écrire écrasé');
+    assert.ok(BigInt(ev.deny) & P.ViewChannel, 'refus de voir écrasé');
+    await Promise.all([lockdown.unlockChannel(ch, 'unlock'), lockdown.unhideChannel(ch, 'unhide')]);
+    await h.settle();
+    assert.deepEqual(h.fake.channels.get(ch.id).permission_overwrites, []);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R23 /hide sur une catégorie masque aussi ses salons synchronisés ; /unhide restaure exactement chacun', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const cat = IDS.channels.catGeneral;
+    const synced = [IDS.channels.general, IDS.channels.rules, IDS.channels.announcements, IDS.channels.forum];
+    const own = IDS.channels.staff; // surcharges propres : non synchronisé, laissé tel quel
+    const all = [cat, ...synced, own];
+    const before = Object.fromEntries(all.map((id) => [id, overwritesOf(h, id)]));
+    const rec = await h.slash('hide', [opt('salon', 7, cat)], { as: 'admin' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    for (const id of synced) assert.equal(can(h, IDS.users.target, id, P.ViewChannel), false, `salon ${id} encore visible`);
+    assert.deepEqual(overwritesOf(h, own), before[own]);
+    assert.ok(h.guild.channels.cache.get(IDS.channels.general).permissionsLocked, 'salon désynchronisé de sa catégorie');
+    const un = await h.slash('unhide', [opt('salon', 7, cat)], { as: 'admin' });
+    assert.ok(!h.isError(un), h.replyText(un));
+    for (const id of all) assert.deepEqual(overwritesOf(h, id), before[id], `salon ${id} non restauré`);
+    assert.equal(h.client.services.lockdown.locks.list(h.guild.id, 'hide').length, 0);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

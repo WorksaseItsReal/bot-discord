@@ -35,8 +35,10 @@ module.exports = {
 
   async execute(interaction, client) {
     const channel = channelForCommand(interaction, 'salon', { overwrites: true });
+    // Catégorie : ses salons masqués avec elle sont rendus visibles un par un (plus de 3 s possible).
+    await interaction.deferReply();
     await unhide(client, channel, interaction.user);
-    await interaction.reply(render(channel, interaction.user, interaction.user.id));
+    await interaction.editReply(render(channel, interaction.user, interaction.user.id));
   },
 
   buttons: {
@@ -44,8 +46,9 @@ module.exports = {
     async run(interaction, client, [channelId, ownerId]) {
       requirePermission(interaction, 'ManageChannels');
       const channel = await channelForButton(interaction, channelId, { overwrites: true });
+      await interaction.deferUpdate();
       await unhide(client, channel, interaction.user);
-      await interaction.update(render(channel, interaction.user, ownerId));
+      await interaction.editReply(render(channel, interaction.user, ownerId));
     },
   },
 };

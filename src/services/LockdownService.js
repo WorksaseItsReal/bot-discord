@@ -458,29 +458,71 @@ class LockdownService {
 
   /**
    * Masque un salon à @everyone en sauvegardant l'état d'origine de ViewChannel
-   * (état distinct du verrouillage : sorte `hide` dans LockRepository).
+   * (état distinct du verrouillage : sorte `hide` dans LockRepository). Bot sans Administrateur :
+   * une surcharge membre lui garde la vue du salon (sinon /unhide deviendrait impossible),
+   * mémorisée et retirée par /unhide. Sérialisé avec lock / unlock sur le même salon.
+   * Catégorie : Discord ne reporte pas la surcharge sur ses salons ; ceux qui étaient synchronisés
+   * avec elle (et pas déjà masqués) sont masqués un par un et mémorisés pour /unhide.
+   * @returns {Promise<number>} salons de la catégorie masqués avec elle
    */
   async hideChannel(channel, reason) {
     assertOverwritable(channel);
+    // Synchronisation lue AVANT de modifier la catégorie (ensuite, plus aucun salon ne l'est).
+    const children = channel.type === ChannelType.GuildCategory
+      ? [...channel.guild.channels.cache.values()].filter((c) => c.parentId === channel.id && !c.isThread?.() && c.permissionOverwrites
+        && c.permissionsLocked && !this.locks.get(channel.guild.id, c.id, 'hide'))
+      : [];
+    await this.#serial(channel.id, () => this.#hide(channel, reason, children.map((c) => c.id)));
+    return inBatches(children, (c) => this.#serial(c.id, () => this.#hide(c, reason)));
+  }
+
+  async #hide(channel, reason, children = []) {
     const everyone = channel.guild.roles.everyone;
-    if (!this.locks.get(channel.guild.id, channel.id, 'hide')) {
-      const current = channel.permissionOverwrites.cache.get(everyone.id);
-      this.locks.save(channel.guild.id, channel.id, { v: 2, perms: { ViewChannel: overwriteState(current, 'ViewChannel') } }, 'hide');
+    const saved = this.locks.get(channel.guild.id, channel.id, 'hide');
+    const state = saved ? normalizeLock(saved.data) : { perms: { ViewChannel: overwriteState(channel.permissionOverwrites.cache.get(everyone.id), 'ViewChannel') }, others: {} };
+    const kids = [...new Set([...(saved?.data?.children ?? []), ...children])];
+    const keep = botKeeps(channel, ['ViewChannel']);
+    const fresh = rememberOthers(state.others, keep, channel);
+    if (!saved || Object.keys(fresh).length || kids.length > (saved?.data?.children?.length ?? 0)) {
+      this.locks.save(channel.guild.id, channel.id, { ...lockData(state), ...(kids.length ? { children: kids } : {}) }, 'hide');
     }
-    await editEveryone(channel, { ViewChannel: false }, reason);
+    await applyOthers(channel, keep, reason);
+    try {
+      await editEveryone(channel, { ViewChannel: false }, reason);
+    } catch (err) {
+      await restoreOthers(channel, fresh, reason).catch(() => {});
+      if (!saved) this.locks.delete(channel.guild.id, channel.id, 'hide');
+      else this.locks.save(channel.guild.id, channel.id, saved.data, 'hide');
+      throw err;
+    }
   }
 
   /**
    * Rend un salon visible : restaure l'état d'origine de ViewChannel (autorisé ou neutre).
    * Sans état sauvegardé (ou si le salon était déjà masqué avant /hide), on ne retire que
    * le refus posé par le bot (ViewChannel → neutre) : /unhide doit rendre le salon visible.
+   * La garde du bot posée par /hide est ensuite retirée. Catégorie : les salons masqués avec
+   * elle (et toujours masqués) sont rendus visibles aussi.
    */
   async unhideChannel(channel, reason) {
     assertOverwritable(channel);
+    const children = await this.#serial(channel.id, () => this.#unhide(channel, reason));
+    const guildId = channel.guild.id;
+    const targets = children
+      .map((id) => channel.guild.channels.cache.get(id))
+      .filter((c) => c?.permissionOverwrites && this.locks.get(guildId, c.id, 'hide'));
+    await inBatches(targets, (c) => this.#serial(c.id, () => (this.locks.get(guildId, c.id, 'hide') ? this.#unhide(c, reason) : null)));
+  }
+
+  /** @returns {Promise<string[]>} salons masqués avec cette catégorie */
+  async #unhide(channel, reason) {
     const saved = this.locks.get(channel.guild.id, channel.id, 'hide');
-    const original = saved?.data?.perms?.ViewChannel;
+    const state = saved ? normalizeLock(saved.data) : null;
+    const original = state?.perms?.ViewChannel;
     await restoreEveryone(channel, { ViewChannel: original === true ? true : null }, reason);
+    if (state) await restoreOthers(channel, state.others, reason);
     if (saved) this.locks.delete(channel.guild.id, channel.id, 'hide');
+    return saved?.data?.children ?? [];
   }
 
   /**
