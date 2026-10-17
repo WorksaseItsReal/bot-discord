@@ -12,9 +12,11 @@ const { memoryDb } = require('./db.helper');
 const { GuildConfigRepository } = require('../src/database/repositories/GuildConfigRepository');
 const { SecurityIncidentRepository } = require('../src/database/repositories/SecurityIncidentRepository');
 const { SecurityGrantRepository } = require('../src/database/repositories/SecurityGrantRepository');
+const { SecurityBlacklistRepository } = require('../src/database/repositories/SecurityBlacklistRepository');
 const { ConfigService } = require('../src/services/ConfigService');
 const { AntiRaidService } = require('../src/services/AntiRaidService');
 const { SecurService } = require('../src/services/SecurService');
+const { BlacklistService } = require('../src/services/BlacklistService');
 const { SecurRegistry } = require('../src/services/secur/registry');
 const S = require('../src/utils/secur');
 const V = require('../src/utils/securViews');
@@ -81,7 +83,9 @@ function world({ modules = [], cfg = {} } = {}) {
   const registry = new SecurRegistry();
   for (const key of modules) registry.register({ key, auditTypes: S.SECUR_MODULES[key].auditTypes, priority: 3, classify: () => ({ weight: 1, record: null }), undo: async () => ({ ok: true }), targetKey: () => 'x' });
   const securService = new SecurService({ client, config, logging, antiraid: antiraidService, incidents, grants, registry });
-  client.services = { config, antiraid: antiraidService, secur: securService, logging };
+  // Liste noire réelle (SEC3) : ses actions font partie des gestionnaires de la coquille /secur.
+  const blacklistService = new BlacklistService({ client, config, logging, repo: new SecurityBlacklistRepository(db) });
+  client.services = { config, antiraid: antiraidService, secur: securService, logging, blacklist: blacklistService };
   config.update(G, { logChannels: { security: SEC_CH }, ...cfg });
 
   const addMember = (id, { roleIds = [], bot = false, perms = 0n } = {}) => {
@@ -246,7 +250,7 @@ test('module non chargé : « non disponible », aucun composant de réglage ; c
 
 test('tous les gestionnaires refusent sans Administrateur ; les modifications refusent un administrateur non-owner', async () => {
   const w = world({ modules: ['channelDelete'] });
-  const args = { nav: [], go: ['home'], preview: ['on'], apply: ['on'], trustbots: ['on'], mode: ['channelDelete'], punish: ['channelDelete'], undo: ['channelDelete', 'off'], limits: ['channelDelete'], limitsubmit: ['channelDelete'], verrou: ['on'], raidping: [], notify: ['on'], ownersdm: ['off'], botexec: [], restore: [], grantdecide: [], owners: [], trust: [], statut: [], open: ['home'] };
+  const args = { nav: [], go: ['home'], preview: ['on'], apply: ['on'], trustbots: ['on'], mode: ['channelDelete'], punish: ['channelDelete'], undo: ['channelDelete', 'off'], limits: ['channelDelete'], limitsubmit: ['channelDelete'], verrou: ['on'], raidping: [], notify: ['on'], ownersdm: ['off'], botexec: [], restore: [], grantdecide: [], owners: [], trust: [], statut: [], open: ['home'], blpage: ['0'], blrpage: ['0'], blask: [HUMAN2], blremove: [HUMAN2, '1'], blcancel: [] };
   for (const perms of [0n, P.ManageGuild]) {
     for (const [name, handler] of Object.entries(secur.buttons)) {
       const i = fake(w, { user: OWNER, perms, values: ['on'], fields: { limit: '3' } });
@@ -254,7 +258,8 @@ test('tous les gestionnaires refusent sans Administrateur ; les modifications re
       assert.equal(i.calls.update.length + i.calls.reply.length + i.calls.modal.length, 0, name);
     }
   }
-  const readOnly = ['nav', 'go', 'statut', 'open'];
+  // Lecture seule : navigation (SEC2) et pages / annulation de la liste noire et du blrank (SEC3).
+  const readOnly = ['nav', 'go', 'statut', 'open', 'blpage', 'blrpage', 'blcancel'];
   const before = JSON.stringify(w.config.get(G).secur);
   for (const [name, handler] of Object.entries(secur.buttons)) {
     if (readOnly.includes(name)) continue;
