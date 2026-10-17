@@ -146,3 +146,58 @@ test('R75 starboard : salon devenu privé après la publication → la carte exi
   }
 });
 
+
+// ------------------------------------------------------------------ R79 : rappels
+
+/** Rend les rappels échus et lance un tick du planificateur ; renvoie les messages du bot publiés. */
+async function deliverReminders(h) {
+  const mark = h.fake.messageLog.length;
+  h.client.database.db.prepare('UPDATE reminders SET remind_at = ?').run(Date.now() - 1000);
+  await h.client.services.scheduler.tick();
+  await h.settle();
+  return h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m && m.author.id === h.client.user.id);
+}
+const isDm = (h, m) => h.fake.dms.has(m.channel_id);
+
+test('R79 /reminder : salon en lecture seule → rappel en MP ; auteur banni ou parti → jamais publié dans le salon ; lien masqué neutralisé', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const rules = h.fake.channels.get(IDS.channels.rules);
+    rules.permission_overwrites = [{ id: IDS.guild, type: 0, allow: '0', deny: String(P.SendMessages) }];
+    h.fake.dispatchNow('CHANNEL_UPDATE', rules, 'préparation : #règles en lecture seule');
+    await h.settle();
+
+    // 1. Création dans un salon où l'auteur ne peut pas écrire : le rappel partira en MP.
+    const payload = 'Vérification obligatoire : [https://discord.com/verify](https://discord-verify.example.ru/login)';
+    const rec = await h.slash('reminder', sub('create', [opt('duree', 3, '6h'), opt('message', 3, payload)]), { as: 'member', channel: 'rules' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    assert.match(h.replyText(rec), /message privé/i);
+    const row = h.client.database.db.prepare('SELECT * FROM reminders').get();
+    assert.equal(row.channel_id, null, 'rappel enregistré pour #règles (lecture seule pour son auteur)');
+    let posted = await deliverReminders(h);
+    assert.equal(posted.filter((m) => m.channel_id === IDS.channels.rules).length, 0, 'rappel publié dans #règles');
+    const dm = posted.find((m) => isDm(h, m));
+    assert.ok(dm, 'rappel non livré en MP');
+    assert.ok(!/(^|[^\\])\[/.test(dm.embeds[0].description), `lien masqué cliquable : ${dm.embeds[0].description}`);
+
+    // 2. Rappel créé dans #général, auteur banni avant l'échéance → MP, rien dans #général.
+    await h.slash('reminder', sub('create', [opt('duree', 3, '1h'), opt('message', 3, 'Annonce du banni')]), { as: 'member', channel: 'general' });
+    assert.equal(h.client.database.db.prepare('SELECT channel_id FROM reminders').get().channel_id, IDS.channels.general);
+    const ban = await h.slash('ban', [opt('membre', 6, IDS.users.member), opt('raison', 3, 'phishing')], { as: 'admin' });
+    if (/Confirmation/.test(h.replyText(ban))) await h.confirm(ban);
+    await h.settle();
+    assert.ok(h.fake.bans.has(IDS.users.member));
+    posted = await deliverReminders(h);
+    assert.equal(posted.filter((m) => m.channel_id === IDS.channels.general && /Annonce du banni/.test(m.embeds?.[0]?.description ?? '')).length, 0, 'rappel d\'un membre banni publié dans #général');
+    assert.equal(h.client.database.db.prepare('SELECT COUNT(*) n FROM reminders').get().n, 0, 'rappel conservé');
+
+    // 3. Membre présent qui peut écrire : publication dans le salon comme avant.
+    await h.slash('reminder', sub('create', [opt('duree', 3, '1h'), opt('message', 3, 'Rappel normal')]), { as: 'target', channel: 'general' });
+    posted = await deliverReminders(h);
+    assert.ok(posted.some((m) => m.channel_id === IDS.channels.general && /Rappel normal/.test(m.embeds?.[0]?.description ?? '')), 'rappel normal non publié dans le salon');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
