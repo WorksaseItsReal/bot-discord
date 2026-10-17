@@ -184,9 +184,11 @@ test('Boutique : un rôle non attribué est remboursé EXACTEMENT du débit, mê
     h.fake.inject({ method: 'PUT', route: /\/members\/\d+\/roles\/\d+$/ }, { status: 403, code: 50013 });
     const rec = await h.click(msg, buyId, { as: 'member' });
     await h.settle();
-    assert.match(h.replyText(rec), /remboursé de \*\*1\*\*/);
+    // Revue n° 6 (R103) : le prix affiché (1000) ne correspond plus : achat refusé AVANT tout
+    // débit (aucun débit ni remboursement, donc jamais d'argent créé).
+    assert.match(h.replyText(rec), /prix de \*\*Notifs\*\* a changé/);
     assert.equal(svc.account(G, IDS.users.member).balance, 1000, 'remboursement différent du débit (argent créé)');
-    assert.deepEqual(h.client.repositories.economy.history(G, IDS.users.member, 2).map((t) => `${t.kind}:${t.delta}`), ['refund:1', 'buy:-1']);
+    assert.deepEqual(h.client.repositories.economy.history(G, IDS.users.member, 2).map((t) => t.kind).filter((k) => k === 'buy' || k === 'refund'), []);
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();

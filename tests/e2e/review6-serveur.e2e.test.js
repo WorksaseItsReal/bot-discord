@@ -466,3 +466,32 @@ test('R94 : bouton « Ramener » revérifie les droits dans le vocal où se trou
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* R103 : boutique, prix changé entre l'affichage et le clic            */
+/* ------------------------------------------------------------------ */
+
+test('R103 : achat refusé (rien débité) si le prix a changé depuis l\'affichage de la boutique', async () => {
+  const h = await setup();
+  try {
+    h.configure({ economy: { enabled: true } });
+    const svc = h.client.services.economy;
+    svc.adminAdjust(h.guild.id, IDS.users.member, 'set', 50_000, IDS.users.admin);
+    const item = svc.addItem(h.guild.id, { name: 'Ticket VIP', price: 100, kind: 'item' });
+    const shop = await h.slash('eco', sub('boutique'), { as: 'member' });
+    const buy = h.messagesOf(shop)[0].components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith(`cmd:eco:buy:${item.id}:`));
+    svc.updateItem(h.guild.id, item.id, { name: 'Ticket VIP', price: 40_000, description: null, stock: null, emoji: null });
+    const click = await h.click(h.messagesOf(shop)[0], buy.custom_id, { as: 'member' });
+    assert.ok(h.isError(click), h.replyText(click).slice(0, 160));
+    assert.match(h.replyText(click), /prix/);
+    assert.equal(svc.account(h.guild.id, IDS.users.member).balance, 50_000, 'débité d\'un prix jamais affiché');
+    // Boutique actualisée : achat au nouveau prix affiché.
+    const fresh = await h.slash('eco', sub('boutique'), { as: 'member' });
+    const buy2 = h.messagesOf(fresh)[0].components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith(`cmd:eco:buy:${item.id}:`));
+    const ok = await h.click(h.messagesOf(fresh)[0], buy2.custom_id, { as: 'member' });
+    assert.ok(!h.isError(ok), h.replyText(ok).slice(0, 160));
+    assert.equal(svc.account(h.guild.id, IDS.users.member).balance, 10_000);
+  } finally {
+    await h.close();
+  }
+});

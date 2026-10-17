@@ -19,7 +19,8 @@ const E = require('../../utils/economy');
  *
  * Boutons persistants :
  *  cmd:eco:shop:<page>:<origine>          boutique (éphémère) : page, actualiser
- *  cmd:eco:buy:<article>:<jeton>:<page>   achat (jeton = dernier achat connu : anti-double-clic)
+ *  cmd:eco:buy:<article>:<jeton>:<page>:<prix>   achat (jeton = dernier achat connu : anti-double-clic ;
+ *                                         prix affiché : refus s'il a changé)
  *  cmd:eco:inv                            inventaire (depuis la boutique)
  *  cmd:eco:top:<page>:<auteur> · cmd:eco:topme:<auteur>   classement public
  *  cmd:eco:replay:<jeu>:<mise>:<choix>:<auteur>           rejouer (auteur seulement)
@@ -128,7 +129,7 @@ function shopView(client, guild, userId, page = 0, notice, { ownedRoles = [] } =
     buyButtons.push(actionButton({
       command: 'eco',
       action: 'buy',
-      args: [item.id, token, p],
+      args: [item.id, token, p, item.price],
       label: `${n}. Acheter · ${plain(item.name, 30)}`,
       emoji: '🛒',
       style: canBuy ? ButtonStyle.Success : ButtonStyle.Secondary,
@@ -502,13 +503,25 @@ module.exports = {
       await interaction.update(inventoryView(client, interaction.guild, interaction.user.id));
     },
     /**
-     * cmd:eco:buy:<article>:<jeton>:<page> — achat. Le jeton (dernier achat connu à
-     * l'affichage) rend un double clic inoffensif : le second clic est refusé.
+     * cmd:eco:buy:<article>:<jeton>:<page>:<prix> — achat. Le jeton (dernier achat connu à
+     * l'affichage) rend un double clic inoffensif : le second clic est refusé. Le prix affiché
+     * est revérifié juste avant le débit : jamais débité d'un prix que le membre n'a pas vu.
      */
-    async buy(interaction, client, [rawId, rawToken, rawPage]) {
+    async buy(interaction, client, [rawId, rawToken, rawPage, rawPrice]) {
       const svc = svcOf(client);
       const eco = svc.assertEnabled(interaction.guildId);
       if (!/^\d{1,12}$/.test(rawId ?? '') || !/^\d{1,16}$/.test(rawToken ?? '') || !/^\d{1,3}$/.test(rawPage ?? '')) throw new UserError('Ce bouton est invalide.');
+      // Bouton d'avant ce contrôle (sans prix) : boutique périmée.
+      if (!/^\d{1,16}$/.test(rawPrice ?? '')) throw new UserError('Boutique périmée : actualisez-la avant d\'acheter.');
+      const displayed = Number(rawPrice);
+      /** Relu juste avant le débit (aucune attente entre les deux) : refus si le prix a changé. */
+      const assertPrice = () => {
+        const fresh = svc.getItem(interaction.guildId, Number(rawId));
+        if (!fresh) throw new UserError('Cet article n\'existe plus : actualisez la boutique.');
+        if (fresh.price !== displayed) {
+          throw new UserError(`Le prix de **${plain(fresh.name, 50)}** a changé : ${money(fresh.price, eco)} au lieu de ${money(displayed, eco)} affichés. Actualisez la boutique pour l'acheter à ce prix.`);
+        }
+      };
       const guild = interaction.guild;
       const userId = interaction.user.id;
       const page = Number(rawPage);
@@ -517,6 +530,7 @@ module.exports = {
       const token = Number(rawToken);
       if (item.kind !== 'role') {
         // Article relu dans la transaction d'achat (r.item) : prix et nom réellement débités.
+        assertPrice();
         const r = svc.buy(guild.id, userId, item.id, token);
         await interaction.update(shopView(client, guild, userId, page, `${ICONS.success} **${plain(r.item.name, 50)}** acheté pour ${money(r.item.price, eco)}. Il vous attend dans votre inventaire (solde : ${money(r.balance, eco)}).`));
         return;
@@ -530,7 +544,8 @@ module.exports = {
       const member = await selfMember(interaction);
       if (member.roles.cache.has(item.role_id)) throw new UserError('Vous avez déjà ce rôle.');
       // Article relu dans la transaction d'achat : le remboursement rend EXACTEMENT le débit,
-      // même si le prix a changé pendant l'acquittement.
+      // même si le prix a changé pendant l'acquittement (refusé s'il ne correspond plus à l'affichage).
+      assertPrice();
       const r = svc.buy(guild.id, userId, item.id, token);
       const bought = r.item;
       const { failed } = await applyRoles(member, { add: [bought.role_id] }, `Achat en boutique : ${plain(bought.name, 50)}`, (id, e) =>
