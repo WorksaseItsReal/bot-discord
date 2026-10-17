@@ -49,8 +49,10 @@ module.exports = [
     name: 'messageDeleteBulk',
     async execute(client, messages, channel) {
       if (!channel?.guild) return;
-      // Purge faite par le bot (quarantaine AutoMod…) : déjà journalisée par celui-ci.
-      if (client.services.logging.allSuppressed?.(messages.keys())) return;
+      // Purge faite par le bot (quarantaine AutoMod…) : déjà journalisée par celui-ci, sauf si les
+      // logs AutoMod ne partent pas (en pause, désactivés, débranchés) : journalisée ici.
+      const automodLogged = client.services.logging.wouldLog?.(channel.guild.id, 'automod', { event: 'automod', channelId: channel.id }) !== false;
+      if (automodLogged && client.services.logging.allSuppressed?.(messages.keys())) return;
       const list = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
       const authors = new Set(list.map((m) => m.author?.id).filter(Boolean));
       const preview = list

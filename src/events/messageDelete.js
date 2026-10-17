@@ -11,8 +11,10 @@ module.exports = {
   async execute(client, message) {
     if (!message.guild) return;
     const logging = client.services.logging;
-    // Supprimé par l'AutoMod : la carte AutoMod contient déjà le message.
-    if (logging.isSuppressed?.(message.id)) return;
+    // Supprimé par le bot (AutoMod…) : la carte AutoMod contient déjà le message. Sauf si cette carte
+    // ne part pas (logs AutoMod en pause, désactivés ou débranchés) : il est alors journalisé ici.
+    // Les messages du bot lui-même (sticky, starboard) ne sont jamais journalisés en double.
+    if (logging.isSuppressed?.(message.id) && (message.author?.bot || logging.wouldLog?.(message.guild.id, 'automod', { event: 'automod', channelId: message.channelId }) !== false)) return;
     const ctx = {
       event: 'messageDelete',
       channelId: message.channelId,

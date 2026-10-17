@@ -561,3 +561,41 @@ test('R56 : inondation de logs — cartes regroupées, alerte de sécurité envo
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R57
+
+test('R57 : logs AutoMod en pause — le message supprimé par l\'AutoMod est journalisé dans Messages', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ logs: { disabledCategories: ['automod'] } });
+    let mark = h.fake.messageLog.length;
+    const m = await h.userMessage({ as: 'member', content: 'mot interdit ici' });
+    await h.settle();
+    assert.ok(!h.fake.messages.has(m.id), 'message non supprimé par l\'AutoMod');
+    let posts = botPostsIn(h, mark, IDS.channels.logs);
+    assert.equal(titled(posts, /Message supprimé/).length, 1, 'message supprimé par l\'AutoMod journalisé nulle part');
+
+    // Purge faite par le bot (quarantaine) alors que les logs AutoMod sont en pause : journalisée aussi.
+    const a = await h.userMessage({ as: 'member', content: 'premier message' });
+    const b = await h.userMessage({ as: 'member', content: 'second message' });
+    mark = h.fake.messageLog.length;
+    h.client.services.logging.suppressMessage(a.id);
+    h.client.services.logging.suppressMessage(b.id);
+    h.fake.dispatchNow('MESSAGE_DELETE_BULK', { ids: [a.id, b.id], channel_id: IDS.channels.general, guild_id: h.guild.id }, 'purge par le bot');
+    await h.settle();
+    posts = botPostsIn(h, mark, IDS.channels.logs);
+    assert.equal(titled(posts, /Suppression en masse/).length, 1, 'purge du bot journalisée nulle part');
+
+    // Logs AutoMod actifs : pas de doublon « Message supprimé » (la carte AutoMod suffit).
+    h.configure({ logs: { disabledCategories: [] } });
+    mark = h.fake.messageLog.length;
+    await h.userMessage({ as: 'member', content: 'encore un mot interdit' });
+    await h.settle();
+    posts = botPostsIn(h, mark, IDS.channels.logs);
+    assert.equal(titled(posts, /Message supprimé/).length, 0, 'doublon avec la carte AutoMod');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
