@@ -467,3 +467,52 @@ test('R78 /suggestion, /reminder, /sondage : texte que l\'AutoMod supprimerait r
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R81 : /niveaux et hiérarchie
+
+test('R81 /niveaux : « Gérer le serveur » ne fait pas s\'attribuer une récompense au-dessus de son rôle ni modifier un supérieur', async () => {
+  const h = await createHarness();
+  try {
+    // Rôle « Temporaire » (position 1) avec Gérer le serveur, porté par la cible.
+    updateRole(h, IDS.roles.temp, () => P.ManageGuild, 'préparation : Temporaire gère le serveur');
+    const tm = h.fake.members.get(IDS.users.target);
+    tm.roles = [IDS.roles.temp];
+    h.fake.dispatchNow('GUILD_MEMBER_UPDATE', { guild_id: h.guild.id, ...tm }, 'préparation : cible Temporaire');
+    await h.settle();
+    h.configure({ levels: { enabled: true, rewards: [{ level: 30, roleId: IDS.roles.gamer }] } });
+
+    const openXp = async (as, userId) => {
+      const dash = await h.slash('niveaux', [], { as });
+      const nav = await h.click(h.message(dash.original), 'cmd:niveaux:nav', { values: ['xp'], as });
+      const sel = await h.click(h.message(nav.componentMessageId), 'cmd:niveaux:xpuser', { values: [userId], as });
+      return h.message(sel.componentMessageId);
+    };
+    const setXp = async (as, userId, amount) => {
+      const m = await openXp(as, userId);
+      const btn = m.components.flatMap((r) => r.components).find((c) => c.custom_id === `cmd:niveaux:xp:set:${userId}`);
+      const open = await h.click(m, btn.custom_id, { as });
+      const rec = await h.submitModal(open, { amount: String(amount) }, { as });
+      await h.settle();
+      return rec;
+    };
+
+    // 1. Elle-même : XP modifiée, mais la récompense au-dessus de son rôle n'est pas donnée.
+    await setXp('target', IDS.users.target, 100000);
+    assert.ok(!h.fake.members.get(IDS.users.target).roles.includes(IDS.roles.gamer), 'récompense au-dessus de son rôle attribuée');
+
+    // 2. Un supérieur (le membre « Joueur ») : refus, ni XP ni rôle modifiés.
+    h.client.services.levels.levels.setXp(h.guild.id, IDS.users.member, 200000, require('../../src/services/LevelService').levelFromXp);
+    const before = h.client.services.levels.levels.get(h.guild.id, IDS.users.member).xp;
+    const rec = await setXp('target', IDS.users.member, 0);
+    assert.ok(h.isError(rec), 'XP d\'un supérieur modifiée');
+    assert.equal(h.client.services.levels.levels.get(h.guild.id, IDS.users.member).xp, before);
+    assert.ok(h.fake.members.get(IDS.users.member).roles.includes(IDS.roles.gamer), 'récompense d\'un supérieur retirée');
+
+    // Témoin : l'admin attribue l'XP et la récompense à un membre.
+    await setXp('admin', IDS.users.target, 100000);
+    assert.ok(h.fake.members.get(IDS.users.target).roles.includes(IDS.roles.gamer), 'récompense non attribuée par l\'admin');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

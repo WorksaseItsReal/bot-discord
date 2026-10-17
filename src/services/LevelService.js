@@ -309,17 +309,20 @@ class LevelService {
    * Met les rôles de récompense en accord avec le niveau.
    * Par défaut (passage de niveau) : ajoute les rôles dus et, si les récompenses ne sont
    * pas cumulatives, retire les paliers inférieurs. `full` (changement par un admin) :
-   * retire aussi les récompenses des paliers non atteints.
+   * retire aussi les récompenses des paliers non atteints. `actor` (admin qui modifie l'XP) :
+   * seuls les rôles sous son rôle le plus haut sont touchés (propriétaire : tous).
    * @returns {Promise<{ added: string[], removed: string[] }>}
    */
-  async syncRewards(member, level, cfg, { full = false } = {}) {
+  async syncRewards(member, level, cfg, { full = false, actor = null } = {}) {
     const guild = member.guild;
     const rewards = cfg.rewards ?? [];
     if (!rewards.length || !guild?.members?.me?.permissions?.has?.(PermissionFlagsBits.ManageRoles)) return { added: [], removed: [] };
     const plan = rewardPlan(level, rewards, cfg.stackRewards !== false);
     const has = (id) => member.roles.cache.has(id);
-    const add = plan.eligible.filter((id) => !has(id) && LevelService.assignable(guild, id));
-    const drop = (full ? plan.ineligible : cfg.stackRewards === false ? plan.lower : []).filter((id) => has(id) && LevelService.assignable(guild, id));
+    const actorTop = actor && actor.id !== guild.ownerId ? actor.roles?.highest?.position ?? 0 : Infinity;
+    const allowed = (id) => LevelService.assignable(guild, id) && (guild.roles.cache.get(id)?.position ?? Infinity) < actorTop;
+    const add = plan.eligible.filter((id) => !has(id) && allowed(id));
+    const drop = (full ? plan.ineligible : cfg.stackRewards === false ? plan.lower : []).filter((id) => has(id) && allowed(id));
     // Un rôle à la fois (routes par rôle) : un PATCH de liste pour le retrait annulerait l'ajout.
     const log = (action) => (id, err) => logger.debug(`${action} de la récompense ${id} :`, err?.message);
     const { added } = await applyRoles(member, { add }, `Récompense de niveau ${level}`, log('Ajout'));
@@ -448,23 +451,24 @@ class LevelService {
    * Donne, retire ou définit l'XP d'un membre (sans annonce). Les récompenses sont
    * resynchronisées si le membre est sur le serveur.
    * @param {'give'|'remove'|'set'} op
+   * @param {{ actor?: import('discord.js').GuildMember|null }} [opts] auteur : récompenses limitées à sa hiérarchie
    */
-  async adminXp(guild, userId, op, amount) {
+  async adminXp(guild, userId, op, amount, { actor = null } = {}) {
     const n = Math.floor(Number(amount));
     if (!Number.isFinite(n) || n < 0) throw new RangeError('Montant invalide');
     const current = this.levels.get(guild.id, userId)?.xp ?? 0;
     const target = op === 'give' ? current + n : op === 'remove' ? current - n : n;
     const result = this.levels.setXp(guild.id, userId, Math.min(MAX_XP, Math.max(0, target)), levelFromXp);
     const member = await guild.members?.fetch?.(userId).catch(() => null);
-    if (member) await this.syncRewards(member, result.after.level, this.cfg(guild.id), { full: true }).catch(() => {});
+    if (member) await this.syncRewards(member, result.after.level, this.cfg(guild.id), { full: true, actor }).catch(() => {});
     return result;
   }
 
-  /** Réinitialise un membre (XP, compteurs) et retire ses rôles de récompense. */
-  async resetMember(guild, userId) {
+  /** Réinitialise un membre (XP, compteurs) et retire ses rôles de récompense (sous la hiérarchie de `actor`). */
+  async resetMember(guild, userId, { actor = null } = {}) {
     const n = this.levels.resetMember(guild.id, userId);
     const member = await guild.members?.fetch?.(userId).catch(() => null);
-    if (member) await this.syncRewards(member, -1, this.cfg(guild.id), { full: true }).catch(() => {});
+    if (member) await this.syncRewards(member, -1, this.cfg(guild.id), { full: true, actor }).catch(() => {});
     return n;
   }
 

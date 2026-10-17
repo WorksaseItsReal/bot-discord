@@ -22,6 +22,7 @@ const { LevelService, progressOf, levelFromXp, totalXpForLevel, DEFAULT_ANNOUNCE
 const { MAX_XP } = require('../../database/repositories/LevelRepository');
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
 const { UserError } = require('../../core/errors');
+const { canActOnByHierarchy } = require('../../utils/permissions');
 
 /**
  * /niveaux : tableau de bord unique des niveaux (éphémère, « Gérer le serveur »).
@@ -37,6 +38,23 @@ const IGNORABLE_TYPES = [...TEXT_TYPES, ChannelType.GuildForum, ChannelType.Guil
 const XP_OPS = { give: 'Donner', remove: 'Retirer', set: 'Définir' };
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
+
+/**
+ * L'auteur peut-il modifier l'XP (et donc les récompenses) de ce membre ? Soi-même : oui (les
+ * récompenses au-dessus de son rôle sont filtrées par syncRewards) ; un autre membre présent :
+ * seulement s'il est sous l'auteur (propriétaire : toujours). Lève une UserError.
+ */
+async function assertCanEditXp(interaction, userId) {
+  if (userId === interaction.user.id) return;
+  const guild = interaction.guild;
+  const target = await guild.members.fetch(userId).catch(() => null);
+  const actor = interaction.member;
+  if (!target || !actor?.roles?.highest) return; // parti : aucun rôle à toucher
+  const info = (m) => ({ isOwner: m.id === guild.ownerId, highestRolePosition: m.roles.highest.position });
+  if (!canActOnByHierarchy(info(actor), info(target))) {
+    throw new UserError('Vous ne pouvez pas modifier l\'XP de ce membre : son rôle est supérieur ou égal au vôtre.');
+  }
+}
 const cfgOf = (client, guildId) => client.services.config.get(guildId).levels;
 const fmt = (n) => Number(n ?? 0).toLocaleString('fr-FR');
 const SECTION = 'levels';
@@ -850,7 +868,8 @@ module.exports = {
       const amount = intField(interaction, 'amount', op === 'set' ? 0 : 1, MAX_XP, 'Quantité');
       if (amount === undefined) throw new UserError('Indiquez une quantité d\'XP.');
       await interaction.deferUpdate();
-      const { before, after } = await client.services.levels.adminXp(interaction.guild, userId, op, amount);
+      await assertCanEditXp(interaction, userId);
+      const { before, after } = await client.services.levels.adminXp(interaction.guild, userId, op, amount, { actor: interaction.member });
       const notice = `${ICONS.success} XP de <@${userId}> : ${fmt(before.xp)} → **${fmt(after.xp)}** (niveau ${before.level} → **${after.level}**).`;
       await interaction.editReply(memberView(client, interaction.guild, userId, notice));
     },
@@ -898,7 +917,8 @@ module.exports = {
       }
       if (scope !== 'member' || !SNOWFLAKE.test(userId ?? '')) throw new UserError('Ce bouton est invalide.');
       await interaction.deferUpdate();
-      await client.services.levels.resetMember(interaction.guild, userId);
+      await assertCanEditXp(interaction, userId);
+      await client.services.levels.resetMember(interaction.guild, userId, { actor: interaction.member });
       await interaction.editReply(memberView(client, interaction.guild, userId, `${ICONS.success} <@${userId}> a été réinitialisé.`));
     },
   },
