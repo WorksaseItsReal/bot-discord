@@ -430,3 +430,37 @@ test('R36 : un bot tiers (tickets, vocaux temporaires) qui supprime les salons q
   assert.equal(alerts.length, 1);
   assert.deepEqual(banned, ['ticketbot']);
 });
+
+// ---------------------------------------------------------------- R37
+
+test('R37 : serveur quitté → état mémoire de l\'AntiRaid oublié (guildDelete) ; arrivants expirés purgés', async (t) => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const w = raidWorld({ action: 'kick', joinThreshold: 3, minAccountAgeDays: 7, newAccountAction: 'kick' });
+  t.after(() => w.service.stop());
+  for (const id of ['a', 'b', 'c', 'd']) await w.join(id, { ageDays: 0.1 });
+  await w.service.handleDestructive(w.guild, 'someone', 'roleDelete');
+  w.service.rememberChannelCreator(G, 'c1', 'someone');
+  const s = w.service;
+  assert.ok(s.recentJoiners.has(G) && s.joinAlertAt.has(G) && s.lastTrigger.has(G) && s.digests.has(G));
+
+  // Purge périodique : arrivants de plus de 10 minutes oubliés (plus seulement à l'arrivée suivante).
+  s.pruneWindows(Date.now() + 11 * 60_000);
+  assert.equal(s.recentJoiners.has(G), false, 'arrivants expirés conservés jusqu\'au redémarrage');
+
+  // guildDelete : un gestionnaire d'événement oublie tout le serveur.
+  for (const id of ['e', 'f']) await w.join(id);
+  const handlers = fs.readdirSync(path.join(__dirname, '../src/events'))
+    .flatMap((f) => [].concat(require(`../src/events/${f}`)))
+    .filter((e) => e?.name === 'guildDelete');
+  const client = { services: { antiraid: s, config: { markLeft: () => {}, invalidate: () => {} }, activity: null, invites: null } };
+  for (const hd of handlers) await hd.execute(client, { id: G, name: 'Serveur', available: true });
+  for (const map of [s.joinWindows, s.joinAlertAt, s.lastTrigger, s.recentJoiners, s.digests, s.memberAlertWindows, s.createdChannels]) {
+    assert.equal(map.has(G), false, 'état d\'un serveur quitté conservé');
+  }
+  assert.equal([...s.destructiveWindows.keys()].some((k) => k.startsWith(`${G}:`)), false);
+  // Panne passagère (serveur indisponible) : rien n'est oublié.
+  await w.join('g');
+  for (const hd of handlers) await hd.execute(client, { id: G, available: false });
+  assert.equal(s.recentJoiners.has(G), true);
+});

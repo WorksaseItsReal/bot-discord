@@ -285,12 +285,39 @@ class AntiRaidService {
     return true;
   }
 
-  /** Oublie les fenêtres d'actions destructrices devenues vides. */
+  /** Oublie les fenêtres d'actions destructrices devenues vides et les arrivants / salons expirés. */
   pruneWindows(now = Date.now()) {
     this.lastWindowPrune = now;
     for (const [key, w] of this.destructiveWindows) {
       if (w.count(now) === 0) this.destructiveWindows.delete(key);
     }
+    for (const [key, w] of this.memberAlertWindows) {
+      if (w.count(now) === 0) this.memberAlertWindows.delete(key);
+    }
+    for (const [guildId, m] of this.recentJoiners) {
+      for (const [id, at] of m) {
+        if (now - at < RECENT_JOIN_MS) break; // ordre d'insertion : du plus ancien au plus récent
+        m.delete(id);
+      }
+      if (!m.size) this.recentJoiners.delete(guildId);
+    }
+    for (const [guildId, w] of this.joinWindows) {
+      if (!w.entries.some((e) => e.at > now - w.windowMs)) this.joinWindows.delete(guildId);
+    }
+    for (const [guildId, m] of this.createdChannels) {
+      for (const [id, e] of m) if (now - e.at >= CREATED_CHANNEL_TTL_MS) m.delete(id);
+      if (!m.size) this.createdChannels.delete(guildId);
+    }
+  }
+
+  /** Serveur quitté (guildDelete) : tout l'état mémoire de ce serveur est oublié. */
+  forgetGuild(guildId) {
+    if (!guildId) return;
+    for (const map of [this.joinWindows, this.joinAlertAt, this.lastTrigger, this.recentJoiners, this.memberAlertWindows, this.createdChannels]) map.delete(guildId);
+    const d = this.digests.get(guildId);
+    if (d?.timer) clearTimeout(d.timer);
+    this.digests.delete(guildId);
+    for (const key of this.destructiveWindows.keys()) if (key.startsWith(`${guildId}:`)) this.destructiveWindows.delete(key);
   }
 
   /** Marque un ban lancé par le bot (pas de log en double dans guildBanAdd). */
@@ -337,6 +364,7 @@ class AntiRaidService {
   async handleJoin(member) {
     const cfg = this.config.get(member.guild.id).antiraid;
     if (!cfg?.enabled) return;
+    if (Date.now() - this.lastWindowPrune > WINDOW_PRUNE_INTERVAL_MS) this.pruneWindows();
     this.#rememberJoin(member.guild.id, member.id);
     if (this.isWhitelisted(member.guild.id, member.id, [...(member.roles?.cache?.keys() ?? [])])) return;
 
