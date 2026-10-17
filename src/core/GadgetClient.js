@@ -51,6 +51,7 @@ const { GuildPurgeRepository } = require('../database/repositories/GuildPurgeRep
 const { SecurityIncidentRepository } = require('../database/repositories/SecurityIncidentRepository');
 const { SecurityGrantRepository } = require('../database/repositories/SecurityGrantRepository');
 const { BotSettingsRepository } = require('../database/repositories/BotSettingsRepository');
+const { SecurityBlacklistRepository } = require('../database/repositories/SecurityBlacklistRepository');
 const { ConfigService } = require('../services/ConfigService');
 const { StrikeService } = require('../services/StrikeService');
 const { LoggingService } = require('../services/LoggingService');
@@ -60,6 +61,8 @@ const { AutoModService } = require('../services/AutoModService');
 const { AntiRaidService } = require('../services/AntiRaidService');
 const { SecurService } = require('../services/SecurService');
 const { LockdownService } = require('../services/LockdownService');
+const { BlacklistService } = require('../services/BlacklistService');
+const { RaidResponseService } = require('../services/RaidResponseService');
 const { TicketService } = require('../services/TicketService');
 const { GiveawayService } = require('../services/GiveawayService');
 const { SuggestionService } = require('../services/SuggestionService');
@@ -192,6 +195,8 @@ class GadgetClient extends Client {
       securityGrants: new SecurityGrantRepository(db),
       // Réglages GLOBAUX du bot (console /bot) : table sans guild_id, rien à purger.
       botSettings: new BotSettingsRepository(db),
+      // Liste noire persistante et blrank (/secur blacklist, /secur blrank).
+      securityBlacklist: new SecurityBlacklistRepository(db),
     };
 
     const configService = new ConfigService(this.repositories.guildConfig);
@@ -216,6 +221,10 @@ class GadgetClient extends Client {
       antiraid,
       secur,
       lockdown: new LockdownService({ locks: this.repositories.locks, logging, timed: this.repositories.timedActions }),
+      // Liste noire persistante et blrank (/secur blacklist|blrank) ; riposte native de Discord
+      // (/lockdown suspendre|reprendre|riposte, hook de vague de l'AntiRaid). Aucun minuteur.
+      blacklist: new BlacklistService({ client: this, config: configService, logging, repo: this.repositories.securityBlacklist }),
+      raidResponse: new RaidResponseService({ client: this, config: configService, logging }),
       tickets,
       ticketRatings,
       giveaways: new GiveawayService({ client: this, giveaways: this.repositories.giveaways }),

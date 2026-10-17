@@ -395,6 +395,21 @@ class SchedulerService {
         await this.#logExpiry(guild, s, 'unban', `Le bannissement temporaire de <@${s.user_id}> est arrivé à échéance, mais un **bannissement définitif** (\`#${permanent.id}\`) est enregistré : il reste banni. Utilisez \`/unban\` si ce bannissement définitif n'a plus lieu d'être.`).catch(() => {});
         continue;
       }
+      // Liste noire (SEC3) : le tempban échu d'un blacklisté n'est PAS levé ; la ligne temporaire
+      // est close et le staff prévenu (seul /secur blacklist retirer peut le débannir).
+      if (this.client.services?.blacklist?.has?.(s.guild_id, s.user_id, 'ban')) {
+        this.sanctions.deactivateActive(s.guild_id, s.user_id, 'tempban', { by: null, reason: 'Liste noire : bannissement maintenu' });
+        await this.client.services?.logging?.send(guild.id, 'moderation', card({
+          tone: 'warning',
+          section: 'moderation',
+          icon: ICONS.ban,
+          title: 'Bannissement temporaire maintenu',
+          description: `Le bannissement temporaire de <@${s.user_id}> est arrivé à échéance, mais il est sur la **liste noire** de sécurité : il reste banni. Un owner peut le retirer de la liste avec \`/secur blacklist retirer\`.`,
+          fields: [field(ICONS.user, 'Membre', `<@${s.user_id}>`), field(ICONS.date, 'Échéance', discordTimestamp(s.expires_at, 'R'))],
+          footer: `Sanction #${s.id}`,
+        }), undefined, { event: 'revocation' }).catch(() => {});
+        continue;
+      }
       // Sans « Bannir des membres », aucun appel voué au 403 (limite des requêtes invalides).
       if (!SchedulerService.#memo(allowed, guild.id, () => this.#canUnban(guild))) {
         await this.#expiryFailed(guild, s, 'la permission « Bannir des membres » manque au bot');

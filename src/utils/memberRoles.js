@@ -10,16 +10,25 @@
  * concurrent (rôle Muted réappliqué à l'arrivée), sont alors écrasés.
  *
  * Les retraits passent en premier ; une erreur sur un rôle n'empêche pas les autres.
+ *
+ * Blrank (/secur blrank) : un membre listé ne peut recevoir AUCUN rôle. Ses AJOUTS sont ignorés
+ * (comptés dans `skipped`, présent seulement s'il n'est pas vide, sans appel à Discord) : rôles
+ * d'arrivée, menus, boutique, niveaux, rendus… Les retraits restent appliqués.
  * @param {import('discord.js').GuildMember} member
  * @param {{ add?: string[], remove?: string[] }} changes
  * @param {string} [reason]
  * @param {(roleId: string, error: Error, action: 'add'|'remove') => void} [onError]
- * @returns {Promise<{ added: string[], removed: string[], failed: string[] }>}
+ * @returns {Promise<{ added: string[], removed: string[], failed: string[], skipped?: string[] }>}
  */
 async function applyRoles(member, { add = [], remove = [] } = {}, reason, onError) {
   const out = { added: [], removed: [], failed: [] };
+  let blocked = null; // lu une fois, au premier ajout
   for (const [action, ids, done] of [['remove', remove, out.removed], ['add', add, out.added]]) {
     for (const id of new Set(ids)) {
+      if (action === 'add' && (blocked ??= isRankBlocked(member))) {
+        (out.skipped ??= []).push(id);
+        continue;
+      }
       try {
         await member.roles[action](id, reason);
         done.push(id);
@@ -32,4 +41,13 @@ async function applyRoles(member, { add = [], remove = [] } = {}, reason, onErro
   return out;
 }
 
-module.exports = { applyRoles };
+/** Membre du blrank (services.blacklist, SEC3) ? Faux si le service est absent ou en erreur. */
+function isRankBlocked(member) {
+  try {
+    return Boolean(member?.guild?.id && member.client?.services?.blacklist?.isRankBlocked?.(member.guild.id, member.id));
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { applyRoles, isRankBlocked };

@@ -1012,6 +1012,31 @@ const migrations = [
       );
     `,
   },
+  {
+    id: 30,
+    name: 'security_blacklist',
+    up: `
+      -- Liste noire persistante (/secur blacklist, kind = 'ban') et blrank (/secur blrank,
+      -- kind = 'rank' : le membre ne peut recevoir aucun rôle). Un banni de la liste noire le
+      -- reste malgré un débannissement (manuel, /unban, fin de tempban, hors ligne) : contrôlé à
+      -- l'arrivée, au débannissement et périodiquement (next_check_at, backoff sur échec).
+      -- 1 000 entrées au plus par serveur et par type (validé par le dépôt, comme kind : pas de
+      -- contrainte CHECK, l'ensemencement générique des tests de purge y insère d'autres valeurs).
+      CREATE TABLE IF NOT EXISTS security_blacklist (
+        guild_id          TEXT    NOT NULL,
+        user_id           TEXT    NOT NULL,
+        kind              TEXT    NOT NULL,
+        reason            TEXT,
+        author_id         TEXT    NOT NULL,
+        created_at        INTEGER NOT NULL,
+        last_enforced_at  INTEGER,
+        enforce_failures  INTEGER NOT NULL DEFAULT 0,
+        next_check_at     INTEGER,
+        PRIMARY KEY (guild_id, user_id, kind)
+      );
+      CREATE INDEX IF NOT EXISTS idx_security_blacklist_due ON security_blacklist (next_check_at);
+    `,
+  },
 ];
 
 module.exports = { migrations };
