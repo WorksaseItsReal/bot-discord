@@ -28,8 +28,6 @@ const MAX_OPEN_INCIDENTS = 20;
 /** Entrées gardées au-delà de leur fenêtre (comparaison avec une entrée reçue en retard). */
 const WINDOW_RETENTION_MS = 5 * MINUTE;
 const PRUNE_INTERVAL_MS = MINUTE;
-/** Accès de whitelist en attente : n'exemptent pas pendant 24 h au plus. */
-const GRANT_TTL_MS = DAY;
 const INCIDENT_RETENTION_MS = 90 * DAY;
 const GRANT_RETENTION_MS = 30 * DAY;
 const PURGE_INTERVAL_MS = HOUR;
@@ -135,13 +133,14 @@ class SecurService {
 
   /**
    * Accès de whitelist EN ATTENTE d'un utilisateur (n'exemptent pas), ou null s'il n'y en a pas.
+   * Un accès reste en attente jusqu'à la décision d'un owner : il ne devient jamais actif tout seul.
    * @returns {{ user: boolean, roles: Set<string> }|null}
    */
   pendingExemptions(guildId, userId) {
     if (!this.grants || !guildId) return null;
     let rows;
     try {
-      rows = this.grants.pending(guildId, this.now() - GRANT_TTL_MS);
+      rows = typeof this.grants.pendingFor === 'function' ? this.grants.pendingFor(guildId, userId) : this.grants.pending(guildId, 0);
     } catch {
       return null;
     }
@@ -188,9 +187,15 @@ class SecurService {
     }));
   }
 
+  /**
+   * Membre relu : le cache d'abord, sauf un membre PARTIEL (créé sans rôles par un PRESENCE_UPDATE
+   * hors cache) qui est relu par l'API, sinon derank, whitelist par rôle et niveau seraient faux.
+   */
   async #member(guild, userId) {
     if (!userId) return null;
-    return guild.members?.cache?.get?.(userId) ?? (await guild.members?.fetch?.(userId).catch(() => null)) ?? null;
+    const cached = guild.members?.cache?.get?.(userId);
+    if (cached && !cached.partial) return cached;
+    return (await guild.members?.fetch?.(userId).catch(() => null)) ?? cached ?? null;
   }
 
   /* ------------------------------------------------------------------ */
@@ -245,14 +250,16 @@ class SecurService {
 
   /**
    * Action faite PAR LE BOT pour un modérateur (/ban, /channel supprimer…), déjà autorisée par
-   * assertAllowed : comptée au nom du modérateur (at = maintenant, count actions).
+   * assertAllowed : comptée au nom du modérateur (at = maintenant, count actions). `targetId` (et
+   * `record`, détails lus par l'annulation du module : rôles retirés…) la rendent annulable ; sans
+   * cible, elle est comptée mais jamais mise en file d'annulation.
    */
-  async reportBotAction(guild, moderator, type, { count = 1, targetId = null, at = this.now() } = {}) {
+  async reportBotAction(guild, moderator, type, { count = 1, targetId = null, at = this.now(), record = null } = {}) {
     if (this.stopped || !guild?.id || !moderator?.id || moderator.id === this.client.user?.id || !this.covers(guild.id, type)) return null;
     const member = await this.#member(guild, moderator.id);
     const isBot = Boolean(member?.user?.bot ?? moderator.bot);
     if (S.isExempt(this.levelOf(guild, moderator.id, member, isBot), S.moduleMode(this.config.get(guild.id), type))) return null;
-    return this.#count(guild, moderator.id, type, { at, weight: count, record: { targetId, viaBot: true }, member, isBot });
+    return this.#count(guild, moderator.id, type, { at, weight: count, record: { ...(record && typeof record === 'object' ? record : {}), targetId, viaBot: true }, member, isBot });
   }
 
   /** Somme des actions d'un auteur dans la fenêtre courante d'un module. */
@@ -302,7 +309,10 @@ class SecurService {
     const triggered = best.sum >= limit;
     const incKey = `${guild.id}:${executorId}`;
     let state = this.#openIncident(incKey, now);
-    if (!triggered && !state) return Promise.resolve(null);
+    // Sous le seuil de son module, l'action ne rejoint un incident ouvert (et n'est annulée) que si
+    // celui-ci traite l'auteur en attaquant (sanction ≠ aucune) : un incident « alerte seule »
+    // (@everyone…) n'est pas contagieux.
+    if (!triggered && (!state || rank(state.target) === 0)) return Promise.resolve(null);
     let list = [entry];
     if (triggered) {
       const consumed = new Set(best.list);
@@ -326,7 +336,30 @@ class SecurService {
       if (rank(punish) > rank(state.target)) state.target = punish;
     }
     for (const e of list) this.#queueUndo(guild, state, key, e, cfg);
+    if (rank(state.target) > 0) this.#takePending(guild, state, executorId, cfg, now);
     return this.#schedule(state, guild).then(() => state);
+  }
+
+  /**
+   * Incident contre un attaquant : ses actions encore en mémoire (tous modules), restées sous le
+   * seuil et jamais mises en file, rejoignent l'incident et sont annulées (60 s au plus, jamais
+   * au-delà) : un nukeur qui dérank le staff « juste sous le seuil » avant de supprimer un salon
+   * ne laisse pas le staff dépouillé.
+   */
+  #takePending(guild, state, executorId, cfg, now) {
+    const prefix = `${guild.id}:${executorId}:`;
+    for (const modKey of this.registry.keys()) {
+      const w = this.windows.get(prefix + modKey);
+      if (!w) continue;
+      for (const e of w.entries) {
+        if (e.queued || now - e.at > LATE_MS) continue;
+        if (!e.counted) {
+          e.counted = true;
+          state.actions += e.weight;
+        }
+        this.#queueUndo(guild, state, modKey, e, cfg);
+      }
+    }
   }
 
   #createIncident(guild, executorId, now, member, isBot) {
@@ -352,6 +385,7 @@ class SecurService {
       undoFailed: 0,
       undoSkipped: 0,
       lateSkipped: 0,
+      viaBotSkipped: 0,
       overflow: false,
       idMap: new Map(),
       chain: Promise.resolve(),
@@ -382,6 +416,15 @@ class SecurService {
       q = new UndoQueue({
         isPaused: () => Boolean(this.client.services?.backup?.isRestoring?.(guildId)),
         execute: (task) => this.#runUndo(task),
+        // File pleine : tâche moins prioritaire évincée par une plus prioritaire (recréation d'un rôle…).
+        onEvict: (t) => {
+          const st = t.state;
+          if (!st) return;
+          st.overflow = true;
+          st.undoTotal = Math.max(0, st.undoTotal - 1);
+          st.undoPending = Math.max(0, st.undoPending - 1);
+          if (st.undoPending === 0) this.#schedule(st, st.guild).catch(() => {});
+        },
       });
       this.queues.set(guildId, q);
     }
@@ -397,8 +440,9 @@ class SecurService {
     }
     const mod = this.registry.get(key);
     if (!mod || typeof mod.undo !== 'function' || !S.SECUR_MODULES[key].undoable || S.moduleConfig(cfg, key).undo !== true) return;
-    if (this.breaker.isSuspended(guild.id, key)) {
-      state.undoSkipped += 1;
+    // Action faite via le bot sans cible lisible (opération groupée…) : rien à relire, jamais en file.
+    if (entry.record?.viaBot && !entry.record.targetId) {
+      state.viaBotSkipped += 1;
       return;
     }
     let targetKey = null;
@@ -406,6 +450,10 @@ class SecurService {
       targetKey = typeof mod.targetKey === 'function' ? mod.targetKey(entry.record) : null;
     } catch {
       targetKey = null;
+    }
+    if (this.breaker.isSuspended(guild.id, key, targetKey)) {
+      state.undoSkipped += 1;
+      return;
     }
     const task = { priority: mod.priority, module: key, targetKey, guildId: guild.id, record: entry.record, at: entry.at, state };
     if (!this.#queue(guild.id).push(task)) {
@@ -420,7 +468,7 @@ class SecurService {
     const { state, module: key, guildId } = task;
     try {
       const guild = this.client.guilds?.cache?.get?.(guildId) ?? state.guild;
-      if (!guild || this.breaker.isSuspended(guildId, key)) {
+      if (!guild || this.breaker.isSuspended(guildId, key, task.targetKey)) {
         state.undoSkipped += 1;
         return;
       }
@@ -437,23 +485,24 @@ class SecurService {
         state.undoFailed += 1;
         if (res?.note && state.details.length < 8) state.details.push(String(res.note).slice(0, 200));
       }
-      if (this.breaker.note(guildId, key, task.targetKey)) await this.#trip(guild, key, task.targetKey);
+      // Disjoncteur : seules les annulations qui ont réellement changé quelque chose comptent.
+      if (res?.ok && res.changed !== false && this.breaker.note(guildId, key, task.targetKey)) await this.#trip(guild, key, task.targetKey);
     } finally {
       state.undoPending = Math.max(0, state.undoPending - 1);
       if (state.undoPending === 0) this.#schedule(state, state.guild).catch(() => {});
     }
   }
 
-  /** Disjoncteur déclenché : file du module vidée, carte « Conflit d'annulation ». */
+  /** Disjoncteur déclenché : tâches de CET objet retirées de la file, carte « Conflit d'annulation ». */
   async #trip(guild, key, targetKey) {
-    const removed = this.queues.get(guild.id)?.clearModule(key) ?? [];
+    const removed = this.queues.get(guild.id)?.clearTarget(key, targetKey) ?? [];
     for (const t of removed) {
       t.state.undoSkipped += 1;
       t.state.undoPending = Math.max(0, t.state.undoPending - 1);
       if (t.state.undoPending === 0) this.#schedule(t.state, t.state.guild).catch(() => {});
     }
-    logger.warn(`Disjoncteur Secur : module ${key} suspendu sur ${guild.id} (${removed.length} annulation(s) abandonnée(s)).`);
-    await this.notifier.deliver(guild, { embed: cards.conflictCard({ moduleKey: key, targetKey, until: this.breaker.suspendedUntil(guild.id, key) }) }, { fallback: true, event: 'secur', fingerprint: `conflict:${key}` }).catch(() => {});
+    logger.warn(`Disjoncteur Secur : annulations de ${key}/${targetKey} suspendues sur ${guild.id} (${removed.length} annulation(s) abandonnée(s)).`);
+    await this.notifier.deliver(guild, { embed: cards.conflictCard({ moduleKey: key, targetKey, until: this.breaker.suspendedUntil(guild.id, key, targetKey) }) }, { fallback: true, event: 'secur', fingerprint: `conflict:${key}:${targetKey}` }).catch(() => {});
   }
 
   /** Regroupe les mises à jour d'un incident (sanction, ligne, carte) en une seule passe à la fois. */
@@ -474,6 +523,7 @@ class SecurService {
     if (state.lateSkipped) lines.push(`${state.lateSkipped} action(s) reçue(s) plus de 60 s après coup : comptée(s), jamais annulée(s).`);
     if (state.overflow) lines.push('File d\'annulation pleine (500 tâches) : restaurez avec /backup.');
     if (state.undoSkipped) lines.push(`${state.undoSkipped} annulation(s) suspendue(s) : conflit d'annulation (disjoncteur).`);
+    if (state.viaBotSkipped) lines.push(`${state.viaBotSkipped} action(s) faite(s) via le bot sans cible lisible (opération groupée) : comptée(s), non annulée(s).`);
     return lines;
   }
 
@@ -632,14 +682,33 @@ class SecurService {
       if (rank(state.applied) >= rank('kick')) return;
       const res = await this.#kick(guild, member, reason);
       if (res.ok) state.applied = 'kick';
-      else state.details.push(`Expulsion impossible (${String(res.error).slice(0, 100)}).`);
+      else {
+        state.details.push(`Expulsion impossible (${String(res.error).slice(0, 100)}).`);
+        await this.#fallbackStrip(member, reason, state);
+      }
       return;
     }
     if (target === 'ban' && state.applied !== 'ban') {
       const res = await this.#ban(guild, member.id, member, reason);
       if (res.ok) state.applied = 'ban';
-      else state.details.push(`Bannissement impossible (${String(res.error).slice(0, 100)}).`);
+      else {
+        state.details.push(`Bannissement impossible (${String(res.error).slice(0, 100)}).`);
+        await this.#fallbackStrip(member, reason, state);
+      }
     }
+  }
+
+  /**
+   * Expulsion ou bannissement impossible (membre non expulsable, permission perdue, erreur) : repli
+   * sur le retrait des rôles, qui ne dépend pas du rang de la cible. Sans lui, une sanction plus
+   * forte laisserait l'auteur armé.
+   */
+  async #fallbackStrip(member, reason, state) {
+    if (rank(state.applied) >= rank('derank')) return;
+    const res = await this.#strip(member, `${reason} (repli)`, state);
+    state.details.push(res.removed.length && !res.dangerousLeft
+      ? 'Repli : rôles retirés, il n\'a plus aucune permission dangereuse.'
+      : `Repli : ${String(res.note ?? 'retrait des rôles impossible.').slice(0, 200)}`);
   }
 
   /**
@@ -659,6 +728,8 @@ class SecurService {
         return;
       }
       state.details.push(`Bot non expulsé (${String(res.error).slice(0, 100)}).`);
+      // Repli : ses rôles non gérés sous le mien sont retirés (le rôle géré reste : bouton d'expulsion).
+      await this.#fallbackStrip(member, reason, state);
       state.botPending = true;
       return;
     }
@@ -702,7 +773,9 @@ class SecurService {
       const level = S.securityLevel(guild, userId, roleIds, cfg, { ...opts, isBot: Boolean(user.bot), pending: this.pendingExemptions(guild.id, userId) });
       if (S.isExempt(level, mode)) return true;
       const limit = S.effectiveLimit(cfg, type);
-      if (this.windowSum(guild.id, userId, type) + n >= limit) this.#refuse(guild, user, type, S.SECUR_MODULES[type].label, n, limit, 'secur');
+      const sum = this.windowSum(guild.id, userId, type);
+      // Fenêtre vide : rien n'a eu lieu, l'insistance n'est pas comptée (refus seul, jamais de sanction).
+      if (sum + n >= limit) this.#refuse(guild, user, type, S.SECUR_MODULES[type].label, n, limit, 'secur', { escalate: sum > 0 });
       return true;
     }
     if (!HISTORICAL_TYPES.has(type) || !cfg.antiraid?.enabled || typeof this.antiraid?.wouldTrigger !== 'function') return true;
@@ -713,9 +786,15 @@ class SecurService {
     return true;
   }
 
-  #refuse(guild, user, type, label, count, limit, path) {
+  /**
+   * Refus du pré-contrôle (UserError). `escalate` : la 3ᵉ tentative en 10 min est traitée comme
+   * un incident — seulement si l'auteur a déjà agi dans la fenêtre (Secur) : sinon rien n'a eu
+   * lieu et un admin légitime n'est jamais sanctionné pour des demandes refusées.
+   */
+  #refuse(guild, user, type, label, count, limit, path, { escalate = true } = {}) {
     const userId = user.id;
     Promise.resolve(this.logging?.send?.(guild.id, 'security', cards.blockedCard({ userId, label, count, limit }), undefined, { event: 'secur' })).catch(() => {});
+    if (!escalate) throw new UserError(`Action bloquée par la sécurité (${label}) : ${count} action(s) atteindraient le seuil. Demandez à un owner.`);
     // Tentatives répétées : l'auteur insiste sur le seuil → traité comme l'auteur d'un incident.
     const now = this.now();
     const key = `${guild.id}:${userId}:${type}`;
@@ -754,25 +833,34 @@ class SecurService {
 
   /**
    * Accès de whitelist donné par un auteur qui n'a pas le niveau owner : en attente (n'exempte
-   * pas, 24 h au plus) et notifié tout de suite (carte critique hors filtres, MP au propriétaire,
-   * boutons Approuver / Révoquer). Appelé par /whitelist, /antiraid (SEC2) et /role, /massrole (SEC5).
+   * pas tant qu'un owner ne l'a pas approuvé : jamais d'activation automatique) et notifié tout de
+   * suite (carte critique hors filtres, MP au propriétaire, boutons Approuver / Révoquer). Le même
+   * accès redonné par un owner approuve l'attente. Appelé par /whitelist, /antiraid (SEC2) et
+   * /role, /massrole (SEC5).
    * @param {{ kind: 'role'|'user'|'wlrole', subjectId: string, roleId?: string|null, grantedBy: string }} grant
    * @returns {Promise<{ id: number, existing: boolean }|null>} null : auteur owner (aucune attente)
    */
   async recordGrant(guild, { kind, subjectId, roleId = null, grantedBy }) {
     if (!this.grants || !guild?.id || !grantedBy || grantedBy === this.client.user?.id) return null;
     const cfg = this.config.get(guild.id);
-    if (S.hasOwnerLevel(guild, grantedBy, cfg, this.levelOpts())) return null;
+    if (S.hasOwnerLevel(guild, grantedBy, cfg, this.levelOpts())) {
+      try {
+        this.grants.approveSame?.({ guildId: guild.id, kind, subjectId, roleId, by: grantedBy, at: this.now() });
+      } catch (e) {
+        logger.debug('Approbation de l\'accès en attente :', e?.message);
+      }
+      return null;
+    }
     let created;
     try {
-      created = this.grants.create({ guildId: guild.id, kind, subjectId, roleId, grantedBy, grantedAt: this.now(), ttlMs: GRANT_TTL_MS });
+      created = this.grants.create({ guildId: guild.id, kind, subjectId, roleId, grantedBy, grantedAt: this.now(), ttlMs: null });
     } catch (e) {
       logger.warn('Accès de whitelist non enregistré :', e?.message);
       return null;
     }
     if (created.existing) return created;
     const row = this.grants.get(guild.id, created.id);
-    const res = await this.notifier.deliver(guild, { embed: cards.grantCard(row, { ttlMs: GRANT_TTL_MS }), components: cards.grantButtons(row) }, {
+    const res = await this.notifier.deliver(guild, { embed: cards.grantCard(row), components: cards.grantButtons(row) }, {
       critical: true,
       fallback: true,
       event: 'securGrant',
@@ -796,15 +884,15 @@ class SecurService {
     const won = action === 'approve' ? this.grants.approve(guild.id, id, interaction.user.id, this.now()) : this.grants.revoke(guild.id, id, interaction.user.id, this.now());
     const fresh = this.grants.get(guild.id, id);
     if (!won) {
-      await interaction.editReply({ embeds: [cards.grantCard(fresh, { ttlMs: GRANT_TTL_MS })], components: cards.grantButtons(fresh) }).catch(() => {});
+      await interaction.editReply({ embeds: [cards.grantCard(fresh)], components: cards.grantButtons(fresh) }).catch(() => {});
       await interaction.followUp({ embeds: [status.note('Cet accès a déjà été traité.')], ephemeral: true });
       return;
     }
     let note = action === 'approve' ? 'Accès approuvé : il exempte de nouveau.' : 'Accès révoqué.';
     if (action === 'revoke') note = await this.#revokeAccess(guild, fresh, interaction.user);
-    await interaction.editReply({ embeds: [cards.grantCard(fresh, { ttlMs: GRANT_TTL_MS })], components: [] });
+    await interaction.editReply({ embeds: [cards.grantCard(fresh)], components: [] });
     await interaction.followUp({ embeds: [status.ok(note)], ephemeral: true });
-    await Promise.resolve(this.logging?.send?.(guild.id, 'security', cards.grantCard(fresh, { ttlMs: GRANT_TTL_MS }), undefined, { event: 'securGrant' })).catch(() => {});
+    await Promise.resolve(this.logging?.send?.(guild.id, 'security', cards.grantCard(fresh), undefined, { event: 'securGrant' })).catch(() => {});
   }
 
   async #revokeAccess(guild, grant, user) {
@@ -828,7 +916,7 @@ class SecurService {
   /** Accès en attente d'un serveur (section statut). */
   pendingGrants(guildId) {
     try {
-      return this.grants?.pending(guildId, this.now() - GRANT_TTL_MS) ?? [];
+      return this.grants?.pending(guildId, 0) ?? [];
     } catch {
       return [];
     }
@@ -848,6 +936,11 @@ class SecurService {
     await interaction.deferUpdate();
     const row = this.incidents?.get(guild.id, incidentId);
     if (!row) throw new UserError('Cet incident est introuvable (purgé après 90 jours ?).');
+    // Liste noire (SEC3) : un débannissement serait aussitôt annulé (faux succès, incident clos).
+    if (row.punishment === 'ban' && this.client.services?.blacklist?.has?.(guild.id, row.executor_id)) {
+      await interaction.followUp({ embeds: [status.warn(`<@${row.executor_id}> est sur la **liste noire** : il serait rebanni aussitôt. Retirez-le d'abord de la liste noire (/secur blacklist retirer), puis réessayez.`)], ephemeral: true });
+      return;
+    }
     if (!this.incidents.markRestored(guild.id, incidentId, interaction.user.id, this.now())) {
       await interaction.followUp({ embeds: [status.note('Cet incident a déjà été restauré.')], ephemeral: true });
       return;
@@ -966,7 +1059,7 @@ class SecurService {
     this.breaker.prune();
   }
 
-  /** Étape `security` du scheduler : purge des incidents (90 jours) et des accès (30 jours). */
+  /** Étape `security` du scheduler : purge des incidents (90 jours) et des accès tranchés (30 jours). */
   async processSecurityDue({ isStopping = () => false } = {}) {
     const now = this.now();
     if (now - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(now);
@@ -1008,4 +1101,4 @@ class SecurService {
   }
 }
 
-module.exports = { SecurService, auditTimestamp, bestWindow, GRANT_TTL_MS, LATE_MS, INCIDENT_MS, RECENT_BOT_MS, INCIDENT_RETENTION_MS, GRANT_RETENTION_MS };
+module.exports = { SecurService, auditTimestamp, bestWindow, LATE_MS, INCIDENT_MS, RECENT_BOT_MS, INCIDENT_RETENTION_MS, GRANT_RETENTION_MS };

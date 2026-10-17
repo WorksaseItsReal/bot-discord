@@ -86,7 +86,7 @@ module.exports = {
 
     const targets = [user, role].filter(Boolean).map(String).join(' et ');
     const notice = add ? `${targets} ${user && role ? 'ajoutés' : 'ajouté'} à la whitelist.` : `${targets} ${user && role ? 'retirés' : 'retiré'} de la whitelist.`;
-    const pendingNote = grants.pending ? `\n${ICONS.lock} **En attente d'approbation** : n'exempte pas encore. Un owner doit l'approuver (24 h au plus).` : '';
+    const pendingNote = grants.pending ? `\n${ICONS.lock} **En attente d'approbation** : n'exempte pas encore. Un owner doit l'approuver (il ne devient jamais actif tout seul).` : '';
     await interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, `${notice}${pendingNote}`)], components: antiraidShortcut(interaction), ephemeral: true });
     await grants.done;
     // Journal des sécurités (après la réponse) : une whitelist élargie sans trace désarme l'AntiRaid.

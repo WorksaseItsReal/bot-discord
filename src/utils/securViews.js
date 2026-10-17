@@ -545,7 +545,7 @@ function pendingView(state) {
         description: [
           noticeLine(state.notice),
           readOnlyBanner(state),
-          'Un accès de whitelist donné par quelqu\'un qui n\'est pas owner **n\'exempte pas** tant qu\'un owner ne l\'a pas approuvé (24 h au plus).',
+          'Un accès de whitelist donné par quelqu\'un qui n\'est pas owner **n\'exempte pas** tant qu\'un owner ne l\'a pas approuvé (jamais d\'activation automatique).',
           '',
           list.length ? truncate(list.slice(0, 15).map(grantLine).join('\n') + (list.length > 15 ? `\n… et ${list.length - 15} autre(s)` : ''), 3_000) : '*Aucun accès en attente.*',
         ],

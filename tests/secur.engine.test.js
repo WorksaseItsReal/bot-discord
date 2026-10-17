@@ -700,7 +700,7 @@ test('EventHandler : fichiers triés ; un écouteur « prepend » s\'exécute av
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('scheduler : étape « security » → processSecurityDue de chaque service ; purge des incidents (90 j) et des accès (30 j)', async () => {
+test('scheduler : étape « security » → processSecurityDue de chaque service ; purge des incidents (90 j) et des accès tranchés (30 j)', async () => {
   const { SchedulerService } = require('../src/services/SchedulerService');
   const seen = [];
   const client = { guilds: { cache: new Map() }, services: { a: { processSecurityDue: async ({ isStopping }) => seen.push(typeof isStopping) }, b: { processSecurityDue: async () => { throw new Error('boum'); } }, c: { processSecurityDue: async () => seen.push('c') } } };
@@ -711,13 +711,17 @@ test('scheduler : étape « security » → processSecurityDue de chaque service
   const w = world({ now: () => now });
   w.incidents.create({ guildId: G, executorId: MOD, createdAt: now - 91 * DAY });
   const recent = w.incidents.create({ guildId: G, executorId: MOD, createdAt: now - DAY });
-  w.grants.create({ guildId: G, kind: 'user', subjectId: MOD, grantedBy: TARGET, grantedAt: now - 31 * DAY });
+  const decided = w.grants.create({ guildId: G, kind: 'user', subjectId: MOD, grantedBy: TARGET, grantedAt: now - 31 * DAY });
+  w.grants.approve(G, decided.id, OWNER, now - 30.5 * DAY);
+  // Revue 7 (S17) : un accès jamais tranché reste en attente (il n'est jamais purgé, donc jamais actif).
+  w.grants.create({ guildId: G, kind: 'role', subjectId: MOD, roleId: R_WL, grantedBy: TARGET, grantedAt: now - 31 * DAY });
   await w.secur.processSecurityDue();
   assert.deepEqual(w.incidents.recent(G, 10).map((r) => r.id), [recent]);
-  assert.equal(w.db.prepare('SELECT COUNT(*) AS n FROM security_grants').get().n, 0);
+  assert.equal(w.db.prepare('SELECT COUNT(*) AS n FROM security_grants').get().n, 1);
+  assert.equal(w.secur.pendingGrants(G).length, 1);
   // Serveur quitté : données et mémoire oubliées.
   w.secur.windows.set(`${G}:${MOD}:ban`, { windowMs: 1, entries: [{ at: now, weight: 1 }] });
-  assert.equal(w.secur.purgeGuild(G), 1);
+  assert.equal(w.secur.purgeGuild(G), 2); // l'incident récent et l'accès en attente
   assert.equal(w.secur.windows.size, 0);
 });
 

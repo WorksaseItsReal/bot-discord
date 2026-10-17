@@ -256,7 +256,8 @@ const roleUpdate = {
       }
     }
     if (skipped.length) St.noteSummary(ctx, `role:${role.id}`, () => {}, () => `Rôle ${label} : non rétabli automatiquement (${[...new Set(skipped)].join(', ')}).`);
-    return { ok: true };
+    // changed : false quand rien n'a été rétabli (déjà fait, modifié depuis) — ignoré par le disjoncteur.
+    return { ok: true, changed: Object.keys(body).length > 0 };
   },
   describe: (record) => `Rôle modifié${record?.name ? ` : @${record.name}` : ''}`,
   targetKey: (record) => `update:${record?.roleId ?? ''}`,

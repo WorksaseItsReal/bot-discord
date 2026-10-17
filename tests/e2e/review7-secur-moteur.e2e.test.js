@@ -223,3 +223,437 @@ test('S27 : derank — un rôle géré conservé garde « Gérer les salons » p
     await h.close();
   }
 });
+
+/* ========================================================================================== */
+/* Moteur Secur                                                                               */
+/* ========================================================================================== */
+
+const opt = (name, type, value) => ({ name, type, value });
+const sub = (name, options = []) => [{ name, type: 1, options }];
+const incidentsOf = (h) => h.client.repositories.securityIncidents.recent(h.guild.id, 20);
+const hasRole = (h, userId, roleId) => Boolean(h.fake.members.get(userId)?.roles?.includes(roleId));
+const drain = async (h) => {
+  await h.settle();
+  await new Promise((r) => setTimeout(r, 200));
+  await h.settle();
+};
+
+/** Configuration minimale : logs sécurité, AntiRaid et AutoMod coupés, modules Secur demandés. */
+function securOnly(h, modules, extra = {}) {
+  h.configure({ logChannels: { security: IDS.channels.logs }, antiraid: { enabled: false }, automod: { enabled: false }, secur: { modules }, ...extra });
+}
+
+/** Membre du staff supplémentaire (rôle Modérateur). */
+async function addStaff(h, name) {
+  const u = h.addUser(name, { ageDays: 800 });
+  const m = rawMember(u, [IDS.roles.mod], 200);
+  h.fake.members.set(u.id, m);
+  h.fake.dispatchNow('GUILD_MEMBER_ADD', { ...m, guild_id: h.guild.id });
+  await h.settle();
+  return u.id;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* S4 : refus du pré-contrôle sans action dans la fenêtre                                      */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S4 : 3 /channel creer refusés (limite 1, fenêtre vide) → refus seulement, aucun dérank ; avec une action dans la fenêtre, l\'insistance reste sanctionnée', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { channelCreate: { mode: 'on' }, channelDelete: { mode: 'on', limit: 2, windowSeconds: 60 } });
+    for (let i = 0; i < 3; i += 1) {
+      const rec = await h.slash('channel', sub('creer', [opt('nom', 3, `essai-${i}`)]));
+      assert.ok(h.isError(rec), 'création non refusée par le pré-contrôle');
+      assert.match(h.replyText(rec), /Action bloquée par la sécurité/);
+    }
+    await drain(h);
+    assert.ok(hasRole(h, IDS.users.admin, IDS.roles.admin), 'admin dérangé pour 3 demandes refusées, sans aucune action');
+    assert.equal(incidentsOf(h).length, 0, 'incident ouvert sans action');
+    // Témoin : une suppression réelle dans la fenêtre, puis 3 demandes refusées → incident.
+    await h.asHuman('admin').deleteChannel(IDS.channels.staff);
+    for (let i = 0; i < 3; i += 1) {
+      const rec = await h.slash('channel', sub('supprimer', [opt('salon', 7, IDS.channels.announcements)]));
+      assert.ok(h.isError(rec));
+    }
+    await drain(h);
+    assert.equal(incidentsOf(h).length, 1, 'insistance après une action réelle non sanctionnée');
+    assert.ok(!hasRole(h, IDS.users.admin, IDS.roles.admin));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S10 : incident « alerte seule » non contagieux                                              */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S10 : un @everyone (sanction « aucune ») ouvre un incident ; un retrait de rôle légitime sous le seuil dans la minute n\'est pas annulé', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { everyone: { mode: 'on' }, roleRemove: { mode: 'on' } });
+    await h.userMessage({ as: 'admin', content: '@everyone réunion à 20 h' });
+    await drain(h);
+    assert.equal(incidentsOf(h).length, 1, 'incident @everyone non ouvert');
+    await h.asHuman('admin').removeRole('mod', IDS.roles.mod);
+    await drain(h);
+    assert.equal(hasRole(h, IDS.users.mod, IDS.roles.mod), false, 'retrait légitime (1 sur 3) annulé par contagion d\'un incident sans sanction');
+    assert.ok(hasRole(h, IDS.users.admin, IDS.roles.admin), 'auteur sanctionné');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S14 : entrées antérieures sous le seuil reprises à l'ouverture de l'incident                */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S14 : roleRemove 3 en 10 s — 2 retraits à t=0/1 s puis 3 à t=12/12,5/13 s → les 5 rôles sont rendus', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { roleRemove: { mode: 'on' } });
+    const staff = [];
+    for (let i = 0; i < 5; i += 1) staff.push(await addStaff(h, `Staff${i}`));
+    const base = Date.now() - 20_000;
+    const offsets = [0, 1_000, 12_000, 12_500, 13_000];
+    for (const [i, id] of staff.entries()) await h.asHuman('admin').removeRole(id, IDS.roles.mod, { at: base + offsets[i] });
+    await drain(h);
+    const [incident] = incidentsOf(h);
+    assert.ok(incident, 'aucun incident');
+    assert.deepEqual(staff.map((id) => hasRole(h, id, IDS.roles.mod)), [true, true, true, true, true], 'rôles retirés sous le seuil avant l\'incident non rendus');
+    assert.equal(incident.actions, 5);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S14 : 2 retraits de rôle Modérateur (sous le seuil) puis suppression de #règles → le staff est rendu avec le salon', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { roleRemove: { mode: 'on' }, channelDelete: { mode: 'on' } });
+    const staff = [await addStaff(h, 'StaffA'), await addStaff(h, 'StaffB')];
+    for (const id of staff) await h.asHuman('admin').removeRole(id, IDS.roles.mod);
+    const rules = h.fake.channels.get(IDS.channels.rules).name;
+    await h.asHuman('admin').deleteChannel(IDS.channels.rules);
+    await drain(h);
+    assert.deepEqual(staff.map((id) => hasRole(h, id, IDS.roles.mod)), [true, true], 'staff laissé dépouillé');
+    assert.ok([...h.fake.channels.values()].some((c) => c.name === rules), 'salon non recréé');
+    const [incident] = incidentsOf(h);
+    assert.equal(incident.actions, 3);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S17 : accès de whitelist en attente jusqu'à décision                                        */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S17 : un accès de whitelist donné par un non-owner n\'exempte jamais sans approbation (même après 24 h) ; un owner qui le redonne l\'approuve', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { channelDelete: { mode: 'on' } }, { whitelist: { users: [IDS.users.mod], roles: [] } });
+    const secur = h.client.services.secur;
+    const grant = await secur.recordGrant(h.guild, { kind: 'user', subjectId: IDS.users.mod, grantedBy: IDS.users.admin });
+    assert.ok(grant && !grant.existing);
+    const level = () => secur.levelOf(h.guild, IDS.users.mod, h.guild.members.cache.get(IDS.users.mod));
+    assert.equal(level(), 'membre');
+    const realNow = secur.now;
+    secur.now = () => realNow() + 25 * 3_600_000;
+    assert.equal(level(), 'membre', 'accès en attente devenu actif tout seul après 24 h');
+    assert.equal(secur.pendingGrants(h.guild.id).length, 1);
+    // Purge (30 jours) : un accès jamais tranché reste en attente.
+    secur.now = () => realNow() + 31 * 24 * 3_600_000;
+    secur.lastPurgeAt = 0;
+    await secur.processSecurityDue();
+    assert.equal(level(), 'membre', 'accès en attente purgé, donc actif');
+    secur.now = realNow;
+    // Un owner (le propriétaire) donne le même accès : l'attente est levée.
+    assert.equal(await secur.recordGrant(h.guild, { kind: 'user', subjectId: IDS.users.mod, grantedBy: IDS.users.owner }), null);
+    assert.equal(level(), 'whitelist');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S20 : disjoncteur par objet                                                                 */
+/* ------------------------------------------------------------------------------------------ */
+
+const hasAdminPerm = (h, roleId) => (BigInt(h.fake.roles.get(roleId).permissions) & P.Administrator) !== 0n;
+const permsOf = (...f) => f.reduce((a, b) => a | b, 0n).toString();
+
+test('S20 : un bot non neutralisé déclenche le disjoncteur sur « Joueur » → Administrateur donné à « Membre » reste annulé', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const nuke = addRole(h, { name: 'NukeBot', permissions: P.Administrator, managed: true, tags: { bot_id: IDS.users.otherBot }, position: 6 });
+    const m = h.fake.members.get(IDS.users.otherBot);
+    m.roles = [nuke.id];
+    m.joined_at = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    h.fake.dispatchNow('GUILD_MEMBER_UPDATE', { guild_id: h.guild.id, ...m });
+    await h.settle();
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { roleUpdate: { mode: 'on' } } } });
+    const bot = h.asHuman('otherBot');
+    for (let i = 0; i < 3; i += 1) await bot.editRole(IDS.roles.gamer, { permissions: P.ManageRoles.toString() });
+    await drain(h);
+    await bot.editRole(IDS.roles.member, { permissions: P.Administrator.toString() });
+    await drain(h);
+    assert.equal(hasAdminPerm(h, IDS.roles.member), false, 'module entier suspendu : Administrateur sur « Membre » non annulé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S20 : rafale de 4 PATCH (3 sur « Joueur » puis Administrateur sur « Membre ») → « Membre » annulé', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { roleUpdate: { mode: 'on' } } } });
+    const route = (id) => `/guilds/${h.guild.id}/roles/${id}`;
+    const actor = { actorId: IDS.users.admin };
+    await h.fake.perform('PATCH', route(IDS.roles.gamer), { permissions: permsOf(P.ManageRoles) }, actor);
+    await h.fake.perform('PATCH', route(IDS.roles.gamer), { permissions: permsOf(P.ManageRoles, P.ManageChannels) }, actor);
+    await h.fake.perform('PATCH', route(IDS.roles.gamer), { permissions: permsOf(P.ManageRoles, P.ManageChannels, P.BanMembers) }, actor);
+    await h.fake.perform('PATCH', route(IDS.roles.member), { permissions: P.Administrator.toString() }, actor);
+    await drain(h);
+    assert.equal(hasAdminPerm(h, IDS.roles.member), false, 'tâche « Membre » retirée par le disjoncteur');
+    assert.equal(h.client.services.secur.breaker.isSuspended(h.guild.id, 'roleUpdate'), false, 'annulations sans effet comptées par le disjoncteur');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S21 : repli sur le retrait des rôles quand l'expulsion est impossible                       */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S21 : sanction « kick » impossible (bot sans Expulser) → repli sur le retrait des rôles, l\'auteur ne peut plus supprimer', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const mod = h.fake.roles.get(IDS.roles.mod);
+    mod.permissions = (BigInt(mod.permissions) | P.ManageChannels).toString();
+    h.fake.dispatchNow('GUILD_ROLE_UPDATE', { guild_id: h.guild.id, role: mod });
+    const botRole = h.fake.roles.get(IDS.roles.bot);
+    botRole.permissions = permsOf(P.ManageGuild, P.ManageRoles, P.ManageChannels, P.ModerateMembers, P.ManageMessages, P.ViewAuditLog,
+      P.SendMessages, P.EmbedLinks, P.ReadMessageHistory, P.ViewChannel, P.ManageWebhooks, P.AttachFiles, P.AddReactions);
+    h.fake.dispatchNow('GUILD_ROLE_UPDATE', { guild_id: h.guild.id, role: botRole });
+    await h.settle();
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { channelDelete: { mode: 'on', punish: 'kick' } } } });
+    await h.asHuman('mod').deleteChannel(IDS.channels.rules);
+    await drain(h);
+    const [incident] = incidentsOf(h);
+    assert.equal(hasRole(h, IDS.users.mod, IDS.roles.mod), false, 'expulsion impossible sans repli : l\'auteur garde ses rôles');
+    assert.equal(incident.punishment, 'derank');
+    assert.match(incident.outcome, /Expulsion impossible/);
+    await assert.rejects(h.asHuman('mod').deleteChannel(IDS.channels.announcements), /Missing Permissions/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S25 : actions faites via le bot annulables                                                  */
+/* ------------------------------------------------------------------------------------------ */
+
+async function viaBotDelete(h, key) {
+  const rec = await h.slash('channel', sub('supprimer', [opt('salon', 7, IDS.channels[key])]));
+  await h.confirm(rec);
+  await h.settle();
+}
+const channelNames = (h) => [...h.fake.channels.values()].map((c) => c.name);
+
+test('S25 : /channel supprimer ×2 puis 1 suppression manuelle → les 3 salons sont recréés', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { channelDelete: { mode: 'on', limit: 3, windowSeconds: 60 } } } });
+    const names = ['announcements', 'staff', 'modLog'].map((k) => h.fake.channels.get(IDS.channels[k]).name);
+    for (const key of ['announcements', 'staff']) await viaBotDelete(h, key);
+    await h.asHuman('admin').deleteChannel(IDS.channels.modLog);
+    await drain(h);
+    const [incident] = incidentsOf(h);
+    assert.equal(incident.actions, 3);
+    assert.deepEqual(names.map((n) => channelNames(h).includes(n)), [true, true, true], 'salons supprimés via le bot non recréés');
+    assert.equal(incident.undo_failed, 0, incident.outcome);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S25 : limite 4, /channel supprimer ×3 puis 1 suppression manuelle → tout est recréé, aucun faux « conflit d\'annulation »', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { channelDelete: { mode: 'on', limit: 4, windowSeconds: 60 } } } });
+    const keys = ['announcements', 'staff', 'forum', 'modLog'];
+    const names = keys.map((k) => h.fake.channels.get(IDS.channels[k]).name);
+    const mark = h.fake.messageLog.length;
+    for (const key of keys.slice(0, 3)) await viaBotDelete(h, key);
+    await h.asHuman('admin').deleteChannel(IDS.channels.modLog);
+    await drain(h);
+    assert.deepEqual(names.map((n) => channelNames(h).includes(n)), [true, true, true, true], 'salons non recréés');
+    assert.equal(h.client.services.secur.breaker.isSuspended(h.guild.id, 'channelDelete'), false, 'disjoncteur déclenché par des actions via le bot');
+    assert.equal(botMessages(h, mark, titled(/Conflit d'annulation/)).length, 0);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S25 : /unban ×2 puis 1 débannissement manuel → les 3 sont rebannis', async () => {
+  const h = await createHarness();
+  try {
+    securOnly(h, { unban: { mode: 'on', limit: 3, windowSeconds: 60 } });
+    const users = [0, 1, 2].map((i) => h.addUser(`Banni${i}`, { ageDays: 900 }));
+    for (const u of users) await h.asHuman('owner').ban(u.id);
+    for (const u of users.slice(0, 2)) {
+      const rec = await h.slash('unban', [opt('user_id', 3, u.id)], { as: 'mod' });
+      assert.ok(!h.isError(rec), h.replyText(rec));
+    }
+    await h.asHuman('mod').perform('DELETE', `/guilds/${h.guild.id}/bans/${users[2].id}`);
+    await drain(h);
+    assert.deepEqual(users.map((u) => h.fake.bans.has(u.id)), [true, true, true], 'débannis via le bot non rebannis');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S25 : /derank ×2 puis 1 retrait manuel (roleRemove par défaut) → les 3 rôles sensibles sont rendus', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { roleRemove: { mode: 'on' } } } });
+    const staff = [await addStaff(h, 'Victime0'), await addStaff(h, 'Victime1'), await addStaff(h, 'Victime2')];
+    for (const id of staff.slice(0, 2)) {
+      const rec = await h.slash('derank', [opt('membre', 6, id)]);
+      if (h.messagesOf(rec).some((m) => (m.components ?? []).length)) await h.confirm(rec);
+      await h.settle();
+      assert.equal(hasRole(h, id, IDS.roles.mod), false, 'derank non appliqué');
+    }
+    await h.asHuman('admin').removeRole(staff[2], IDS.roles.mod);
+    await drain(h);
+    assert.deepEqual(staff.map((id) => hasRole(h, id, IDS.roles.mod)), [true, true, true], 'rôles retirés via /derank non rendus');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S40 : « Débannir » sur un auteur blacklisté                                                 */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S40 : bouton « Débannir » d\'une carte Secur sur un blacklisté → refus clair, incident non clos, aucun débannissement', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const t = IDS.users.target;
+    const add = await h.slash('secur', [{ name: 'blacklist', type: 2, options: [{ name: 'ajouter', type: 1, options: [opt('membre', 6, t), opt('raison', 3, 'nuke')] }] }], { as: 'owner' });
+    assert.ok(!h.isError(add), h.replyText(add));
+    const id = h.client.repositories.securityIncidents.create({ guildId: h.guild.id, executorId: t, modules: ['channelDelete'], actions: 3, punishment: 'ban', outcome: 'applied' });
+    const msg = h.fake.buildMessage({ channelId: IDS.channels.logs, body: { content: '', components: [{ type: 1, components: [{ type: 2, style: 4, label: 'Débannir', custom_id: `secur:restore:${id}` }] }] }, author: h.fake.users.get(h.client.user.id) });
+    const callMark = h.fake.calls.length;
+    const rec = await h.click(msg, `secur:restore:${id}`, { as: 'owner' });
+    await h.settle();
+    assert.match(h.replyText(rec), /liste noire/);
+    assert.equal(h.client.repositories.securityIncidents.get(h.guild.id, id).restored_by, null, 'incident clos par un faux succès');
+    assert.equal(h.fake.calls.slice(callMark).filter((c) => c.method === 'DELETE' && c.route.includes(`/bans/${t}`)).length, 0, 'débannissement tenté');
+    assert.ok(h.fake.bans.has(t));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S43 : membres partiels créés par PRESENCE_UPDATE                                            */
+/* ------------------------------------------------------------------------------------------ */
+
+const { config: botConfig } = require('../../src/config');
+
+async function presenceHarness() {
+  const prev = botConfig.presenceIntent;
+  botConfig.presenceIntent = true;
+  try {
+    return await createHarness();
+  } finally {
+    botConfig.presenceIntent = prev;
+  }
+}
+
+function online(h, userId, state = null) {
+  h.fake.dispatchNow('PRESENCE_UPDATE', {
+    user: { id: userId }, guild_id: h.guild.id, status: 'online',
+    activities: state ? [{ type: 4, name: 'Custom Status', state, created_at: Date.now() }] : [],
+    client_status: { desktop: 'online' },
+  });
+}
+
+async function partialAuthor(h, who, { wlRoles = [] } = {}) {
+  securOnly(h, { channelCreate: { mode: 'on', limit: 1, windowSeconds: 30 } }, { whitelist: { users: [], roles: wlRoles } });
+  const uid = IDS.users[who];
+  h.guild.members.cache.delete(uid); // gros serveur : hors cache au démarrage
+  online(h, uid);
+  await h.settle();
+  const created = await h.fake.perform('POST', `/guilds/${h.guild.id}/channels`, { name: 'salon-x', type: 0 }, { actorId: IDS.users.owner });
+  await h.settle();
+  await h.auditEntry({ action_type: 10, target_id: created.id, user_id: uid, changes: [{ key: 'name', new_value: 'salon-x' }, { key: 'type', new_value: 0 }] });
+  await drain(h);
+  return { uid, created };
+}
+
+test('S43 : auteur hors cache puis PRESENCE_UPDATE → le derank retire bien ses rôles', async () => {
+  const h = await presenceHarness();
+  try {
+    const { uid } = await partialAuthor(h, 'admin');
+    const [incident] = incidentsOf(h);
+    assert.equal(incident.punishment, 'derank', 'derank sans effet sur un membre partiel');
+    assert.equal(hasRole(h, uid, IDS.roles.admin), false);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S43 : modérateur whitelisté par rôle, hors cache puis PRESENCE_UPDATE → exempté (aucun incident)', async () => {
+  const h = await presenceHarness();
+  try {
+    const { created } = await partialAuthor(h, 'mod', { wlRoles: [IDS.roles.mod] });
+    assert.equal(incidentsOf(h).length, 0, 'whitelist par rôle ignorée');
+    assert.ok(h.fake.channels.has(created.id), 'salon légitime annulé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S43 : rôle soutien (statut), membre hors cache puis PRESENCE_UPDATE sans le texte → le rôle est retiré', async () => {
+  const h = await presenceHarness();
+  try {
+    h.configureAll();
+    const ROLE = IDS.roles.temp;
+    const uid = IDS.users.target;
+    h.configure({ support: { enabled: true, roleId: ROLE, source: 'statut', text: 'gadget' } });
+    h.client.services.supportRole.debounceMs = 20;
+    h.fake.members.get(uid).roles.push(ROLE);
+    h.guild.members.cache.delete(uid);
+    online(h, uid, 'rien à voir');
+    await new Promise((r) => setTimeout(r, 150));
+    await h.settle();
+    assert.equal(hasRole(h, uid, ROLE), false, 'rôle soutien jamais retiré');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -418,7 +418,7 @@ class AntiRaidService {
    * Utilisateur ou rôle whitelisté. Un rôle géré (Booster, rôle de bot) n'immunise jamais :
    * il s'obtient sans contrôle du serveur (refusé par /whitelist et le tableau de bord).
    * `excludePending` (actions destructrices, pré-contrôle) : un accès de whitelist donné par un
-   * non-owner et pas encore approuvé (Secur, 24 h au plus) n'exempte pas. Les vagues d'arrivées
+   * non-owner et pas encore approuvé (Secur, jusqu'à la décision d'un owner) n'exempte pas. Les vagues d'arrivées
    * gardent l'exemption immédiate.
    */
   isWhitelisted(guildId, userId, roleIds = [], { excludePending = false } = {}) {

@@ -89,9 +89,8 @@ function grantText(g) {
 /**
  * Carte d'un accès de whitelist en attente (ou tranché). Pure.
  * @param {object} g ligne security_grants
- * @param {{ ttlMs: number }} opts
  */
-function grantCard(g, { ttlMs }) {
+function grantCard(g) {
   const decided = g.approved_at ? 'approved' : g.revoked_at ? 'revoked' : null;
   return card({
     tone: decided === 'approved' ? 'success' : decided === 'revoked' ? 'neutral' : 'warning',
@@ -102,14 +101,14 @@ function grantCard(g, { ttlMs }) {
       grantText(g),
       decided
         ? null
-        : `Tant qu'un owner ne l'approuve pas (24 h au plus), cet accès **n'exempte pas** de l'AntiRaid ni de Secur.`,
+        : `Tant qu'un owner ne l'approuve pas, cet accès **n'exempte pas** de l'AntiRaid ni de Secur (il ne devient jamais actif tout seul).`,
     ],
     fields: [
       field(ICONS.user, 'Bénéficiaire', g.kind === 'wlrole' ? `<@&${g.subject_id}>` : `<@${g.subject_id}>`),
       field(ICONS.moderator, 'Par', `<@${g.granted_by}>`),
       decided
         ? field(decided === 'approved' ? ICONS.success : ICONS.delete, decided === 'approved' ? 'Approuvé par' : 'Révoqué par', `<@${g.approved_by ?? g.revoked_by}>`)
-        : field(ICONS.expires, 'Exempte au plus tard', discordTimestamp(g.granted_at + ttlMs, 'R')),
+        : field(ICONS.date, 'Donné', discordTimestamp(g.granted_at, 'R')),
     ],
     footer: `Accès #${g.id}`,
   });
@@ -131,7 +130,7 @@ function conflictCard({ moduleKey, targetKey, until }) {
     section: 'security',
     icon: ICONS.warning,
     title: 'Conflit d\'annulation : un autre bot défait-il nos corrections ?',
-    description: `Le même objet a été restauré **3 fois en une minute** : le module **${moduleLabel(moduleKey)}** suspend ses annulations sur ce serveur jusqu'à ${discordTimestamp(until, 'T')} (la détection et les sanctions continuent).`,
+    description: `Le même objet a été restauré **3 fois en une minute** : le module **${moduleLabel(moduleKey)}** suspend les annulations de **cet objet** jusqu'à ${discordTimestamp(until, 'T')} (les autres objets restent protégés ; la détection et les sanctions continuent).`,
     fields: [
       wide(ICONS.info, 'Que faire ?', 'Un autre bot de sécurité annule probablement nos corrections. Ajoutez-le aux bots de confiance (/secur confiance) ou coupez l\'un des deux anti-nuke.'),
       targetKey ? field(ICONS.id, 'Objet', `\`${String(targetKey).slice(0, 60)}\``) : null,

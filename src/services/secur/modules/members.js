@@ -146,7 +146,7 @@ const ban = {
   },
   /** Annulation (désactivée par défaut) : débannit la victime, sauf un blacklisté (SEC3). */
   async undo(guild, record, ctx) {
-    const userId = record?.userId;
+    const userId = record?.userId ?? record?.targetId; // targetId : ban fait via le bot (reportBotAction)
     if (!SNOWFLAKE.test(String(userId ?? ''))) return { ok: false, note: 'Bannissement sans cible lisible : rien à annuler.' };
     if (isBlacklisted(ctx, guild.id, userId)) return { ok: true, note: `<@${userId}> est sur la liste noire : il reste banni.` };
     const banned = await isBanned(guild, userId);
@@ -162,8 +162,8 @@ const ban = {
       return { ok: false, note: `Débannissement de <@${userId}> impossible (${String(err?.message ?? err).slice(0, 100)}).` };
     }
   },
-  describe: (record) => (record?.userId ? `Ban de <@${record.userId}>` : 'Ban'),
-  targetKey: (record) => (record?.userId ? `ban:${record.userId}` : null),
+  describe: (record) => ((record?.userId ?? record?.targetId) ? `Ban de <@${record.userId ?? record.targetId}>` : 'Ban'),
+  targetKey: (record) => ((record?.userId ?? record?.targetId) ? `ban:${record.userId ?? record.targetId}` : null),
 };
 
 const unban = {
@@ -179,7 +179,7 @@ const unban = {
    * noire (SEC3) la rebannit déjà elle-même. Un ban déjà revenu n'est pas reposé.
    */
   async undo(guild, record, ctx) {
-    const userId = record?.userId;
+    const userId = record?.userId ?? record?.targetId; // targetId : débannissement fait via le bot
     if (!SNOWFLAKE.test(String(userId ?? ''))) return { ok: false, note: 'Débannissement sans cible lisible.' };
     if (isBlacklisted(ctx, guild.id, userId)) return { ok: true, note: `<@${userId}> est sur la liste noire : rebanni par la liste noire.` };
     if ((await isBanned(guild, userId)) === true) return { ok: true };
@@ -195,8 +195,8 @@ const unban = {
       return { ok: false, note: `Rebannissement de <@${userId}> impossible (${String(err?.message ?? err).slice(0, 100)}).` };
     }
   },
-  describe: (record) => (record?.userId ? `Débannissement de <@${record.userId}>` : 'Débannissement'),
-  targetKey: (record) => (record?.userId ? `unban:${record.userId}` : null),
+  describe: (record) => ((record?.userId ?? record?.targetId) ? `Débannissement de <@${record.userId ?? record.targetId}>` : 'Débannissement'),
+  targetKey: (record) => ((record?.userId ?? record?.targetId) ? `unban:${record.userId ?? record.targetId}` : null),
 };
 
 const kick = {

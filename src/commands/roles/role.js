@@ -508,7 +508,7 @@ module.exports = {
       } finally {
         // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
         // (suppressions de rôles en masse), après la réponse, MÊME si elle échoue.
-        await client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'roleDelete');
+        await client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'roleDelete', { targetId: role.id });
       }
       return undefined;
     }
