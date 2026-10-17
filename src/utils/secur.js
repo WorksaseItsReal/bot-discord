@@ -12,7 +12,7 @@ const { defaultGuildConfig } = require('../config/defaults');
  */
 
 /**
- * Les 18 modules DÉCLARÉS. Un module n'est actif que s'il est aussi CHARGÉ dans le registre
+ * Les 20 modules DÉCLARÉS. Un module n'est actif que s'il est aussi CHARGÉ dans le registre
  * (src/services/secur/modules/*.js) : un module déclaré mais non chargé est « non disponible ».
  * auditTypes : entrées du journal d'audit que le module peut classer (deux modules peuvent
  * partager un type seulement s'ils le déclarent tous les deux ici : roleAdd / roleRemove).
@@ -37,6 +37,10 @@ const SECUR_MODULES = Object.freeze({
   voiceKick: { label: 'Déconnexions vocales', emoji: '🔇', domain: 'membres', auditTypes: [27], undoable: false },
   everyone: { label: 'Mentions @everyone', emoji: '📢', domain: 'messages', auditTypes: [], undoable: true },
   messagePurge: { label: 'Purges de messages', emoji: '🧹', domain: 'messages', auditTypes: [73], undoable: false },
+  // Revue 7 (S16) : timeouts en masse (24, communication_disabled_until) et fils / posts de forum
+  // supprimés (112) : un rôle de modération courant pouvait faire taire le serveur ou vider le forum.
+  timeout: { label: 'Exclusions temporaires', emoji: '⏳', domain: 'membres', auditTypes: [24], undoable: true },
+  threadDelete: { label: 'Suppression de fils', emoji: '🧵', domain: 'salons', auditTypes: [112], undoable: false },
 });
 const MODULE_KEYS = Object.freeze(Object.keys(SECUR_MODULES));
 
@@ -60,7 +64,7 @@ const SECUR_BOUNDS = Object.freeze({
 /** Options booléennes « tolérantes » que le préréglage max coupe. */
 const LENIENT_OPTIONS = Object.freeze(['ignoreBenign', 'dangerousOnly', 'ignoreFollowers']);
 /** Limites du préréglage max (les autres modules gardent leur limite par défaut). */
-const MAX_LIMITS = Object.freeze({ ban: 2, kick: 2, voiceKick: 3, roleRemove: 2, expressions: 2 });
+const MAX_LIMITS = Object.freeze({ ban: 2, kick: 2, voiceKick: 3, roleRemove: 2, expressions: 2, timeout: 3, threadDelete: 3 });
 
 /** Permissions qu'un exécutant dérangé ne doit plus avoir (outils de nuke). */
 const DANGEROUS = Object.freeze([

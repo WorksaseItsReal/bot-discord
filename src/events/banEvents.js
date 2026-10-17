@@ -110,12 +110,22 @@ module.exports = [
       }
       const type = DESTRUCTIVE_AUDIT_ACTIONS[entry?.action];
       if (!type || !guild || !entry.executorId) return;
-      // Cible transmise pour les bans et kicks (sanctionner un arrivant récent n'est pas compté) et
-      // les suppressions de salons (supprimer un salon que l'on a créé n'est pas compté). Un prune
-      // n'a pas de cible. La fenêtre est calculée sur l'horodatage de l'entrée (rejeu après RESUME).
+      // Cible transmise pour les bans et kicks (sanctionner un arrivant récent n'est pas compté), les
+      // suppressions de salons (supprimer un salon que l'on a créé n'est pas compté) et de rôles (rôle
+      // géré). Un prune n'a pas de cible. La fenêtre est calculée sur l'horodatage de l'entrée.
       const prune = entry.action === AuditLogEvent.MemberPrune;
-      const targetId = !prune && (type === 'ban' || type === 'kick' || type === 'channelDelete') ? entry.targetId ?? null : null;
-      await client.services.antiraid?.handleDestructive(guild, entry.executorId, type, { targetId, at: entryTimestamp(entry), count: actionCount(entry) }).catch(() => {});
+      const targetId = prune ? null : entry.targetId ?? null;
+      // Rôle géré supprimé (bot expulsé, intégration retirée) : Discord le supprime, jamais compté.
+      const managedRole = type === 'roleDelete' && (entry.changes ?? []).some((c) => c?.key === 'managed' && c.old === true);
+      await client.services.antiraid?.handleDestructive(guild, entry.executorId, type, { targetId, at: entryTimestamp(entry), count: actionCount(entry), managedRole }).catch(() => {});
+    },
+  },
+  {
+    // Rôle géré supprimé : GUILD_ROLE_DELETE arrive en général AVANT l'entrée d'audit (signée de
+    // l'auteur de l'expulsion du bot) ; mémorisé pour que l'AntiRaid ne la compte pas.
+    name: 'roleDelete',
+    execute(client, role) {
+      if (role?.managed || role?.tags?.botId || role?.tags?.integrationId) client.services.antiraid?.rememberManagedRole?.(role.guild?.id, role.id);
     },
   },
 ];

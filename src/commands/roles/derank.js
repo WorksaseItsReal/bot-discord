@@ -43,7 +43,8 @@ module.exports = {
     const cfg = client?.services?.config?.get(interaction.guild.id) ?? {};
     const perms = client?.services?.permissions;
     const levelOf = typeof perms?.levelOf === 'function' ? (g, r) => perms.levelOf(g, r) : undefined;
-    const sensitive = removable.some((r) => isSensitiveRole(r, cfg, { levelOf }));
+    const sensitiveIds = [...removable.filter((r) => isSensitiveRole(r, cfg, { levelOf })).keys()];
+    const sensitive = sensitiveIds.length > 0;
     const preCheck = () => client?.services?.secur?.assertAllowed?.(interaction, 'roleRemove', { count: 1 });
     if (sensitive) preCheck();
     if (client?.services?.config?.get(interaction.guild.id)?.moderation?.confirmDangerous) {
@@ -80,7 +81,8 @@ module.exports = {
     const payload = { embeds: [embed('roles')] };
     // Après confirmation, la carte remplace la demande (éphémère). Réponse d'abord (délai de 3 s), log ensuite.
     const response = interaction.replied || interaction.deferred ? await interaction.editReply(payload) : await interaction.reply(payload);
-    if (sensitive) await client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'roleRemove', { count: 1, targetId: member.id })?.catch?.(() => {});
+    // Rôles sensibles retirés transmis : Secur peut les rendre si un incident s'ouvre ensuite.
+    if (sensitive) await client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'roleRemove', { count: 1, targetId: member.id, record: { roles: sensitiveIds } })?.catch?.(() => {});
     await client?.services?.logging?.send?.(interaction.guild.id, 'moderation', embed('moderation'), undefined, { event: 'sanction' })?.catch?.(() => {});
     return response;
   },

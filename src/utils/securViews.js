@@ -25,7 +25,7 @@ const { securRequirements } = require('./securityAudit');
  * @property {string} guildId
  * @property {string|null} ownerId propriétaire du serveur
  * @property {object} cfg configuration du serveur
- * @property {Array<object>} modules état des 18 modules (services.secur.moduleStatus)
+ * @property {Array<object>} modules état des modules déclarés (services.secur.moduleStatus)
  * @property {boolean} canEdit niveau owner (modifications)
  * @property {boolean} canManageOwners propriétaire (ou OWNER_IDS de confiance)
  * @property {boolean} isGuildOwner
@@ -118,7 +118,7 @@ function navRow(current) {
 
 const backHome = () => actionButton({ command: 'secur', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
 
-/** Menu « Ouvrir un module » (18 options). Pur. */
+/** Menu « Ouvrir un module » (une option par module, 25 au plus). Pur. */
 function moduleSelect(modules) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -212,7 +212,7 @@ function moduleView(state, key) {
           noticeLine(state.notice),
           m.loaded ? readOnlyBanner(state) : `${ICONS.warning} **Non disponible** sur cette version : ce module n'est pas chargé. Ses réglages ne s'appliquent pas.`,
           `Domaine : **${m.domain}** · ${m.undoable ? 'actions annulables' : 'actions non annulables (sanction seule)'}.`,
-          m.suspendedUntil ? `⏸️ Annulations suspendues jusqu'à ${discordTimestamp(m.suspendedUntil, 'T')} (conflit d'annulation).` : null,
+          m.suspendedUntil ? `⏸️ Annulations d'un objet en conflit suspendues jusqu'à ${discordTimestamp(m.suspendedUntil, 'T')} (les autres objets restent protégés).` : null,
         ],
         fields: [
           field('🎚️', 'Mode', MODE_LABELS[m.mode] ?? m.mode),
@@ -545,7 +545,7 @@ function pendingView(state) {
         description: [
           noticeLine(state.notice),
           readOnlyBanner(state),
-          'Un accès de whitelist donné par quelqu\'un qui n\'est pas owner **n\'exempte pas** tant qu\'un owner ne l\'a pas approuvé (24 h au plus).',
+          'Un accès de whitelist donné par quelqu\'un qui n\'est pas owner **n\'exempte pas** tant qu\'un owner ne l\'a pas approuvé (jamais d\'activation automatique).',
           '',
           list.length ? truncate(list.slice(0, 15).map(grantLine).join('\n') + (list.length > 15 ? `\n… et ${list.length - 15} autre(s)` : ''), 3_000) : '*Aucun accès en attente.*',
         ],

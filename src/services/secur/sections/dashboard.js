@@ -145,12 +145,16 @@ const presetPatchOf = (name) => S.presetPatch(name, defaultGuildConfig.secur.mod
 /** Écrit la tranche `secur.modules[key]` et journalise (après la réponse faite par `respond`). */
 async function writeModule(client, interaction, key, patch, notice, respond) {
   const guildId = interaction.guildId;
-  const before = clone(S.moduleConfig(client.services.config.get(guildId), key));
+  // ban / kick à limite héritée : le journal compare les limites EFFECTIVES (seuils antiraid compris).
+  const inherited = (cfg) => (key === 'ban' || key === 'kick' ? { antiraid: { banThreshold: cfg.antiraid?.banThreshold ?? null, kickThreshold: cfg.antiraid?.kickThreshold ?? null } } : {});
+  const cfgBefore = client.services.config.get(guildId);
+  const before = clone(S.moduleConfig(cfgBefore, key));
   client.services.config.update(guildId, { secur: { modules: { [key]: patch } } });
-  const after = clone(S.moduleConfig(client.services.config.get(guildId), key));
+  const cfgAfter = client.services.config.get(guildId);
+  const after = clone(S.moduleConfig(cfgAfter, key));
   const changed = Object.keys(patch).some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
   await respond(view(client, interaction, `module.${key}`, changed ? `${ICONS.success} ${notice}` : `${ICONS.info} Aucun changement.`));
-  if (changed) await journalOf(client, interaction, { secur: { modules: { [key]: before } } }, { secur: { modules: { [key]: after } } });
+  if (changed) await journalOf(client, interaction, { ...inherited(cfgBefore), secur: { modules: { [key]: before } } }, { ...inherited(cfgAfter), secur: { modules: { [key]: after } } });
 }
 
 /** Écrit une clé de `secur` et journalise. */

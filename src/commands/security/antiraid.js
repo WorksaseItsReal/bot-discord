@@ -121,6 +121,32 @@ function assertUnlocked(client, interaction) {
   }
 }
 
+/**
+ * Modules Secur ban / kick actifs qui HÉRITENT leur limite des seuils historiques (limit null) :
+ * banThreshold / kickThreshold sont alors LE seuil de Secur. Pur.
+ */
+const INHERITED = Object.freeze({ ban: 'banThreshold', kick: 'kickThreshold' });
+function inheritedModules(cfg) {
+  return Object.keys(INHERITED).filter((k) => S.moduleMode(cfg, k) !== 'off' && !Number.isInteger(S.moduleConfig(cfg, k).limit));
+}
+
+/**
+ * Relever un seuil repris par Secur affaiblit Secur : même exigence que /secur (niveau owner), que
+ * le verrou soit posé ou non.
+ */
+function assertSecurLimitRaise(client, interaction, cfg, patch) {
+  const next = { ...cfg, antiraid: { ...(cfg.antiraid ?? {}), ...patch } };
+  const raised = inheritedModules(cfg).filter((k) => INHERITED[k] in patch && S.effectiveLimit(next, k) > S.effectiveLimit(cfg, k));
+  if (!raised.length || S.hasOwnerLevel(interaction.guild, interaction.user.id, cfg, levelOpts(client))) return;
+  throw new UserError(`${ICONS.lock} Ce seuil est aussi celui de Secur (${raised.map((k) => S.SECUR_MODULES[k].label).join(', ')}, limite héritée) : le relever affaiblit Secur. ${S.OWNER_LEVEL_MESSAGE}`);
+}
+
+/** Tranche Secur ban / kick (modules hérités) pour le journal : un relèvement y est classé critique. */
+function securSlice(cfg) {
+  const modules = Object.fromEntries(inheritedModules(cfg).map((k) => [k, S.moduleConfig(cfg, k)]));
+  return Object.keys(modules).length ? { secur: { modules } } : {};
+}
+
 /** Membre sur la blacklist de sécurité (SEC3, optionnelle). */
 function isBlacklisted(client, guildId, userId) {
   try {
@@ -186,8 +212,12 @@ function securNotes(client, guildId, kind) {
   const out = [];
   const modes = [...new Set(active.map((m) => m.mode))].join(' et ');
   if (kind === 'destructive') {
+    const inherited = inheritedModules(client.services.config.get(guildId));
     const covered = active.filter((m) => ['channelDelete', 'roleDelete', 'ban', 'kick'].includes(m.key));
-    if (covered.length) out.push(`🛡️ **Géré par Secur** : ${covered.map((m) => `${m.label} (mode ${m.mode})`).join(', ')}. Ces seuils ne s'appliquent plus à ces actions : réglez-les dans /secur panneau.`);
+    const replaced = covered.filter((m) => !inherited.includes(m.key));
+    const reused = covered.filter((m) => inherited.includes(m.key));
+    if (replaced.length) out.push(`🛡️ **Géré par Secur** : ${replaced.map((m) => `${m.label} (mode ${m.mode})`).join(', ')}. Ces seuils ne s'appliquent plus à ces actions : réglez-les dans /secur panneau.`);
+    if (reused.length) out.push(`🛡️ **Repris par Secur** : ${reused.map((m) => `${m.label} (mode ${m.mode})`).join(', ')}. Secur utilise CE seuil (limite héritée) : le relever affaiblit Secur et demande le niveau owner.`);
   } else out.push(`🛡️ **Géré par Secur (mode ${modes})** : ${active.length} module(s) anti-nuke actif(s).`);
   const max = active.filter((m) => m.mode === 'max');
   if (max.length) out.push(`${ICONS.warning} **La whitelist ne protège pas en mode max** (${max.slice(0, 4).map((m) => m.label).join(', ')}${max.length > 4 ? '…' : ''}) : seuls les owners et les bots de confiance y sont exemptés.`);
@@ -782,12 +812,14 @@ module.exports = {
         if (v !== undefined) patch[key] = v;
       }
       if (!Object.keys(patch).length) throw new UserError('Aucune valeur saisie : rien n\'a été modifié.');
-      const before = { ...cfgOf(client, interaction.guildId).antiraid };
+      const cfgBefore = cfgOf(client, interaction.guildId);
+      assertSecurLimitRaise(client, interaction, cfgBefore, patch);
+      const before = { ...cfgBefore.antiraid };
       client.services.config.update(interaction.guildId, { antiraid: patch });
       const n = Object.keys(patch).length;
       await interaction.update(render(client, interaction.guild, kind, `${n} paramètre${n > 1 ? 's' : ''} mis à jour.`));
       const changes = fields.filter(([key]) => key in patch && patch[key] !== before[key]).map(([key, label]) => `${label} : ${before[key] ?? 0} → ${patch[key]}`);
-      if (changes.length) await journal(client, interaction, changes, { before: { antiraid: pick(before, Object.keys(patch)) }, after: { antiraid: { ...patch } } });
+      if (changes.length) await journal(client, interaction, changes, { before: { antiraid: pick(before, Object.keys(patch)), ...securSlice(cfgBefore) }, after: { antiraid: { ...patch }, ...securSlice(cfgOf(client, interaction.guildId)) } });
     },
     /** Sélecteur du salon d'alerte (vide : logs sécurité seulement). */
     async alertch(interaction, client) {
@@ -876,11 +908,13 @@ module.exports = {
       assertUnlocked(client, interaction);
       const preset = own(PRESETS, key) ? PRESETS[key] : null;
       if (!preset) throw new UserError('Préréglage inconnu.');
-      const current = cfgOf(client, interaction.guildId).antiraid ?? {};
+      const cfgBefore = cfgOf(client, interaction.guildId);
+      assertSecurLimitRaise(client, interaction, cfgBefore, preset.patch);
+      const current = cfgBefore.antiraid ?? {};
       const changed = Object.entries(preset.patch).some(([k, v]) => current[k] !== v);
       client.services.config.update(interaction.guildId, { antiraid: preset.patch });
       await interaction.update(render(client, interaction.guild, 'home', `Préréglage ${preset.emoji} **${preset.label}** appliqué. Salon d'alerte et whitelist conservés.`));
-      if (changed) await journal(client, interaction, `Préréglage ${preset.emoji} **${preset.label}** appliqué (AntiRaid activé).`, { before: { antiraid: pick(current, Object.keys(preset.patch)) }, after: { antiraid: { ...preset.patch } } });
+      if (changed) await journal(client, interaction, `Préréglage ${preset.emoji} **${preset.label}** appliqué (AntiRaid activé).`, { before: { antiraid: pick(current, Object.keys(preset.patch)), ...securSlice(cfgBefore) }, after: { antiraid: { ...preset.patch }, ...securSlice(cfgOf(client, interaction.guildId)) } });
     },
     /** Simulation sans effet : nouveau message éphémère (le tableau de bord reste en place). */
     async simulate(interaction, client) {

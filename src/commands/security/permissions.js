@@ -118,6 +118,24 @@ function assertCanAssign(client, interaction, name, command) {
   }
 }
 
+/**
+ * Couper le mode strict lève TOUTES les restrictions attribuées : exige le rang du palier le plus
+ * exigeant parmi les commandes attribuées (une restriction posée par le propriétaire sur /ban ne
+ * se neutralise pas par un simple administrateur). Réactiver reste ouvert (ne fait que restreindre).
+ */
+function assertCanLiftStrict(client, interaction) {
+  const rank = viewerRank(client, interaction);
+  for (const { name } of svc(client).assignments(interaction.guildId)) {
+    const t = tierOf(name);
+    if (t?.assigner === 5 && rank < 5) {
+      throw new UserError(`Le mode strict protège **/${name}** (palier « ${t.label} ») : seul le **propriétaire du serveur** peut le désactiver.`);
+    }
+    if (t?.assigner === 4 && rank < 4) {
+      throw new UserError(`Le mode strict protège **/${name}** (palier « ${t.label} ») : seuls les **owners de sécurité** (/secur owner) et le propriétaire peuvent le désactiver.`);
+    }
+  }
+}
+
 /** Commande (par nom saisi ou choisi) ; UserError si elle n'existe pas. */
 function commandByName(client, raw) {
   const name = String(raw ?? '').trim().replace(/^\//, '').toLowerCase();
@@ -795,6 +813,7 @@ module.exports = {
       if (state !== 'on' && state !== 'off') throw new UserError('Ce bouton est invalide.');
       const wanted = state === 'on';
       const before = svc(client).settings(interaction.guildId).strict;
+      if (before && !wanted) assertCanLiftStrict(client, interaction);
       if (before !== wanted) client.services.config.update(interaction.guildId, { permissions: { strict: wanted } });
       await interaction.update(strictView(client, interaction.guild, before === wanted ? `${ICONS.info} Aucun changement.` : `${ICONS.success} Mode strict **${wanted ? 'activé' : 'désactivé'}**.`));
       if (before !== wanted) await svc(client).logChange(interaction.guild, interaction.user, [`Mode strict : ${before ? 'activé' : 'désactivé'} → ${wanted ? 'activé' : 'désactivé'}`]);

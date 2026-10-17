@@ -184,6 +184,8 @@ const defaultGuildConfig = Object.freeze({
       voiceKick: { mode: 'off', punish: 'derank', undo: false, limit: 5, windowSeconds: 10 },
       everyone: { mode: 'off', punish: 'none', undo: true, limit: 1, windowSeconds: 10 },
       messagePurge: { mode: 'off', punish: 'derank', undo: false, limit: 2, windowSeconds: 10, minMessages: 20 },
+      timeout: { mode: 'off', punish: 'derank', undo: true, limit: 5, windowSeconds: 10 },
+      threadDelete: { mode: 'off', punish: 'derank', undo: false, limit: 5, windowSeconds: 10 },
     },
   },
   tickets: {

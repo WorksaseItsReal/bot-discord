@@ -734,8 +734,8 @@ class ModerationService {
    * @param {'channelDelete'|'roleDelete'|'ban'|'kick'|'unban'|'channelCreate'|'channelUpdate'|'roleCreate'|'roleUpdate'|'roleAdd'|'roleRemove'|'everyone'|'messagePurge'} type
    *   les types hors seuils historiques (channelCreate…) n'alimentent que les modules Secur
    */
-  async reportDestructiveAction(guild, moderator, type, { targetId = null, targetJoinedAt = null, count = 1 } = {}) {
-    await this.#reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count);
+  async reportDestructiveAction(guild, moderator, type, { targetId = null, targetJoinedAt = null, count = 1, record = null } = {}) {
+    await this.#reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count, record);
   }
 
   /** Pré-contrôle Secur / AntiRaid d'une action faite par le bot pour un modérateur (lève une UserError). */
@@ -761,11 +761,12 @@ class ModerationService {
    * Signale une action faite via le bot au nom du modérateur (best-effort, jamais bloquant) : au
    * module Secur s'il couvre ce type, sinon au chemin historique de l'AntiRaid (at = maintenant).
    */
-  async #reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count = 1) {
+  async #reportDestructive(guild, moderator, type, targetId, targetJoinedAt, count = 1, record = null) {
     if (!moderator?.id) return;
     try {
       if (this.secur?.covers?.(guild.id, type)) {
-        await this.secur.reportBotAction(guild, moderator, type, { count, targetId });
+        // record : détails lus par l'annulation du module (rôles retirés…), avec la cible.
+        await this.secur.reportBotAction(guild, moderator, type, { count, targetId, record });
         return;
       }
       if (!this.antiraid?.handleDestructive) return;

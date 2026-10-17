@@ -150,10 +150,13 @@ function preCheck(interaction, type) {
   interaction.client?.services?.secur?.assertAllowed?.(interaction, type);
 }
 
-/** Signalement APRÈS succès, au nom de l'auteur (best-effort, ne lève jamais). */
-async function reportAction(interaction, type) {
+/**
+ * Signalement APRÈS succès, au nom de l'auteur (best-effort, ne lève jamais). `targetId` (salon
+ * supprimé ou créé) rend l'action annulable par Secur ; sans cible, elle est seulement comptée.
+ */
+async function reportAction(interaction, type, targetId = null) {
   try {
-    await interaction.client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, type);
+    await interaction.client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, type, { targetId });
   } catch {
     /* la détection ne fait jamais échouer l'action déjà faite */
   }
@@ -225,7 +228,7 @@ async function create(interaction) {
     })],
     components: buttonRows(linkButton('Ouvrir', channelUrl(guild, channel), ICONS.link)),
   });
-  await reportAction(interaction, 'channelCreate');
+  await reportAction(interaction, 'channelCreate', channel.id);
 }
 
 async function remove(interaction) {
@@ -269,7 +272,7 @@ async function remove(interaction) {
   } finally {
     // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
     // (suppressions de salons en masse), après la réponse, MÊME si elle échoue (message disparu…).
-    await reportAction(interaction, 'channelDelete');
+    await reportAction(interaction, 'channelDelete', channel.id);
   }
 }
 
@@ -299,7 +302,7 @@ async function clone(interaction) {
     })],
     components: buttonRows(linkButton('Ouvrir', channelUrl(guild, copy), ICONS.link)),
   });
-  await reportAction(interaction, 'channelCreate');
+  await reportAction(interaction, 'channelCreate', copy.id);
 }
 
 async function rename(interaction) {
