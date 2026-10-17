@@ -49,8 +49,8 @@ const LOG_CATEGORIES = Object.freeze({
     emoji: '🗂️',
     label: 'Salons',
     channel: 'salons',
-    description: 'Salons et fils créés, supprimés ou modifiés.',
-    events: { channelCreate: 'Salons créés', channelDelete: 'Salons supprimés', channelUpdate: 'Salons modifiés', threadCreate: 'Fils créés', threadDelete: 'Fils supprimés' },
+    description: 'Salons et fils créés, supprimés, modifiés ou renouvelés.',
+    events: { channelCreate: 'Salons créés', channelDelete: 'Salons supprimés', channelUpdate: 'Salons modifiés', threadCreate: 'Fils créés', threadDelete: 'Fils supprimés', channelRenew: 'Salons renouvelés (/channel renouveler)' },
   },
   voice: {
     emoji: '🔊',

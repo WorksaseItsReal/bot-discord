@@ -1,18 +1,25 @@
 'use strict';
 
-const { SlashCommandBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
-const { card, field, wide, ICONS, code, subtext, linkButton, buttonRows } = require('../../utils/ui');
+const { SlashCommandBuilder, ChannelType, PermissionFlagsBits, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+const { card, field, wide, ICONS, code, subtext, linkButton, buttonRows, actionButton, status, fitEmbeds, ButtonStyle } = require('../../utils/ui');
 const { discordTimestamp, formatDuration } = require('../../utils/time');
 const { truncate } = require('../../utils/embeds');
 const { confirm } = require('../../utils/confirmation');
 const { assertCanManageChannel } = require('../../services/LockdownService');
 const { requirePermission } = require('../../services/ModerationService');
+const { ChannelRenewService, CONFIRM_WORD } = require('../../services/ChannelRenewService');
+const { logCard } = require('../../services/LoggingService');
+const { assertInvoker, snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
 
 /**
  * /channel : informations d'un salon (`info`, ouvert à tous) et gestion des salons
- * (`creer`, `supprimer`, `cloner`, `renommer`, `sujet`, `nsfw`) — « Gérer les salons »
+ * (`creer`, `supprimer`, `cloner`, `renommer`, `sujet`, `nsfw`, `renouveler`) — « Gérer les salons »
  * exigée sur le salon visé (revérifiée par le bot), confirmation avant toute suppression.
+ * Chaque action de gestion est pré-contrôlée par Secur / AntiRaid AVANT Discord (le journal
+ * d'audit l'attribue au bot), puis signalée au nom de l'auteur après succès.
+ * `renouveler` recrée le salon à l'identique et reporte la configuration (ChannelRenewService),
+ * après une confirmation forte (mot à recopier) ; jamais délégable (permissions natives).
  *
  * Changement d'usage : l'ancien `/channel [salon]` s'écrit désormais `/channel info [salon]`.
  */
@@ -34,6 +41,8 @@ const TYPES = {
 const VOICE_TYPES = new Set([ChannelType.GuildVoice, ChannelType.GuildStageVoice]);
 /** Salons gérables par les sous-commandes de gestion (pas les fils). */
 const MANAGED_TYPES = [ChannelType.GuildText, ChannelType.GuildVoice, ChannelType.GuildCategory, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildStageVoice, ChannelType.GuildMedia];
+/** Salons renouvelables (ni catégorie, ni fil). */
+const RENEW_TYPES = [ChannelType.GuildText, ChannelType.GuildVoice, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildStageVoice, ChannelType.GuildMedia];
 /** Salons avec un sujet. */
 const TOPIC_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia];
 /** Salons pouvant être marqués NSFW. */
@@ -133,6 +142,23 @@ function actionCard({ tone = 'success', icon, title, description, channel, moder
 
 const reasonOf = (interaction, verb) => truncate(`${verb} par ${interaction.user.tag}`, 400);
 
+/**
+ * Pré-contrôle Secur / AntiRaid AVANT tout appel à Discord : l'action, signée par le bot dans le
+ * journal d'audit, échapperait sinon à la détection. Refus d'emblée (UserError) au seuil.
+ */
+function preCheck(interaction, type) {
+  interaction.client?.services?.secur?.assertAllowed?.(interaction, type);
+}
+
+/** Signalement APRÈS succès, au nom de l'auteur (best-effort, ne lève jamais). */
+async function reportAction(interaction, type) {
+  try {
+    await interaction.client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, type);
+  } catch {
+    /* la détection ne fait jamais échouer l'action déjà faite */
+  }
+}
+
 // ---------------------------------------------------------------- sous-commandes
 
 async function info(interaction) {
@@ -184,6 +210,7 @@ async function create(interaction) {
   const me = guild.members.me;
   const botPerms = parent ? parent.permissionsFor?.(me) : me?.permissions;
   if (botPerms && !botPerms.has(PermissionFlagsBits.ManageChannels)) throw new UserError('Il me manque la permission **Gérer les salons** pour créer ce salon.');
+  preCheck(interaction, 'channelCreate');
   await interaction.deferReply({ ephemeral: true });
   const channel = await guild.channels.create({ name, type, parent: parent?.id ?? undefined, topic: topic ?? undefined, reason: reasonOf(interaction, 'Créé') });
   const [icon, label] = typeMeta(channel);
@@ -198,6 +225,7 @@ async function create(interaction) {
     })],
     components: buttonRows(linkButton('Ouvrir', channelUrl(guild, channel), ICONS.link)),
   });
+  await reportAction(interaction, 'channelCreate');
 }
 
 async function remove(interaction) {
@@ -209,6 +237,7 @@ async function remove(interaction) {
     throw new UserError(`${channel} est requis par la communauté du serveur (règles, annonces de Discord) : changez-le d'abord dans les paramètres du serveur.`);
   }
   if (channel.deletable === false) throw new UserError(`Je ne peux pas supprimer ${channel} : il me faut la permission **Gérer les salons** sur ce salon.`);
+  preCheck(interaction, 'channelDelete');
   const children = channel.type === ChannelType.GuildCategory ? channel.children?.cache?.size ?? 0 : 0;
   const name = channel.name;
   const [icon, label] = typeMeta(channel);
@@ -222,6 +251,8 @@ async function remove(interaction) {
   if (!ok) return;
   // Relu après la confirmation : supprimé entre-temps ?
   if (!guild.channels.cache.has(channel.id)) throw new UserError('Ce salon a déjà été supprimé.');
+  // Revérifié après la confirmation (jusqu'à 30 s) : la fenêtre de détection a pu se remplir.
+  preCheck(interaction, 'channelDelete');
   await channel.delete(reasonOf(interaction, 'Supprimé'));
   try {
     await interaction.editReply({
@@ -238,7 +269,7 @@ async function remove(interaction) {
   } finally {
     // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
     // (suppressions de salons en masse), après la réponse, MÊME si elle échoue (message disparu…).
-    await interaction.client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+    await reportAction(interaction, 'channelDelete');
   }
 }
 
@@ -253,6 +284,7 @@ async function clone(interaction) {
   const me = guild.members.me;
   const botPerms = parent ? parent.permissionsFor?.(me) : me?.permissions;
   if (botPerms && !botPerms.has(PermissionFlagsBits.ManageChannels)) throw new UserError('Il me manque la permission **Gérer les salons** pour créer la copie.');
+  preCheck(interaction, 'channelCreate');
   await interaction.deferReply({ ephemeral: true });
   // « name » absent : la copie garde le nom d'origine (une clé à undefined l'effacerait).
   const copy = await source.clone({ ...(name ? { name } : {}), reason: reasonOf(interaction, `Copie de #${source.name}`) });
@@ -267,6 +299,7 @@ async function clone(interaction) {
     })],
     components: buttonRows(linkButton('Ouvrir', channelUrl(guild, copy), ICONS.link)),
   });
+  await reportAction(interaction, 'channelCreate');
 }
 
 async function rename(interaction) {
@@ -275,6 +308,7 @@ async function rename(interaction) {
   const name = cleanChannelName(interaction.options.getString('nom'));
   const before = channel.name;
   if (name === before) throw new UserError(`${channel} s'appelle déjà ainsi.`);
+  preCheck(interaction, 'channelUpdate');
   // Discord limite les renommages d'un salon (2 toutes les 10 minutes) : la requête peut attendre.
   await interaction.deferReply({ ephemeral: true });
   const updated = await channel.setName(name, reasonOf(interaction, 'Renommé'));
@@ -288,6 +322,7 @@ async function rename(interaction) {
       fields: [field(ICONS.tag, 'Nouveau nom', code(truncate((updated ?? channel).name, 100)))],
     })],
   });
+  await reportAction(interaction, 'channelUpdate');
 }
 
 async function topic(interaction) {
@@ -297,6 +332,7 @@ async function topic(interaction) {
   const text = interaction.options.getString('texte')?.trim() || null;
   if (text && [...text].length > MAX_TOPIC) throw new UserError(`Sujet trop long (${MAX_TOPIC} caractères au maximum).`);
   if ((channel.topic ?? null) === text) throw new UserError(text ? 'Ce salon a déjà ce sujet.' : 'Ce salon n\'a déjà pas de sujet.');
+  preCheck(interaction, 'channelUpdate');
   // Discord limite les changements de nom et de sujet (2 toutes les 10 minutes) : la requête peut attendre.
   await interaction.deferReply({ ephemeral: true });
   await channel.setTopic(text, reasonOf(interaction, 'Sujet modifié'));
@@ -310,6 +346,7 @@ async function topic(interaction) {
       fields: [text ? wide(ICONS.reason, 'Sujet', truncate(text, 1024)) : null],
     })],
   });
+  await reportAction(interaction, 'channelUpdate');
 }
 
 async function nsfw(interaction) {
@@ -318,6 +355,7 @@ async function nsfw(interaction) {
   if (!NSFW_TYPES.includes(channel.type) || typeof channel.setNSFW !== 'function') throw new UserError('Ce type de salon ne peut pas être marqué NSFW.');
   const on = interaction.options.getBoolean('actif', true);
   if (Boolean(channel.nsfw) === on) throw new UserError(`${channel} est déjà ${on ? 'réservé aux adultes (NSFW)' : 'tout public'}.`);
+  preCheck(interaction, 'channelUpdate');
   // Modification du salon : la requête peut attendre une limite de Discord (délai de 3 s).
   await interaction.deferReply({ ephemeral: true });
   await channel.setNSFW(on, reasonOf(interaction, on ? 'NSFW activé' : 'NSFW désactivé'));
@@ -331,14 +369,147 @@ async function nsfw(interaction) {
       moderator: interaction.user,
     })],
   });
+  await reportAction(interaction, 'channelUpdate');
 }
 
-const HANDLERS = { info, creer: create, supprimer: remove, cloner: clone, renommer: rename, sujet: topic, nsfw };
+// ---------------------------------------------------------------- /channel renouveler
+
+const RENEW_ICON = '♻️';
+
+/** Liste à puces bornée pour un champ (1 024 caractères). Pur. */
+function boundedList(items, empty) {
+  if (!items.length) return empty;
+  const out = [];
+  let used = 0;
+  for (const [i, item] of items.entries()) {
+    const line = `› ${item}`;
+    if (used + line.length + 1 > 960) {
+      out.push(subtext(`… et ${items.length - i} autre(s)`));
+      break;
+    }
+    out.push(line);
+    used += line.length + 1;
+  }
+  return out.join('\n');
+}
+
+/** Carte du bilan avant confirmation : ce qui est reporté, ce qui est perdu. Pur. */
+function renewPlanView(channel, plan, ownerId) {
+  const [icon, label] = typeMeta(channel);
+  return {
+    embeds: [card({
+      tone: 'warning',
+      section: 'information',
+      icon: RENEW_ICON,
+      title: `Renouveler #${truncate(channel.name, 90)} ?`,
+      description: [
+        `${icon} ${channel} (${label.toLowerCase()}) sera **recréé à l'identique** — même place, même catégorie, mêmes permissions, sujet, mode lent et NSFW — puis l'original sera **supprimé**.`,
+        subtext(`Confirmation forte : il faudra recopier ${CONFIRM_WORD}. Un renouvellement toutes les 30 s par serveur au plus.`),
+      ],
+      fields: [
+        wide(ICONS.success, 'Reporté sur le nouveau salon', boundedList(plan.carried, '*Aucun réglage du bot ne vise ce salon.*')),
+        wide(ICONS.delete, 'Perdu', boundedList(plan.lost, '—')),
+      ],
+    })],
+    components: buttonRows(
+      actionButton({ command: 'channel', action: 'renewform', args: [channel.id, ownerId], label: 'Renouveler', emoji: RENEW_ICON, style: ButtonStyle.Danger }),
+      actionButton({ command: 'channel', action: 'renewcancel', args: [ownerId], label: 'Annuler', emoji: ICONS.error }),
+    ),
+  };
+}
+
+function renewModal(channelId, ownerId) {
+  return new ModalBuilder()
+    .setCustomId(`cmd:channel:renew:${channelId}:${ownerId}`)
+    .setTitle('Renouveler le salon')
+    .addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('confirmation').setLabel(`Tapez ${CONFIRM_WORD} pour confirmer`).setStyle(TextInputStyle.Short)
+        .setRequired(true).setMaxLength(20).setPlaceholder(CONFIRM_WORD),
+    ));
+}
+
+/** Carte du résultat (réponse à l'auteur, et carte publique si c'était le salon courant). */
+function renewResultCard({ created, name, plan, notes, moderator, publicCard = false }) {
+  if (publicCard) {
+    return card({
+      tone: 'info',
+      section: 'information',
+      icon: RENEW_ICON,
+      title: 'Salon renouvelé',
+      description: `Ce salon a été renouvelé par ${moderator} : l'historique a été vidé, les permissions et réglages sont conservés.`,
+    });
+  }
+  return card({
+    tone: 'success',
+    section: 'information',
+    icon: RENEW_ICON,
+    title: 'Salon renouvelé',
+    description: `${created} remplace **#${truncate(name, 90)}** : même place, mêmes permissions et réglages ; l'historique a été vidé.`,
+    fields: [
+      wide(ICONS.success, 'Reporté', boundedList(plan.carried, '*Aucun réglage à reporter.*')),
+      notes.length ? wide(ICONS.warning, 'À vérifier', boundedList(notes, '—')) : null,
+      field(ICONS.id, 'Nouvel identifiant', code(created.id)),
+      field(ICONS.moderator, 'Par', `${moderator}`),
+    ],
+  });
+}
+
+async function renewCommand(interaction, client) {
+  const channel = pickChannel(interaction);
+  const plan = new ChannelRenewService({ client }).check(interaction, channel);
+  await interaction.reply({ ...renewPlanView(channel, plan, interaction.user.id), ephemeral: true });
+}
+
+/** cmd:channel:renew:<channelId>:<ownerId> — formulaire soumis : renouvellement (revérifié). */
+async function renewSubmit(interaction, client, [rawChannelId, ownerId]) {
+  assertInvoker(interaction, ownerId);
+  const channelId = snowflake(rawChannelId, 'salon');
+  let typed = '';
+  try {
+    typed = interaction.fields.getTextInputValue('confirmation') ?? '';
+  } catch {
+    typed = '';
+  }
+  if (typed.trim().toUpperCase() !== CONFIRM_WORD) {
+    throw new UserError(`Confirmation incorrecte : tapez exactement \`${CONFIRM_WORD}\`. Le salon n'a pas été touché.`);
+  }
+  const guild = interaction.guild;
+  const result = await new ChannelRenewService({ client }).renew(interaction, channelId, { onLocked: () => interaction.deferUpdate() });
+  const { created, name, plan, notes, wasCurrent, oldId } = result;
+  // 7. Réponse (le message d'origine a pu disparaître avec l'ancien salon).
+  await interaction.editReply({
+    embeds: [renewResultCard({ created, name, plan, notes, moderator: interaction.user })],
+    components: buttonRows(linkButton('Ouvrir', channelUrl(guild, created), ICONS.link)),
+  }).catch(() => {});
+  if (wasCurrent) {
+    await created.send({ embeds: fitEmbeds([renewResultCard({ moderator: interaction.user, publicCard: true })], { guildId: guild.id }), allowedMentions: { parse: [] } }).catch(() => {});
+  }
+  // Suppression signée par le bot : l'AUTEUR est signalé (une action).
+  await reportAction(interaction, 'channelDelete');
+  // 8. PUIS le log.
+  await client.services?.logging?.send?.(guild.id, 'channels', logCard({
+    category: 'channels',
+    tone: 'caution',
+    icon: RENEW_ICON,
+    title: 'Salon renouvelé',
+    description: `**#${truncate(name, 90)}** a été recréé à l'identique : ${created}. L'historique a été vidé.`,
+    fields: [
+      field(ICONS.moderator, 'Par', `${interaction.user}`),
+      field(ICONS.id, 'Ancien identifiant', code(oldId)),
+      field(ICONS.count, 'Réglages reportés', `**${plan.carried.length}**`),
+    ],
+    id: created.id,
+  }), undefined, { event: 'channelRenew' });
+}
+
+const HANDLERS = { info, creer: create, supprimer: remove, cloner: clone, renommer: rename, sujet: topic, nsfw, renouveler: renewCommand };
 
 module.exports = {
   category: 'information',
   cleanChannelName,
   CREATE_TYPES,
+  renewPlanView,
+  renewResultCard,
   data: new SlashCommandBuilder()
     .setName('channel')
     .setDescription('Informations d\'un salon et gestion des salons (créer, supprimer, cloner…).')
@@ -377,12 +548,34 @@ module.exports = {
     .addSubcommand((s) =>
       s.setName('nsfw').setDescription('Réserve un salon aux adultes, ou le rend tout public (Gérer les salons).')
         .addBooleanOption((o) => o.setName('actif').setDescription('Oui : réservé aux adultes · Non : tout public').setRequired(true))
-        .addChannelOption((o) => o.setName('salon').setDescription('Le salon concerné (par défaut : le salon actuel)').addChannelTypes(...NSFW_TYPES))),
+        .addChannelOption((o) => o.setName('salon').setDescription('Le salon concerné (par défaut : le salon actuel)').addChannelTypes(...NSFW_TYPES)))
+    .addSubcommand((s) =>
+      s.setName('renouveler').setDescription('Recrée un salon à l\'identique, sans ses messages, après confirmation (Gérer les salons).')
+        .addChannelOption((o) => o.setName('salon').setDescription('Le salon à recréer vide (par défaut : le salon actuel)').addChannelTypes(...RENEW_TYPES))),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
-  async execute(interaction) {
+  async execute(interaction, client = interaction.client) {
     const handler = HANDLERS[interaction.options.getSubcommand()];
     if (!handler) throw new UserError('Sous-commande inconnue.');
-    return handler(interaction);
+    return handler(interaction, client);
+  },
+
+  buttons: {
+    /** cmd:channel:renewform:<channelId>:<ownerId> — revérifie tout, puis ouvre la confirmation forte. */
+    async renewform(interaction, client, [rawChannelId, ownerId]) {
+      assertInvoker(interaction, ownerId);
+      const channelId = snowflake(rawChannelId, 'salon');
+      const channel = interaction.guild.channels.cache.get(channelId);
+      if (!channel) throw new UserError('Ce salon n\'existe plus (déjà renouvelé ou supprimé).');
+      new ChannelRenewService({ client }).check(interaction, channel);
+      await interaction.showModal(renewModal(channelId, ownerId));
+    },
+    /** cmd:channel:renewcancel:<ownerId> */
+    async renewcancel(interaction, client, [ownerId]) {
+      assertInvoker(interaction, ownerId);
+      await interaction.update({ embeds: [status.warn('Renouvellement annulé. Rien n\'a été modifié.')], components: [] });
+    },
+    /** cmd:channel:renew:<channelId>:<ownerId> (formulaire) */
+    renew: renewSubmit,
   },
 };
