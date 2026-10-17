@@ -183,28 +183,44 @@ class LogSetupService {
 
   /**
    * Supprime les salons (et la catégorie) créés par le bot et débranche les logs concernés.
-   * @returns {Promise<number>} nombre de salons supprimés
+   * @param {{ onDeleted?: (channel: object) => unknown }} [opts] onDeleted : appelé après CHAQUE
+   *   salon supprimé (signalement AntiRaid de l'auteur), sans jamais interrompre la suppression.
+   * @returns {Promise<number>} nombre de salons supprimés (hors catégorie)
    */
-  async remove(guild, reason = 'Suppression des salons de logs') {
+  async remove(guild, reason = 'Suppression des salons de logs', { onDeleted } = {}) {
     return this.#exclusive(guild.id, async () => {
       this.assertCanCreate(guild);
       const full = this.config.get(guild.id);
       const ids = new Set(full.logs.createdChannels ?? []);
       let removed = 0;
       const failed = [];
+      const notify = async (channel) => {
+        try {
+          await onDeleted?.(channel);
+        } catch (err) {
+          logger.debug('Signalement d\'un salon de logs supprimé :', err?.message);
+        }
+      };
       for (const id of ids) {
         const channel = guild.channels.cache.get(id);
         if (!channel) continue; // déjà supprimé
         const ok = await channel.delete(reason).then(() => true, () => false);
-        if (ok) removed += 1;
-        else failed.push(id);
+        if (!ok) {
+          failed.push(id);
+          continue;
+        }
+        removed += 1;
+        await notify(channel);
       }
       // La catégorie n'est supprimée que si elle est vide (vos propres salons restent intacts).
       let categoryId = full.logs.categoryId;
       const category = categoryId ? guild.channels.cache.get(categoryId) : null;
       if (!category) categoryId = null;
       else if (!guild.channels.cache.some((c) => c.parentId === category.id)) {
-        if (await category.delete(reason).then(() => true, () => false)) categoryId = null;
+        if (await category.delete(reason).then(() => true, () => false)) {
+          categoryId = null;
+          await notify(category);
+        }
       }
       const gone = new Set([...ids].filter((id) => !failed.includes(id)));
       const unplug = Object.fromEntries(Object.entries(full.logChannels ?? {}).filter(([, id]) => gone.has(id)).map(([k]) => [k, null]));

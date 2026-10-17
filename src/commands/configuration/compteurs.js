@@ -32,6 +32,11 @@ const { UserError } = require('../../core/errors');
 
 const SECTION = { emoji: '📊', label: 'Compteurs' };
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
+/** Créer ou supprimer des salons (compteurs) : comme /channel, il faut aussi « Gérer les salons ». */
+const channelGuard = (interaction) => {
+  guard(interaction);
+  requirePermission(interaction, 'ManageChannels');
+};
 const svc = (client) => client.services.counters;
 
 /** État affiché d'un compteur : on · noperm · off. */
@@ -242,7 +247,7 @@ module.exports = {
     },
     /** Création en un clic : catégorie « 📊 Statistiques » + tous les compteurs manquants. */
     async create(interaction, client) {
-      guard(interaction);
+      channelGuard(interaction);
       await interaction.deferUpdate();
       const result = await svc(client).create(interaction.guild, availableTypes(client), `Compteurs créés par ${interaction.user.tag}`);
       const notice = `${ICONS.success} **Compteurs prêts** dans <#${result.category.id}>${result.created.length ? ` · ${result.created.length} salon(s) créé(s)` : ''}.`;
@@ -257,7 +262,7 @@ module.exports = {
     },
     /** cmd:compteurs:toggle:<type>:<on|off> — valeur cible (un double clic ne réinverse pas). */
     async toggle(interaction, client, [type, state]) {
-      guard(interaction);
+      channelGuard(interaction);
       assertType(client, type);
       if (state !== 'on' && state !== 'off') throw new UserError('Ce bouton est invalide.');
       const on = counterState(client, interaction.guild, type) !== 'off';
@@ -312,7 +317,7 @@ module.exports = {
     },
     /** Suppression (après confirmation) de tous les compteurs. */
     async remove(interaction, client) {
-      guard(interaction);
+      channelGuard(interaction);
       await interaction.deferUpdate();
       const { removed, failed } = await svc(client).removeAll(interaction.guild, `Compteurs supprimés par ${interaction.user.tag}`);
       const notice = [
