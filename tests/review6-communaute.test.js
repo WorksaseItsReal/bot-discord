@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const { performance } = require('node:perf_hooks');
 const { memoryDb } = require('./db.helper');
 const { GiveawayRepository } = require('../src/database/repositories/GiveawayRepository');
+const { AutomodQuarantineRepository } = require('../src/database/repositories/AutomodQuarantineRepository');
 const { GiveawayService } = require('../src/services/GiveawayService');
 const { pickWinners, lazyShuffle } = require('../src/utils/random');
 
@@ -68,4 +69,21 @@ test('R109 pickWinners / lazyShuffle : uniques, bornés, chaque élément tiré 
     firsts.set(w, (firsts.get(w) ?? 0) + 1);
   }
   for (const k of ['a', 'b', 'c', 'd']) assert.ok(firsts.get(k) > 800 && firsts.get(k) < 1_200, `${k} : ${firsts.get(k)}`);
+});
+
+// ---------------------------------------------------------------- R77 : quarantaine en cours
+
+test('R77 AutomodQuarantineRepository.hasPendingRoles : quarantaine non levée avec rôles retirés', () => {
+  const { db } = memoryDb();
+  const repo = new AutomodQuarantineRepository(db);
+  const U = '200000000000000009';
+  assert.equal(repo.hasPendingRoles(GUILD, U), false);
+  const noRoles = repo.add({ guildId: GUILD, userId: U, roles: [] });
+  assert.equal(repo.hasPendingRoles(GUILD, U), false, 'quarantaine sans rôle retiré');
+  const id = repo.add({ guildId: GUILD, userId: U, roles: ['300000000000000001'] });
+  assert.equal(repo.hasPendingRoles(GUILD, U), true);
+  assert.equal(repo.hasPendingRoles('100000000000000099', U), false, 'autre serveur');
+  repo.lift(GUILD, id, 'mod');
+  repo.lift(GUILD, noRoles, 'mod');
+  assert.equal(repo.hasPendingRoles(GUILD, U), false, 'quarantaine levée');
 });

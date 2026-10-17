@@ -318,3 +318,96 @@ test('R80 /annonce : « Mentionner @everyone » vérifié dans le salon de publi
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R76 / R77 : vérification
+
+async function publishVerifyPanel(h) {
+  const dash = await h.slash('bienvenue');
+  const nav = await h.click(h.message(dash.original), 'cmd:bienvenue:nav', { values: ['verify'] });
+  await h.click(h.message(nav.componentMessageId), 'cmd:bienvenue:publish');
+  return h.fake.messageLog.map((id) => h.message(id)).find((m) => m?.components?.some((r) => r.components.some((c) => c.custom_id === 'cmd:bienvenue:verify')));
+}
+const rolesOf = (h, id) => h.fake.members.get(id).roles;
+
+test('R76 vérification « retrait » : arrivée pendant un arrêt du bot rattrapée au démarrage ; /derank ne retire pas le rôle « non vérifié »', async () => {
+  const h = await createHarness({ ready: false });
+  try {
+    h.configure({ moderation: { confirmDangerous: false }, welcome: { verification: { enabled: true, mode: 'remove', roleId: IDS.roles.temp, channelId: IDS.channels.rules } } });
+    // Arrivée pendant l'arrêt : présente dans GUILD_CREATE, sans GUILD_MEMBER_ADD.
+    const raider = h.addUser('Raider', { ageDays: 2 });
+    const raw = rawMember(raider, [], 0);
+    raw.joined_at = new Date(Date.now() - 60_000).toISOString();
+    h.fake.members.set(raider.id, raw);
+    h.guild.members._add({ ...raw });
+    await h.emitReady();
+    assert.ok(await h.waitFor(() => rolesOf(h, raider.id).includes(IDS.roles.temp), { timeout: 2_000 }), 'arrivée hors ligne non rattrapée (accès complet sans vérification)');
+    // Les anciens membres (rôles en place) ne sont pas touchés.
+    assert.ok(!rolesOf(h, IDS.users.member).includes(IDS.roles.temp), 'ancien membre re-verrouillé');
+
+    // Arrivant vu en ligne puis vérifié (sans autre rôle) : un nouveau rattrapage ne le re-verrouille pas.
+    const fresh = h.addUser('Nouveau', { ageDays: 300 });
+    await h.memberJoin(fresh);
+    assert.ok(rolesOf(h, fresh.id).includes(IDS.roles.temp));
+    const panel = await publishVerifyPanel(h);
+    await h.click(panel, 'cmd:bienvenue:verify', { as: fresh.id });
+    assert.ok(!rolesOf(h, fresh.id).includes(IDS.roles.temp), 'vérification impossible');
+    await h.client.services.welcome.catchUpOfflineJoins(h.guild);
+    await h.settle();
+    assert.ok(!rolesOf(h, fresh.id).includes(IDS.roles.temp), 'membre vérifié re-verrouillé au rattrapage');
+
+    // /derank du raider : le rôle « non vérifié » reste (sinon accès complet).
+    const d = await h.slash('derank', [opt('membre', 6, raider.id), opt('raison', 3, 'test')], { as: 'admin' });
+    assert.ok(!h.isError(d) || /aucun rôle/.test(h.replyText(d)), h.replyText(d));
+    assert.ok(rolesOf(h, raider.id).includes(IDS.roles.temp), '/derank a retiré le rôle « non vérifié »');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R77 vérification « ajout » : un membre dérank, muet ou en timeout ne se rend pas ses rôles par « Me vérifier »', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({
+      moderation: { confirmDangerous: false },
+      welcome: { verification: { enabled: true, mode: 'add', roleId: IDS.roles.member, channelId: IDS.channels.rules }, autoRoles: { humans: [IDS.roles.gamer], bots: [] } },
+    });
+    const panel = await publishVerifyPanel(h);
+    assert.ok(panel, 'panneau non publié');
+    // 1. /derank : le rôle vérifié est conservé, les autres retirés ; « Me vérifier » ne rend rien.
+    await h.slash('derank', [opt('membre', 6, IDS.users.member), opt('raison', 3, 'comportement toxique')], { as: 'admin' });
+    assert.ok(!rolesOf(h, IDS.users.member).includes(IDS.roles.gamer), 'derank sans effet');
+    await h.click(panel, 'cmd:bienvenue:verify', { as: 'member' });
+    assert.ok(!rolesOf(h, IDS.users.member).includes(IDS.roles.gamer), 'derank annulé par le membre (rôles automatiques rendus)');
+
+    // 2. Membre en timeout sans le rôle vérifié : refus.
+    const muted = h.addUser('Muet', { ageDays: 300 });
+    const raw = rawMember(muted, [], 10, { communication_disabled_until: new Date(Date.now() + 3_600_000).toISOString() });
+    h.fake.members.set(muted.id, raw);
+    h.fake.dispatchNow('GUILD_MEMBER_ADD', { ...raw, guild_id: h.guild.id }, 'préparation : membre en timeout');
+    await h.settle();
+    const v = await h.click(panel, 'cmd:bienvenue:verify', { as: muted.id });
+    assert.ok(h.isError(v), 'vérification acceptée en timeout');
+    assert.ok(!rolesOf(h, muted.id).includes(IDS.roles.member), 'rôle vérifié donné à un membre en timeout');
+
+    // 3. Membre avec le rôle Muted : refus.
+    const mutedRole = h.addUser('Muet2', { ageDays: 300 });
+    const raw2 = rawMember(mutedRole, [IDS.roles.muted], 10);
+    h.fake.members.set(mutedRole.id, raw2);
+    h.fake.dispatchNow('GUILD_MEMBER_ADD', { ...raw2, guild_id: h.guild.id }, 'préparation : membre muet');
+    await h.settle();
+    h.configure({ moderation: { mutedRoleId: IDS.roles.muted } });
+    const v2 = await h.click(panel, 'cmd:bienvenue:verify', { as: mutedRole.id });
+    assert.ok(h.isError(v2), 'vérification acceptée pour un membre muet');
+    assert.ok(!rolesOf(h, mutedRole.id).includes(IDS.roles.member));
+
+    // Témoin : un arrivant ordinaire se vérifie.
+    const ok = h.addUser('Ordinaire', { ageDays: 300 });
+    await h.memberJoin(ok);
+    await h.click(panel, 'cmd:bienvenue:verify', { as: ok.id });
+    assert.ok(rolesOf(h, ok.id).includes(IDS.roles.member), 'vérification ordinaire refusée');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

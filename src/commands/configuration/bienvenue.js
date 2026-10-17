@@ -270,6 +270,7 @@ function verifyView(client, guild, notice) {
           removeMode
             ? 'Les nouveaux membres reçoivent le rôle **non vérifié** ; il leur est retiré quand ils cliquent sur le bouton du panneau.'
             : 'Les nouveaux membres reçoivent le rôle **vérifié** quand ils cliquent sur le bouton du panneau.',
+          removeMode ? subtext('Mode **ajout** recommandé : en mode retrait, un compte arrivé pendant un arrêt du bot n\'est verrouillé qu\'au redémarrage.') : null,
           '1. Choisissez le **rôle** et le **salon** du panneau.',
           '2. Activez la vérification et publiez le **panneau**.',
           issue ? `\n${ICONS.error} Rôle inutilisable : ${issue}.` : null,
