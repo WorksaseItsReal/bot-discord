@@ -55,8 +55,9 @@ function banErrorText(err) {
  *    d'un tempban, un softban ou un débannissement fait pendant que le bot était hors ligne
  *    (contrôles : arrivée, guildBanRemove, étape `security` du scheduler) ;
  *  - blrank : un membre listé ne peut recevoir AUCUN rôle (applyRoles saute les ajouts ; un rôle
- *    donné hors du bot est retiré, 3 fois au plus par 10 min).
- * Contrat (plan.notes) : has, count, isRankBlocked, processSecurityDue, purgeGuild.
+ *    donné hors d'applyRoles est retiré ; s'il est rendu par un autre bot, 3 fois au plus par
+ *    10 min). Les rôles restrictifs (Muted, « non vérifié ») ne sont ni bloqués ni retirés.
+ * Contrat (plan.notes) : has, count, isRankBlocked, restrictiveRoleIds, processSecurityDue, purgeGuild.
  */
 class BlacklistService {
   /**
@@ -102,6 +103,26 @@ class BlacklistService {
 
   get(guildId, userId, kind = 'ban') {
     return this.repo.get(guildId, userId, kind);
+  }
+
+  /**
+   * Rôles RESTRICTIFS (sanction, verrou) : le rôle Muted et, vérification active en mode
+   * « retrait », le rôle « non vérifié ». Ce ne sont pas des privilèges : le blrank ne les retire
+   * pas et ne bloque pas leur ajout (applyRoles). Contrat (utils/memberRoles.js).
+   * @returns {Set<string>}
+   */
+  restrictiveRoleIds(guild) {
+    const ids = new Set();
+    if (!guild?.id) return ids;
+    try {
+      const muted = this.client.services?.moderation?.mutedRole?.(guild)?.id;
+      if (muted) ids.add(muted);
+      const v = this.config.get(guild.id)?.welcome?.verification ?? {};
+      if (v.enabled && v.mode === 'remove' && v.roleId) ids.add(v.roleId);
+    } catch (e) {
+      logger.debug('Rôles restrictifs :', e?.message);
+    }
+    return ids;
   }
 
   /** Lève l'UserError de refus si l'utilisateur est blacklisté (ModerationService.unban / softban). */
@@ -361,24 +382,39 @@ class BlacklistService {
 
   /**
    * guildMemberUpdate : un membre du blrank qui gagne un rôle (non géré, modifiable par le bot,
-   * autre que booster) le perd aussitôt (applyRoles), 3 fois au plus par 10 min ; au-delà, carte
-   * « boucle d'attribution avec un autre bot », sans nouveau retrait.
+   * autre que booster, NON restrictif : ni Muted ni « non vérifié ») le perd aussitôt (applyRoles).
+   * Ancien membre partiel (hors cache, après un redémarrage) : les rôles gagnés sont lus dans le
+   * journal d'audit. Rôle rendu par un AUTRE bot (ou par un auteur inconnu) : 3 retraits au plus
+   * par 10 min ; au-delà, carte « boucle d'attribution avec un autre bot », sans nouveau retrait.
+   * Un humain ou ce bot ne peuvent pas créer de boucle rapide : leurs ajouts sont toujours retirés.
    */
   async handleMemberUpdate(oldMember, newMember) {
     const guild = newMember?.guild;
     if (!guild?.id || !newMember?.id || newMember.id === this.client.user?.id) return;
     if (!this.isRankBlocked(guild.id, newMember.id)) return;
-    if (!oldMember || oldMember.partial || !oldMember.roles?.cache) return;
-    const before = new Set(oldMember.roles.cache.keys());
-    const gained = [...(newMember.roles?.cache?.values?.() ?? [])].filter((r) => r && !before.has(r.id) && r.id !== guild.id && !r.managed && r.editable !== false && !r.tags?.premiumSubscriberRole);
+    let before;
+    if (oldMember && !oldMember.partial && oldMember.roles?.cache) {
+      before = new Set(oldMember.roles.cache.keys());
+    } else {
+      // Rôles d'avant inconnus : seuls les rôles ajoutés récemment (journal d'audit) sont « gagnés ».
+      // Journal illisible ou sans ajout récent : rien n'est retiré (un rôle déjà porté reste).
+      const added = await this.#recentAdds(guild, newMember.id);
+      if (!added?.size) return;
+      before = new Set([...(newMember.roles?.cache?.keys?.() ?? [])].filter((id) => !added.has(id)));
+    }
+    const restrictive = this.restrictiveRoleIds(guild);
+    const gained = [...(newMember.roles?.cache?.values?.() ?? [])].filter((r) => r && !before.has(r.id) && r.id !== guild.id && !r.managed && r.editable !== false && !r.tags?.premiumSubscriberRole && !restrictive.has(r.id));
     if (!gained.length) return;
     const level = S.securityLevel(guild, newMember.id, [], this.config.get(guild.id), { ...this.levelOpts(), isBot: Boolean(newMember.user?.bot) });
     if (level === 'bot' || S.isOwnerLevel(level)) return;
+    // Auteur lu AVANT de décider : le plafond « boucle » ne vise qu'un autre bot (ou un inconnu).
+    const executor = await this.#roleGranter(guild, newMember.id, gained.map((r) => r.id));
+    const mayLoop = await this.#mayLoop(guild, executor);
     const now = this.now();
     if (now - this.lastPrune > PRUNE_INTERVAL_MS) this.prune(now);
     const key = `${guild.id}:${newMember.id}`;
     const list = (this.rankRemovals.get(key) ?? []).filter((t) => now - t < BLRANK_WINDOW_MS);
-    if (list.length >= BLRANK_MAX_REMOVALS) {
+    if (mayLoop && list.length >= BLRANK_MAX_REMOVALS) {
       this.rankRemovals.set(key, list);
       const notified = this.loopNotified.get(key);
       if (notified && now - notified < BLRANK_WINDOW_MS) return;
@@ -390,12 +426,13 @@ class BlacklistService {
       }, newMember.id);
       return;
     }
-    list.push(now);
-    this.rankRemovals.delete(key);
-    this.rankRemovals.set(key, list);
-    while (this.rankRemovals.size > MAX_TRACKED) this.rankRemovals.delete(this.rankRemovals.keys().next().value);
+    if (mayLoop) {
+      list.push(now);
+      this.rankRemovals.delete(key);
+      this.rankRemovals.set(key, list);
+      while (this.rankRemovals.size > MAX_TRACKED) this.rankRemovals.delete(this.rankRemovals.keys().next().value);
+    }
     const res = await applyRoles(newMember, { remove: gained.map((r) => r.id) }, 'Blrank : ce membre ne peut recevoir aucun rôle');
-    const executor = await this.#roleGranter(guild, newMember.id, gained.map((r) => r.id));
     await this.#log(guild, {
       tone: res.failed.length ? 'warning' : 'caution', icon: ICONS.role, title: 'Rôle retiré (blrank)',
       description: `<@${newMember.id}> est dans le blrank : ${res.removed.length ? `${res.removed.map((id) => `<@&${id}>`).join(' ')} lui ${res.removed.length > 1 ? 'ont été retirés' : 'a été retiré'}.` : 'aucun rôle n\'a pu lui être retiré.'}`,
@@ -413,17 +450,49 @@ class BlacklistService {
    * retrait est aussi une entrée 25). null si illisible.
    */
   async #roleGranter(guild, memberId, roleIds) {
+    const recent = await this.#roleEntries(guild, memberId, 10_000);
+    if (!recent) return null;
+    const byAdd = recent.find((e) => (e.changes ?? []).some((c) => c.key === '$add' && (c.new ?? []).some((r) => roleIds.includes(r?.id))));
+    const entry = byAdd ?? recent.find((e) => (e.executorId ?? e.executor?.id) !== this.client.user?.id);
+    return entry?.executorId ?? entry?.executor?.id ?? null;
+  }
+
+  /**
+   * Rôles ajoutés à ce membre depuis moins de 15 s (entrées 25 « $add »), pour un ancien membre
+   * partiel dont les rôles d'avant sont inconnus. null si le journal est illisible.
+   * @returns {Promise<Set<string>|null>}
+   */
+  async #recentAdds(guild, memberId) {
+    const recent = await this.#roleEntries(guild, memberId, 15_000);
+    if (!recent) return null;
+    const ids = new Set();
+    for (const e of recent) for (const c of e.changes ?? []) if (c.key === '$add') for (const r of c.new ?? []) if (r?.id) ids.add(r.id);
+    return ids;
+  }
+
+  /** Entrées 25 (rôles d'un membre) de moins de `maxAgeMs`, des plus récentes aux plus anciennes ; null si illisible. */
+  async #roleEntries(guild, memberId, maxAgeMs) {
     if (guild.members?.me?.permissions && !guild.members.me.permissions.has(PermissionFlagsBits.ViewAuditLog)) return null;
     try {
       const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 25 });
       const now = Date.now();
-      const recent = [...logs.entries.values()].filter((e) => (e.targetId ?? e.target?.id) === memberId && now - e.createdTimestamp < 10_000);
-      const byAdd = recent.find((e) => (e.changes ?? []).some((c) => c.key === '$add' && (c.new ?? []).some((r) => roleIds.includes(r?.id))));
-      const entry = byAdd ?? recent.find((e) => (e.executorId ?? e.executor?.id) !== this.client.user?.id);
-      return entry?.executorId ?? entry?.executor?.id ?? null;
+      return [...logs.entries.values()].filter((e) => (e.targetId ?? e.target?.id) === memberId && now - e.createdTimestamp < maxAgeMs);
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Le rôle a-t-il pu être rendu par un AUTRE bot (boucle possible) ? Vrai pour un bot autre que
+   * celui-ci et pour un auteur inconnu (journal illisible) ; faux pour un humain ou ce bot.
+   */
+  async #mayLoop(guild, executorId) {
+    if (!executorId) return true;
+    if (executorId === this.client.user?.id) return false;
+    const user = guild.members?.cache?.get?.(executorId)?.user
+      ?? this.client.users?.cache?.get?.(executorId)
+      ?? (await Promise.resolve(this.client.users?.fetch?.(executorId)).catch(() => null));
+    return user ? Boolean(user.bot) : true;
   }
 
   /* ------------------------------------------------------------------ */
