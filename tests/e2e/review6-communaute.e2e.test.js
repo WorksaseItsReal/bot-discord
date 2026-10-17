@@ -201,3 +201,54 @@ test('R79 /reminder : salon en lecture seule → rappel en MP ; auteur banni ou 
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R100 : alertes dans un fil privé
+
+test('R100 /alertes dans un fil privé : vérifications d\'appartenance bornées par message, refus retenus', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ automod: { enabled: false } }); // l'anti-spam supprimerait les messages rapprochés
+  const hl = h.client.services.highlights;
+  hl.delayMs = 5;
+  const N = 40;
+  try {
+    const ids = [];
+    for (let i = 0; i < N; i += 1) {
+      const u = h.addUser(`Abonne${i}`);
+      const m = rawMember(u, [], 0);
+      h.fake.members.set(u.id, m);
+      h.guild.members._add(m);
+      hl.addWord(h.guild.id, u.id, 'gadget');
+      ids.push(u.id);
+    }
+    // Un abonné réellement membre du fil, absent du cache des membres du fil (redémarrage).
+    const insider = h.addUser('Insider');
+    const im = rawMember(insider, [], 0);
+    h.fake.members.set(insider.id, im);
+    h.guild.members._add(im);
+    hl.addWord(h.guild.id, insider.id, 'gadget');
+    const thread = await h.guild.channels.cache.get(IDS.channels.general).threads.create({ name: 'prive', type: 12, invitable: false });
+    h.fake.threadMembers.get(thread.id).add(IDS.users.member);
+    h.fake.threadMembers.get(thread.id).add(insider.id);
+    await h.settle();
+    const isThreadMemberGet = (c) => c.method === 'GET' && c.route.startsWith(`/channels/${thread.id}/thread-members/`);
+    const perMessage = [];
+    let insiderAlerted = false;
+    for (let k = 0; k < 7; k += 1) {
+      const mark = h.fake.calls.length;
+      await h.userMessage({ as: 'member', channel: thread.id, content: `message ${k} : qui a vu le gadget ?` });
+      await sleep(60);
+      await h.settle();
+      perMessage.push(h.fake.calls.slice(mark).filter(isThreadMemberGet).length);
+      const dm = [...h.fake.dms.values()].find((d) => d.recipients[0].id === insider.id);
+      if (dm && h.fake.messageLog.some((id) => h.message(id)?.channel_id === dm.id)) insiderAlerted = true;
+    }
+    assert.ok(perMessage.every((n) => n <= 10), `requêtes par message : ${perMessage.join(', ')}`);
+    assert.ok(perMessage.reduce((a, b) => a + b, 0) <= N + 1, `refus non retenus : ${perMessage.join(', ')}`);
+    assert.equal(perMessage.at(-1), 0, `requêtes encore émises pour des refus connus : ${perMessage.join(', ')}`);
+    assert.ok(insiderAlerted, 'membre du fil jamais alerté');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
