@@ -1,8 +1,8 @@
 'use strict';
 
 const path = require('node:path');
-const { Client, Collection } = require('discord.js');
-const { intents, partials } = require('../config/intents');
+const { Client, Collection, Options } = require('discord.js');
+const { buildIntents, partials } = require('../config/intents');
 const { config } = require('../config');
 const { createLogger } = require('./logger');
 const { CommandHandler } = require('./CommandHandler');
@@ -86,6 +86,8 @@ const { ApplicationService } = require('../services/ApplicationService');
 const { TicketRatingService } = require('../services/TicketRatingService');
 const { FeedService } = require('../services/FeedService');
 const { AutomationService } = require('../services/AutomationService');
+const { GhostPingService } = require('../services/GhostPingService');
+const { SupportRoleService } = require('../services/SupportRoleService');
 
 const logger = createLogger('client');
 
@@ -104,7 +106,17 @@ class GadgetClient extends Client {
   constructor() {
     // Défense en profondeur : sans autorisation explicite, aucun message du bot ne peut
     // notifier @everyone/@here ou un rôle (les envois qui doivent pinguer passent allowedMentions).
-    super({ intents, partials, allowedMentions: { parse: ['users'], repliedUser: false } });
+    // GuildPresences (PRESENCE_INTENT=on, rôle soutien par statut) : présences reçues par
+    // l'événement presenceUpdate mais JAMAIS gardées en cache (mémoire des gros serveurs).
+    const presenceIntent = Boolean(config.presenceIntent);
+    super({
+      intents: buildIntents(config),
+      partials,
+      allowedMentions: { parse: ['users'], repliedUser: false },
+      ...(presenceIntent ? { makeCache: Options.cacheWithLimits({ ...Options.DefaultMakeCacheSettings, PresenceManager: 0 }) } : {}),
+    });
+    /** Cache des présences désactivé : `member.presence` est toujours vide (voir StatsCounterService). */
+    this.presenceCacheDisabled = presenceIntent;
 
     this.config = config;
     this.logger = logger;
@@ -230,6 +242,9 @@ class GadgetClient extends Client {
       feeds: new FeedService({ client: this, feeds: this.repositories.feeds, networkEnabled: config.feedsNetwork }),
       // Automatisations (/automatisations) : publication automatique, fils, rôle vocal, boosts.
       automations: new AutomationService({ client: this, config: configService, counters: this.repositories.autoThreadCounters }),
+      // Ghostping d'arrivée (/bienvenue) et rôle soutien (/automatisations) : minuteurs unref, arrêtés dans shutdown.
+      ghostPing: new GhostPingService({ client: this, config: configService }),
+      supportRole: new SupportRoleService({ client: this, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
@@ -362,6 +377,9 @@ class GadgetClient extends Client {
       // Automatisations (file de publication, rôle vocal) et lectures de flux en cours.
       ['Arrêt des automatisations', () => s.automations?.stop()],
       ['Arrêt des flux RSS', () => s.feeds?.stop()],
+      // Ghostping : les mentions encore affichées sont supprimées tout de suite (borné).
+      ['Arrêt du ghostping', () => s.ghostPing?.stop()],
+      ['Arrêt du rôle soutien', () => s.supportRole?.stop()],
       ['Vidage des tickets', () => s.tickets?.flush?.()],
       ['Vidage des giveaways', () => s.giveaways?.flush?.()],
       ['Vidage des projets', () => s.projects?.flush?.()],

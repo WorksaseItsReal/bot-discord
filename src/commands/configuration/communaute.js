@@ -17,14 +17,20 @@ const { parseDuration } = require('../../utils/time');
 const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
 const { parseEmoji, TRIGGER_MODES } = require('../../utils/community');
-const { MAX_TRIGGERS } = require('../../services/AutoResponderService');
+const {
+  MAX_TRIGGERS,
+  AUTO_REACT_MAX_CHANNELS,
+  AUTO_REACT_MAX_EMOJIS,
+  REACT_MODES,
+  parseReactionEmojis,
+} = require('../../services/AutoResponderService');
 const { UserError } = require('../../core/errors');
 
 /**
  * /communaute : tableau de bord unique du starboard et des réponses automatiques
  * (éphémère, « Gérer le serveur »). Les messages épinglés automatiquement ont leur
  * propre commande (/sticky, « Gérer les messages ») ; leur nombre est rappelé ici.
- * Vues : home · starboard · auto · trigger:<id> · confirmDel:<id>
+ * Vues : home · starboard · auto · trigger:<id> · confirmDel:<id> · react · rx:<salon>
  */
 
 const SECTION = { emoji: '🌟', label: 'Communauté' };
@@ -40,11 +46,15 @@ const MAX_RESPONSE = 1000;
 const MAX_COOLDOWN_S = 3600;
 const DEFAULT_COOLDOWN_S = 30;
 const SEND_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
+/** Salons à réactions automatiques : textuels, annonces, forums (message d'ouverture des posts). */
+const REACT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum];
+const REACT_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.AddReactions, PermissionFlagsBits.ReadMessageHistory];
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
 const community = (client, guildId) => client.services.config.get(guildId).community ?? {};
 const sbOf = (client, guildId) => community(client, guildId).starboard ?? {};
 const arOf = (client, guildId) => community(client, guildId).autoResponses ?? {};
+const rxOf = (client, guildId) => client.services.config.get(guildId).autoReact ?? {};
 const row = (component) => new ActionRowBuilder().addComponents(component);
 const homeButton = () => actionButton({ command: 'communaute', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
 /** Texte saisi affiché sans casser la mise en forme. */
@@ -54,6 +64,7 @@ const NAV = [
   { value: 'home', label: 'Accueil', emoji: '🏠', description: 'Vue d\'ensemble de la communauté' },
   { value: 'starboard', label: 'Starboard', emoji: '⭐', description: 'Reposter les messages les plus étoilés' },
   { value: 'auto', label: 'Réponses automatiques', emoji: '💬', description: 'Déclencheurs, réponses et réactions' },
+  { value: 'react', label: 'Réactions automatiques', emoji: '😀', description: 'Réagir à chaque message de salons choisis' },
 ];
 
 function navRow(current) {
@@ -158,7 +169,9 @@ function homeView(client, guild, notice) {
   const triggers = ar.triggers ?? [];
   const stickies = client.services.sticky?.list(guild.id).length ?? 0;
   const starred = client.repositories.starboard?.count(guild.id) ?? 0;
-  const anyOn = sb.enabled || ar.enabled;
+  const rx = rxOf(client, guild.id);
+  const rxCount = (rx.channels ?? []).length;
+  const anyOn = sb.enabled || ar.enabled || rx.enabled;
   return {
     embeds: [
       card({
@@ -170,6 +183,7 @@ function homeView(client, guild, notice) {
           notice ? `${notice}\n` : null,
           `${sb.enabled ? '🟢' : '🔴'} **Starboard** ${sb.enabled ? 'actif' : 'désactivé'}${sb.enabled && !sb.channelId ? ` · ${ICONS.warning} *aucun salon choisi*` : ''}`,
           `${ar.enabled ? '🟢' : '🔴'} **Réponses automatiques** ${ar.enabled ? 'actives' : 'désactivées'}`,
+          `${rx.enabled ? '🟢' : '🔴'} **Réactions automatiques** ${rx.enabled ? 'actives' : 'désactivées'}${rx.enabled && !rxCount ? ` · ${ICONS.warning} *aucun salon choisi*` : ''}`,
           '',
           subtext('Les messages épinglés automatiquement (réaffichés en bas d\'un salon) se gèrent avec /sticky.'),
         ],
@@ -178,6 +192,7 @@ function homeView(client, guild, notice) {
           field('💬', 'Déclencheurs', `${triggers.filter((t) => t.enabled !== false).length} actif(s) / ${triggers.length}`),
           field(ICONS.status, 'Messages épinglés', `${stickies}`),
           field(ICONS.stats, 'Messages au starboard', `${starred}`),
+          field(ICONS.emoji, 'Salons à réactions', `${rxCount} / ${AUTO_REACT_MAX_CHANNELS}`),
         ],
         footer: 'Choisissez une section dans le menu',
       }),
@@ -191,6 +206,9 @@ function homeView(client, guild, notice) {
         ar.enabled
           ? actionButton({ command: 'communaute', action: 'artoggleall', args: ['off', 'home'], label: 'Réponses auto ✅', emoji: '💬' })
           : actionButton({ command: 'communaute', action: 'artoggleall', args: ['on', 'home'], label: 'Réponses auto ❌', emoji: '💬' }),
+        rx.enabled
+          ? actionButton({ command: 'communaute', action: 'rxtoggle', args: ['off', 'home'], label: 'Réactions auto ✅', emoji: ICONS.emoji })
+          : actionButton({ command: 'communaute', action: 'rxtoggle', args: ['on', 'home'], label: 'Réactions auto ❌', emoji: ICONS.emoji }),
         actionButton({ command: 'communaute', action: 'go', args: ['home'], label: 'Actualiser', emoji: ICONS.refresh }),
       ),
     ],
@@ -395,6 +413,190 @@ function confirmDeleteView(client, guild, id) {
   };
 }
 
+// ---------------------------------------------------------------- réactions automatiques
+
+/** Emoji lisible dans un libellé de menu (les emojis personnalisés n'y sont pas rendus). */
+const emojiLabel = (text) => {
+  const e = parseEmoji(text);
+  return e?.id ? `:${e.name}:` : e?.text ?? String(text ?? '');
+};
+
+/** Même emoji (variante U+FE0F ignorée) ? */
+function sameEmoji(a, b) {
+  const x = parseEmoji(a);
+  const y = parseEmoji(b);
+  if (!x || !y) return false;
+  if (x.id || y.id) return x.id === y.id;
+  return x.name.replace(/\uFE0F/g, '') === y.name.replace(/\uFE0F/g, '');
+}
+
+function findReactEntry(client, guildId, channelId) {
+  if (!SNOWFLAKE.test(channelId ?? '')) throw new UserError('Salon invalide.');
+  const entry = (rxOf(client, guildId).channels ?? []).find((e) => e.channelId === channelId);
+  if (!entry) throw new UserError('Ce salon n\'a plus de réactions automatiques.');
+  return entry;
+}
+
+/** Remplace (ou retire si `next` est null) le réglage d'un salon. */
+function saveReactEntry(client, guildId, channelId, next) {
+  const list = rxOf(client, guildId).channels ?? [];
+  const channels = next
+    ? (list.some((e) => e.channelId === channelId) ? list.map((e) => (e.channelId === channelId ? next : e)) : [...list, next])
+    : list.filter((e) => e.channelId !== channelId);
+  client.services.config.update(guildId, { autoReact: { channels } });
+}
+
+/** Problèmes d'un salon à réactions : salon disparu, permissions du bot, emoji du starboard. */
+function reactIssues(client, guild, entry) {
+  const issues = [];
+  const channel = guild.channels?.cache?.get(entry.channelId);
+  if (guild.channels?.cache && !channel) issues.push('salon introuvable');
+  const me = guild.members?.me;
+  const perms = channel && me ? channel.permissionsFor?.(me) : null;
+  if (perms && !perms.has(REACT_PERMS)) issues.push('il me manque **Voir le salon**, **Ajouter des réactions** ou **Lire l\'historique**');
+  const sb = sbOf(client, guild.id);
+  const star = sb.emoji || '⭐';
+  if (sb.enabled && (entry.emojis ?? []).some((e) => sameEmoji(e, star))) issues.push(`${star} est aussi l'emoji du starboard : un clic des membres le ferait monter au starboard`);
+  for (const text of entry.emojis ?? []) {
+    const e = parseEmoji(text);
+    if (e?.id && guild.emojis?.cache && !guild.emojis.cache.has(e.id)) issues.push(`l'emoji \`:${e.name}:\` n'existe plus`);
+  }
+  return issues;
+}
+
+const isForum = (guild, channelId) => guild.channels?.cache?.get(channelId)?.type === ChannelType.GuildForum;
+
+function reactLine(client, guild, entry) {
+  const forum = isForum(guild, entry.channelId);
+  const scope = forum ? 'ouverture des posts' : entry.threads ? 'salon et fils' : 'salon';
+  const issues = reactIssues(client, guild, entry);
+  return `${issues.length ? ICONS.warning : '🟢'} <#${entry.channelId}> · ${(entry.emojis ?? []).join(' ') || '—'} · ${REACT_MODES[entry.mode] ?? REACT_MODES.all} · ${scope}`;
+}
+
+function reactView(client, guild, notice) {
+  const rx = rxOf(client, guild.id);
+  const entries = (rx.channels ?? []).slice(0, AUTO_REACT_MAX_CHANNELS);
+  const stats = client.services.autoResponses?.reactionStats?.(guild.id) ?? { pending: 0, dropped: 0 };
+  const warnings = entries.flatMap((e) => reactIssues(client, guild, e).map((issue) => `<#${e.channelId}> : ${issue}`));
+  const components = [navRow('react')];
+  if (entries.length) {
+    components.push(row(
+      new StringSelectMenuBuilder()
+        .setCustomId('cmd:communaute:rxpick')
+        .setPlaceholder('Modifier un salon…')
+        .addOptions(entries.map((e) => ({
+          value: e.channelId,
+          label: truncate(`#${guild.channels?.cache?.get(e.channelId)?.name ?? 'salon supprimé'}`, 100),
+          description: truncate(`${(e.emojis ?? []).map(emojiLabel).join(' ')} · ${REACT_MODES[e.mode] ?? REACT_MODES.all}`, 100),
+          emoji: ICONS.emoji,
+        }))),
+    ));
+  }
+  const full = entries.length >= AUTO_REACT_MAX_CHANNELS;
+  components.push(row(
+    new ChannelSelectMenuBuilder()
+      .setCustomId('cmd:communaute:rxadd')
+      .setPlaceholder(full ? `${AUTO_REACT_MAX_CHANNELS} salons au plus : retirez-en un` : 'Ajouter un salon…')
+      .setChannelTypes(...REACT_TYPES)
+      .setMinValues(1)
+      .setMaxValues(1)
+      .setDisabled(full),
+  ));
+  components.push(...buttonRows(
+    rx.enabled
+      ? actionButton({ command: 'communaute', action: 'rxtoggle', args: ['off', 'react'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+      : actionButton({ command: 'communaute', action: 'rxtoggle', args: ['on', 'react'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+    actionButton({ command: 'communaute', action: 'go', args: ['react'], label: 'Actualiser', emoji: ICONS.refresh }),
+    homeButton(),
+  ));
+  return {
+    embeds: [
+      card({
+        tone: rx.enabled ? (warnings.length ? 'warning' : 'success') : 'neutral',
+        section: SECTION,
+        icon: ICONS.emoji,
+        title: 'Réactions automatiques',
+        description: [
+          notice ? `${notice}\n` : null,
+          rx.enabled ? '🟢 Les réactions automatiques sont **actives**.' : '🔴 Les réactions automatiques sont **désactivées**.',
+          `Chaque nouveau message des salons choisis reçoit de **1 à ${AUTO_REACT_MAX_EMOJIS}** réactions, dans l'ordre (idéal pour les salons de suggestions, de mèmes ou de présentations). Dans un forum : le message d'ouverture de chaque post.`,
+          subtext('Bots, webhooks et messages système ignorés. Délai de 1,5 s : un message supprimé par l\'AutoMod ne reçoit rien. Indépendant des réponses automatiques : un message peut recevoir les deux.'),
+          '',
+          entries.length ? truncate(entries.map((e) => reactLine(client, guild, e)).join('\n'), 2500) : '*Aucun salon pour l\'instant : choisissez-en un ci-dessous.*',
+          warnings.length ? `\n${ICONS.warning} **À corriger**\n${truncate(warnings.join('\n'), 900)}` : null,
+          rx.enabled && !entries.length ? `\n${ICONS.warning} Choisissez au moins un **salon** ci-dessous.` : null,
+        ],
+        fields: [
+          field(ICONS.count, 'Salons', `${entries.length} / ${AUTO_REACT_MAX_CHANNELS}`),
+          field(ICONS.loading, 'En attente', `${stats.pending}`),
+          field('🚫', 'Abandonnées', stats.dropped ? `${stats.dropped} (file pleine)` : 'Aucune'),
+        ],
+        footer: 'Emojis Unicode ou de ce serveur · 20 messages en attente au plus par salon',
+      }),
+    ],
+    components,
+  };
+}
+
+function reactChannelView(client, guild, channelId, notice) {
+  const entry = findReactEntry(client, guild.id, channelId);
+  const channel = guild.channels?.cache?.get(channelId);
+  const forum = channel?.type === ChannelType.GuildForum;
+  const issues = reactIssues(client, guild, entry);
+  const mode = Object.hasOwn(REACT_MODES, entry.mode ?? '') ? entry.mode : 'all';
+  return {
+    embeds: [
+      card({
+        tone: issues.length ? 'warning' : 'info',
+        section: SECTION,
+        icon: ICONS.emoji,
+        title: `Réactions · #${truncate(channel?.name ?? 'salon supprimé', 80)}`,
+        description: [
+          notice ? `${notice}\n` : null,
+          forum ? `Le message d'ouverture de chaque post de <#${channelId}> reçoit ces réactions.` : `Chaque nouveau message de <#${channelId}> reçoit ces réactions${entry.threads ? ', y compris dans ses fils' : ''}.`,
+          issues.length ? `\n${ICONS.warning} ${issues.join('\n')}` : null,
+        ],
+        fields: [
+          field(ICONS.channel, 'Salon', `<#${channelId}>`),
+          field(ICONS.emoji, 'Réactions', (entry.emojis ?? []).join(' ') || '—'),
+          field(ICONS.search, 'Messages', REACT_MODES[mode]),
+          field('🧵', 'Fils', forum ? 'Ouverture des posts' : entry.threads ? '✅ Inclus' : '❌ Exclus'),
+        ],
+        footer: `Salon ${channelId}`,
+      }),
+    ],
+    components: [
+      navRow('react'),
+      row(
+        new StringSelectMenuBuilder()
+          .setCustomId(`cmd:communaute:rxmode:${channelId}`)
+          .setPlaceholder('Messages concernés')
+          .addOptions(Object.entries(REACT_MODES).map(([value, label]) => ({ value, label, default: value === mode }))),
+      ),
+      ...buttonRows(
+        actionButton({ command: 'communaute', action: 'rxemojis', args: [channelId], label: 'Emojis', emoji: ICONS.emoji, style: ButtonStyle.Primary }),
+        forum ? null : actionButton({ command: 'communaute', action: 'rxthreads', args: [channelId, entry.threads ? 'off' : 'on'], label: entry.threads ? 'Fils ✅' : 'Fils ❌', emoji: '🧵' }),
+        actionButton({ command: 'communaute', action: 'rxdel', args: [channelId], label: 'Retirer', emoji: ICONS.delete, style: ButtonStyle.Danger }),
+        actionButton({ command: 'communaute', action: 'go', args: ['react'], label: 'Retour', emoji: ICONS.back }),
+      ),
+    ],
+  };
+}
+
+function reactModal(channelId, entry) {
+  return new ModalBuilder()
+    .setCustomId(`cmd:communaute:rxsubmit:${channelId}`)
+    .setTitle('Réactions automatiques')
+    .addComponents(
+      input('emojis', `Emojis (1 à ${AUTO_REACT_MAX_EMOJIS}, séparés par des espaces)`, {
+        value: entry?.emojis?.join(' '),
+        max: 200,
+        required: true,
+        placeholder: '👍 👎 ou :nom: / <:nom:id> (emojis de ce serveur)',
+      }),
+    );
+}
+
 /** Rend une vue (« trigger:<id> » depuis un menu, « trigger.<id> » depuis un bouton). */
 function render(client, guild, view = 'home', notice) {
   const [name, arg] = String(view).split(/[:.]/);
@@ -407,6 +609,10 @@ function render(client, guild, view = 'home', notice) {
       return triggerView(client, guild, arg, notice);
     case 'confirmDel':
       return confirmDeleteView(client, guild, arg);
+    case 'react':
+      return reactView(client, guild, notice);
+    case 'rx':
+      return reactChannelView(client, guild, arg, notice);
     default:
       return homeView(client, guild, notice);
   }
@@ -452,7 +658,7 @@ module.exports = {
   parsePattern,
   data: new SlashCommandBuilder()
     .setName('communaute')
-    .setDescription('Ouvre le tableau de bord communauté : starboard et réponses automatiques.')
+    .setDescription('Ouvre le tableau de bord communauté : starboard, réponses et réactions automatiques.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction, client) {
@@ -625,6 +831,85 @@ module.exports = {
       const t = findTrigger(client, interaction.guildId, id);
       saveTrigger(client, interaction.guildId, t.id, null);
       await interaction.update(autoView(client, interaction.guild, `${ICONS.success} Déclencheur ${quote(t.pattern, 60)} supprimé.`));
+    },
+
+    // ------------------------------------------------------------ réactions automatiques
+
+    /** cmd:communaute:rxtoggle:<on|off>:<vue> */
+    async rxtoggle(interaction, client, [state, view]) {
+      guard(interaction);
+      const enabled = target(state);
+      client.services.config.update(interaction.guildId, { autoReact: { enabled } });
+      const back = view === 'react' ? 'react' : 'home';
+      const empty = enabled && !(rxOf(client, interaction.guildId).channels ?? []).length ? `\n${ICONS.warning} Aucun salon choisi : ajoutez-en un dans « Réactions automatiques ».` : '';
+      await interaction.update(render(client, interaction.guild, back, `${ICONS.success} Réactions automatiques **${enabled ? 'activées' : 'désactivées'}**.${empty}`));
+    },
+    /** Menu « Modifier un salon ». */
+    async rxpick(interaction, client) {
+      guard(interaction);
+      await interaction.update(reactChannelView(client, interaction.guild, interaction.values?.[0]));
+    },
+    /** Sélecteur « Ajouter un salon » : réglage existant affiché, sinon formulaire des emojis. */
+    async rxadd(interaction, client) {
+      guard(interaction);
+      const id = interaction.values?.[0];
+      if (!SNOWFLAKE.test(id ?? '')) throw new UserError('Salon invalide.');
+      const channel = interaction.guild.channels.cache.get(id);
+      if (!channel || !REACT_TYPES.includes(channel.type)) throw new UserError('Choisissez un salon textuel, d\'annonces ou un forum du serveur.');
+      const perms = interaction.member && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+      if (perms && !perms.has(PermissionFlagsBits.ViewChannel)) throw new UserError(`Vous ne voyez pas <#${id}> : choisissez un salon auquel vous avez accès.`);
+      const list = rxOf(client, interaction.guildId).channels ?? [];
+      if (list.some((e) => e.channelId === id)) {
+        await interaction.update(reactChannelView(client, interaction.guild, id, `${ICONS.info} Ce salon a déjà des réactions automatiques.`));
+        return;
+      }
+      if (list.length >= AUTO_REACT_MAX_CHANNELS) throw new UserError(`${AUTO_REACT_MAX_CHANNELS} salons au plus : retirez-en un d'abord.`);
+      await interaction.showModal(reactModal(id, null));
+    },
+    /** cmd:communaute:rxemojis:<salon> — formulaire des emojis. */
+    async rxemojis(interaction, client, [channelId]) {
+      guard(interaction);
+      await interaction.showModal(reactModal(channelId, findReactEntry(client, interaction.guildId, channelId)));
+    },
+    /** cmd:communaute:rxsubmit:<salon> — création ou modification des emojis d'un salon. */
+    async rxsubmit(interaction, client, [channelId]) {
+      guard(interaction);
+      if (!SNOWFLAKE.test(channelId ?? '')) throw new UserError('Salon invalide.');
+      const channel = interaction.guild.channels.cache.get(channelId);
+      if (!channel || !REACT_TYPES.includes(channel.type)) throw new UserError('Ce salon n\'existe plus.');
+      const parsed = parseReactionEmojis(textField(interaction, 'emojis'), interaction.guild);
+      if (parsed.error) throw new UserError(parsed.error);
+      const list = rxOf(client, interaction.guildId).channels ?? [];
+      const current = list.find((e) => e.channelId === channelId);
+      if (!current && list.length >= AUTO_REACT_MAX_CHANNELS) throw new UserError(`${AUTO_REACT_MAX_CHANNELS} salons au plus : retirez-en un d'abord.`);
+      const next = current ? { ...current, emojis: parsed.emojis } : { channelId, emojis: parsed.emojis, mode: 'all', threads: false };
+      saveReactEntry(client, interaction.guildId, channelId, next);
+      const hint = rxOf(client, interaction.guildId).enabled ? '' : `\n${ICONS.warning} Les réactions automatiques sont désactivées : activez-les depuis la liste.`;
+      await interaction.update(reactChannelView(client, interaction.guild, channelId, `${ICONS.success} Réactions ${current ? 'modifiées' : 'ajoutées'} : ${parsed.emojis.join(' ')}.${hint}`));
+    },
+    /** cmd:communaute:rxmode:<salon> — messages concernés. */
+    async rxmode(interaction, client, [channelId]) {
+      guard(interaction);
+      const entry = findReactEntry(client, interaction.guildId, channelId);
+      const mode = interaction.values?.[0];
+      if (!Object.hasOwn(REACT_MODES, mode ?? '')) throw new UserError('Choix inconnu.');
+      saveReactEntry(client, interaction.guildId, channelId, { ...entry, mode });
+      await interaction.update(reactChannelView(client, interaction.guild, channelId, `${ICONS.success} Messages concernés : **${REACT_MODES[mode]}**.`));
+    },
+    /** cmd:communaute:rxthreads:<salon>:<on|off> — fils du salon inclus. */
+    async rxthreads(interaction, client, [channelId, state]) {
+      guard(interaction);
+      const entry = findReactEntry(client, interaction.guildId, channelId);
+      const threads = target(state);
+      saveReactEntry(client, interaction.guildId, channelId, { ...entry, threads });
+      await interaction.update(reactChannelView(client, interaction.guild, channelId, `${ICONS.success} Fils **${threads ? 'inclus' : 'exclus'}**.`));
+    },
+    /** cmd:communaute:rxdel:<salon> — retire le salon. */
+    async rxdel(interaction, client, [channelId]) {
+      guard(interaction);
+      findReactEntry(client, interaction.guildId, channelId);
+      saveReactEntry(client, interaction.guildId, channelId, null);
+      await interaction.update(reactView(client, interaction.guild, `${ICONS.success} Réactions automatiques retirées de <#${channelId}>.`));
     },
   },
 };
