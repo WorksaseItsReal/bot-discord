@@ -16,6 +16,7 @@ const {
   archiveContinuationCard,
   resolveArchiveChannel,
   archiveFailedPayload,
+  snapshotsOf,
 } = require('./TicketService');
 const { sendTranscriptArchive } = require('../utils/transcriptArchive');
 const { selectMenu, row } = require('../utils/components');
@@ -37,13 +38,27 @@ function guildSection(guild) {
   return { emoji: ICONS.mail, label: guild?.name ? `ModMail · ${guild.name}` : 'ModMail' };
 }
 
-/** Liste des pièces jointes d'un message (liens). */
-function attachmentsList(message) {
-  const list = message.attachments ? [...message.attachments.values()] : [];
-  if (!list.length) return null;
-  return list.slice(0, 10).map((a) => `[${truncate(a.name ?? 'fichier', 60)}](${a.url})`).join('\n');
+/** Pièces jointes au plus reprises d'un MP (fichiers du message et des messages transférés). */
+const MAX_ATTACHMENT_LINKS = 40;
+/** Budget de caractères d'une carte relayée (limite Discord : 6000 par message, marge comprise). */
+const CARD_BUDGET = 5600;
+
+/** Liens des pièces jointes d'un MP, messages transférés compris (une ligne par fichier). Pur. */
+function attachmentLinks(message) {
+  const list = [message, ...snapshotsOf(message)].flatMap((m) => (m?.attachments?.values ? [...m.attachments.values()] : []));
+  return list.slice(0, MAX_ATTACHMENT_LINKS).map((a) => `[${truncate(String(a.name ?? 'fichier').replace(/[[\]\n]/g, '_'), 60)}](${a.url})`);
 }
 
+/** Lignes regroupées en blocs d'au plus `max` caractères (une ligne n'est jamais coupée). Pur. */
+function chunkLines(lines, max = 1024) {
+  const chunks = [];
+  for (const line of lines) {
+    const last = chunks[chunks.length - 1];
+    if (last && last.length + 1 + line.length <= max) chunks[chunks.length - 1] = `${last}\n${line}`;
+    else chunks.push(line.slice(0, max));
+  }
+  return chunks;
+}
 
 /** Transcript texte d'une conversation ModMail. Pur. */
 function buildTranscript(thread, channel, history) {
@@ -282,8 +297,9 @@ class ModmailService {
         .catch(() => {});
     }
 
+    const [first, ...more] = this.#incomingCards(message);
     try {
-      await channel.send({ embeds: [this.#incomingCard(message)] });
+      await channel.send({ embeds: [first] });
     } catch (err) {
       // Salon encore en cache mais devenu inaccessible au bot (surcharge retirée, Envoyer refusé) :
       // sans issue, chaque MP échouerait indéfiniment. On ferme cette conversation et on en ouvre
@@ -293,6 +309,8 @@ class ModmailService {
       this.modmail.close(thread.channel_id);
       return this.#relay(message, { lost: thread, guild });
     }
+    // Pièces jointes qui ne tiennent pas dans la première carte (6000 caractères par message).
+    for (const extra of more) await channel.send({ embeds: [extra] });
     await message.react(ICONS.mail).catch(() => {});
   }
 
@@ -321,18 +339,40 @@ class ModmailService {
     });
   }
 
-  /** Message du membre relayé côté staff. */
-  #incomingCard(message) {
+  /**
+   * Message du membre relayé côté staff : texte (et texte des messages transférés), puis liens
+   * des pièces jointes répartis en champs de 1024 caractères ; ce qui ne tient pas dans la carte
+   * (6000 caractères par message) part dans des cartes de suite. Jamais de lien perdu.
+   * @returns {object[]} cartes (la première porte le texte)
+   */
+  #incomingCards(message) {
     const author = message.author;
-    const files = attachmentsList(message);
-    return card({
-      tone: 'neutral',
-      section: { emoji: '📥', label: `${author.tag ?? author.username} a écrit` },
-      description: truncate(message.content || '*(pièce jointe uniquement)*', 4000),
-      fields: files ? [wide('📎', 'Pièces jointes', files)] : [],
-      thumbnail: author.displayAvatarURL?.({ size: 64 }) ?? null,
-      footer: `Utilisateur ${author.id}`,
-    });
+    const section = { emoji: '📥', label: `${author.tag ?? author.username} a écrit` };
+    const forwarded = snapshotsOf(message)
+      .map((snap) => snap?.content)
+      .filter(Boolean)
+      .map((content) => `**↪️ Message transféré**\n${content.split('\n').map((l) => `> ${l}`).join('\n')}`);
+    const description = truncate([message.content, ...forwarded].filter(Boolean).join('\n\n') || '*(pièce jointe uniquement)*', 4000);
+    const chunks = chunkLines(attachmentLinks(message), 1024);
+    const label = (i) => (chunks.length > 1 ? `Pièces jointes (${i + 1}/${chunks.length})` : 'Pièces jointes');
+    const avatar = author.displayAvatarURL?.({ size: 64 }) ?? null;
+    const cards = [];
+    let fields = [];
+    let budget = CARD_BUDGET - description.length - section.label.length;
+    const push = () => {
+      const first = !cards.length;
+      cards.push(card({ tone: 'neutral', section, description: first ? description : subtext('Suite des pièces jointes.'), fields, thumbnail: first ? avatar : null, footer: `Utilisateur ${author.id}` }));
+      fields = [];
+      budget = CARD_BUDGET - section.label.length - 40;
+    };
+    for (const [i, chunk] of chunks.entries()) {
+      const cost = chunk.length + 40;
+      if (fields.length >= 10 || cost > budget) push();
+      fields.push(wide('📎', label(i), chunk));
+      budget -= cost;
+    }
+    push();
+    return cards;
   }
 
   async reply(channel, staff, content) {

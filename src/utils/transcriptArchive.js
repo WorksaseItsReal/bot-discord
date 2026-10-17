@@ -56,8 +56,12 @@ function archiveName(name, index) {
 function attachmentsOf(message) {
   const out = [];
   const author = message?.author?.tag ?? message?.author?.username ?? 'inconnu';
-  for (const a of message?.attachments?.values?.() ?? []) {
-    out.push({ name: a.name ?? 'fichier', url: a.url, size: Number.isFinite(a.size) ? a.size : null, messageId: message.id ?? null, author });
+  // Fichiers du message, puis ceux des messages transférés (« Transférer »).
+  const snapshots = message?.messageSnapshots?.values?.() ?? [];
+  for (const source of [message, ...snapshots]) {
+    for (const a of source?.attachments?.values?.() ?? []) {
+      out.push({ name: a.name ?? 'fichier', url: a.url, size: Number.isFinite(a.size) ? a.size : null, messageId: message.id ?? null, author });
+    }
   }
   for (const e of message?.embeds ?? []) {
     const fields = e.fields ?? e.data?.fields ?? [];

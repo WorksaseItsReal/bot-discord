@@ -316,3 +316,66 @@ test('R65 ModMail : le sélecteur de serveur fonctionne en MP (routeur, refus pr
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R66 / R67
+
+const { attachmentsOf } = require('../../src/utils/transcriptArchive');
+
+/** Cartes relayées au staff (messages du membre) dans un salon ModMail. */
+const relayedCards = (h, channelId) => messagesIn(h, channelId).filter((m) => m.author.id === h.client.user.id && /a écrit/.test(m.embeds?.[0]?.author?.name ?? ''));
+
+test('R66 ModMail : message transféré relayé au staff (texte et pièce jointe), repris par l\'archive', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const snapshot = {
+      message: {
+        type: 0,
+        content: 'Message de harcèlement reçu : « je sais où tu habites »',
+        embeds: [],
+        attachments: [{ id: '1400000000000000001', filename: 'preuve.png', size: 1234, url: 'https://cdn.discordapp.com/attachments/1/1400000000000000001/preuve.png', proxy_url: 'https://media.discordapp.net/attachments/1/1400000000000000001/preuve.png', content_type: 'image/png' }],
+        timestamp: new Date().toISOString(),
+        edited_timestamp: null,
+        flags: 0,
+        mentions: [],
+        mention_roles: [],
+      },
+    };
+    await h.userMessage({ as: 'target', channel: 'dm', content: '', extra: { message_reference: { type: 1, channel_id: '1300000000000000001', message_id: '1300000000000000002', guild_id: IDS.guild }, message_snapshots: [snapshot], flags: 1 << 14 } });
+    const channel = [...h.fake.channels.values()].find((c) => c.name?.startsWith('modmail-'));
+    const cards = relayedCards(h, channel.id);
+    const all = cards.map(embedText).join('\n');
+    assert.match(all, /je sais où tu habites/, `texte transféré perdu : ${all}`);
+    assert.match(all, /preuve\.png/, 'pièce jointe transférée perdue');
+    assert.doesNotMatch(all, /pièce jointe uniquement/);
+    const found = cards.flatMap((m) => attachmentsOf({ id: m.id, author: m.author, attachments: new Map(), embeds: m.embeds }));
+    assert.deepEqual(found.map((a) => a.name), ['preuve.png']);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R67 ModMail : 10 pièces jointes → les 10 liens restent visibles du staff et repris par l\'archive', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const hm = 'a'.repeat(64);
+    const attachments = Array.from({ length: 10 }, (_, i) => {
+      const id = `13${String(i).padStart(17, '0')}`;
+      const filename = `capture-${i + 1}.png`;
+      return { id, filename, size: 200_000, content_type: 'image/png', width: 800, height: 600,
+        url: `https://cdn.discordapp.com/attachments/1300000000000000000/${id}/${filename}?ex=6720f3a1&is=671fa221&hm=${hm}&`,
+        proxy_url: `https://media.discordapp.net/attachments/1300000000000000000/${id}/${filename}?ex=6720f3a1&is=671fa221&hm=${hm}&` };
+    });
+    await h.userMessage({ as: 'target', channel: 'dm', content: 'x'.repeat(3900), extra: { attachments } });
+    const channel = [...h.fake.channels.values()].find((c) => c.name?.startsWith('modmail-'));
+    const cards = relayedCards(h, channel.id);
+    const found = cards.flatMap((m) => attachmentsOf({ id: m.id, author: m.author, attachments: new Map(), embeds: m.embeds }));
+    assert.deepEqual(found.map((a) => a.name), attachments.map((a) => a.filename), `${found.length} / 10 liens`);
+    assert.ok(embedText(cards[0]).includes('x'.repeat(3000)), 'texte du membre tronqué');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

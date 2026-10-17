@@ -119,6 +119,13 @@ async function createInCategory(guild, options) {
   }
 }
 
+/** Messages transférés d'un message (`messageSnapshots`), ou []. Pur. */
+function snapshotsOf(message) {
+  const snaps = message?.messageSnapshots;
+  if (!snaps) return [];
+  return typeof snaps.values === 'function' ? [...snaps.values()] : Array.isArray(snaps) ? snaps : [];
+}
+
 /**
  * Une ligne de transcript : contenu, puis en-tête et texte de chaque embed (les
  * cartes du bot et les messages relayés sont des embeds), puis liens des pièces jointes. Pur.
@@ -131,7 +138,11 @@ function transcriptLine(m) {
     const body = e.description ?? e.data?.description;
     parts.push(`[${head || 'embed'}]${body ? ` ${body.replace(/\s+/g, ' ')}` : ''}`);
   }
-  const files = m.attachments?.size ? [...m.attachments.values()].map((a) => a.url) : [];
+  // Messages transférés (« Transférer ») : leur texte et leurs fichiers font partie de l'historique.
+  for (const snap of snapshotsOf(m)) {
+    if (snap?.content) parts.push(`[message transféré] ${snap.content}`);
+  }
+  const files = [m, ...snapshotsOf(m)].flatMap((x) => (x?.attachments?.size ? [...x.attachments.values()].map((a) => a.url) : []));
   if (files.length) parts.push(`[pièces jointes : ${files.join(', ')}]`);
   const at = new Date(m.createdTimestamp ?? Date.now()).toISOString();
   return `[${at}] ${m.author?.tag ?? m.author?.username ?? 'inconnu'}: ${parts.join(' ')}`;
@@ -777,6 +788,7 @@ module.exports = {
   channelGone,
   createInCategory,
   transcriptLine,
+  snapshotsOf,
   attachmentFields,
   archiveContinuationCard,
   archiveIssue,

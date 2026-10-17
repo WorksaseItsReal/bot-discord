@@ -127,3 +127,24 @@ test('R65 ModMail : un seul serveur éligible → relais direct, comme avant', a
   assert.equal(replies.length, 0);
   assert.ok(relayedTo(B, 'Bonjour B'));
 });
+
+// ---------------------------------------------------------------- R66
+
+test('R66 transcripts : messages transférés (texte et fichiers) repris par la ligne de transcript et l\'archive', () => {
+  const { transcriptLine } = require('../src/services/TicketService');
+  const { attachmentsOf } = require('../src/utils/transcriptArchive');
+  const file = { name: 'preuve.png', url: 'https://cdn.discordapp.com/attachments/1/2/preuve.png', size: 10 };
+  const message = {
+    id: '1',
+    content: '',
+    author: { tag: 'alice' },
+    createdTimestamp: 0,
+    attachments: new Collection(),
+    embeds: [],
+    messageSnapshots: new Collection([['9', { content: 'je sais où tu habites', attachments: new Collection([['2', file]]) }]]),
+  };
+  const line = transcriptLine(message);
+  assert.match(line, /je sais où tu habites/);
+  assert.match(line, /preuve\.png/);
+  assert.deepEqual(attachmentsOf(message).map((a) => a.name), ['preuve.png']);
+});
