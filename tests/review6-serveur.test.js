@@ -292,3 +292,49 @@ test('R95 : fiche de projet : un 503 ne fait pas oublier la publication ; messag
   await svc.refreshPublished(p.id);
   assert.equal(projects.get(p.id).messageId, null);
 });
+
+/* ------------------------------------------------------------------ */
+/* R104 : /automatisations, salons fermés à l'auteur                    */
+/* ------------------------------------------------------------------ */
+
+const auto = require('../src/commands/configuration/automatisations');
+
+function automationsSetup() {
+  const G = '100000000000000001';
+  const STAFF_NEWS = '400000000000000077';
+  const STAFF_TEXT = '400000000000000078';
+  const PUBLIC_NEWS = '400000000000000079';
+  const ADMIN = '200000000000000002';
+  const { db } = memoryDb();
+  const config = new ConfigService(new GuildConfigRepository(db));
+  const none = new PermissionsBitField(0n);
+  const all = new PermissionsBitField(PermissionsBitField.All);
+  const chan = (id, type, closed) => ({ id, type, name: `salon-${id.slice(-2)}`, guildId: G, permissionsFor: (m) => (closed && m?.id === ADMIN ? none : all), toString: () => `<#${id}>` });
+  const channels = new Collection([
+    [STAFF_NEWS, chan(STAFF_NEWS, ChannelType.GuildAnnouncement, true)],
+    [STAFF_TEXT, chan(STAFF_TEXT, ChannelType.GuildText, true)],
+    [PUBLIC_NEWS, chan(PUBLIC_NEWS, ChannelType.GuildAnnouncement, false)],
+  ]);
+  const guild = { id: G, name: 'G', channels: { cache: channels }, roles: { cache: new Collection(), everyone: { id: G } }, members: { me: { id: '9', permissions: all, roles: { highest: { position: 99 } } }, cache: new Collection() } };
+  const client = { config: {}, services: { config, automations: { refreshCrosspost() {}, queueSize: () => 0 } }, repositories: { feeds: { count: () => 0, list: () => [] } } };
+  const interaction = (values) => ({ guild, guildId: G, user: { id: ADMIN }, member: { id: ADMIN }, memberPermissions: new PermissionsBitField([PF.ManageGuild]), values, async update() {} });
+  return { G, STAFF_NEWS, STAFF_TEXT, PUBLIC_NEWS, config, client, interaction };
+}
+
+test('R104 : publication automatique refusée dans un salon d\'annonces fermé à l\'auteur', async () => {
+  const { G, STAFF_NEWS, PUBLIC_NEWS, config, client, interaction } = automationsSetup();
+  await assert.rejects(auto.buttons.cpchannels(interaction([STAFF_NEWS]), client), /Gérer les messages/);
+  assert.deepEqual(config.get(G).automations?.crosspost?.channels ?? [], []);
+  await auto.buttons.cpchannels(interaction([PUBLIC_NEWS]), client);
+  assert.deepEqual(config.get(G).automations.crosspost.channels, [PUBLIC_NEWS]);
+});
+
+test('R104 : fils automatiques refusés dans un salon fermé à l\'auteur ; un salon déjà configuré par un autre reste', async () => {
+  const { G, STAFF_TEXT, STAFF_NEWS, PUBLIC_NEWS, config, client, interaction } = automationsSetup();
+  await assert.rejects(auto.buttons.thchannels(interaction([STAFF_TEXT]), client), /Créer des fils publics/);
+  assert.deepEqual(config.get(G).automations?.autoThreads?.channels ?? [], []);
+  // Salon fermé à l'auteur mais déjà choisi par un autre administrateur : conservé (aucun ajout).
+  config.update(G, { automations: { crosspost: { channels: [STAFF_NEWS] } } });
+  await auto.buttons.cpchannels(interaction([STAFF_NEWS, PUBLIC_NEWS]), client);
+  assert.deepEqual(config.get(G).automations.crosspost.channels, [STAFF_NEWS, PUBLIC_NEWS]);
+});
