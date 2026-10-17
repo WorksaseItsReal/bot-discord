@@ -379,3 +379,38 @@ test('R67 ModMail : 10 pièces jointes → les 10 liens restent visibles du staf
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R68
+
+test('R68 bouton « Transcript » : un transcript en cours par salon, délai par membre', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const { channelId, welcome } = await openTicket(h);
+    const author = h.fake.users.get(IDS.users.member);
+    for (let i = 0; i < 250; i++) h.fake.buildMessage({ channelId, body: { content: `message ${i}` }, author });
+    const historyGets = (mark) => h.fake.calls.slice(mark).filter((c) => c.method === 'GET' && c.route === `/channels/${channelId}/messages`).length;
+    // Coût d'UNE génération (lectures d'historique).
+    const base = h.fake.calls.length;
+    await h.client.services.tickets.generateTranscript(h.client.channels.cache.get(channelId));
+    const one = historyGets(base);
+    assert.ok(one >= 3);
+    const before = h.fake.calls.length;
+    const recs = await Promise.all([
+      ...Array.from({ length: 10 }, () => h.click(welcome, 'ticket:transcript', { as: 'member' })),
+      h.click(welcome, 'ticket:transcript', { as: 'mod' }),
+    ]);
+    await h.settle({ timeout: 10_000 });
+    const calls = h.fake.calls.slice(before);
+    const gets = historyGets(before);
+    const uploads = calls.filter((c) => c.files.some((f) => /transcript-\d+\.txt/.test(f.name))).length;
+    assert.ok(gets <= one, `${gets} lectures d'historique pour 11 clics (une génération : ${one})`);
+    assert.equal(uploads, 2, `${uploads} transcripts envoyés (attendu : 1 pour l'auteur, 1 pour le support)`);
+    const refused = recs.filter((r) => h.isError(r));
+    assert.equal(refused.length, 9);
+    assert.match(h.replyText(refused[0]), /Patientez|patientez/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

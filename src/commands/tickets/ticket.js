@@ -81,7 +81,7 @@ module.exports = {
     if (sub === 'transcript') {
       tickets.assertParticipant(interaction.member, record);
       await interaction.deferReply({ ephemeral: true });
-      return interaction.editReply(await tickets.transcriptPayload(interaction.channel));
+      return interaction.editReply(await tickets.transcriptPayload(interaction.channel, { userId: interaction.user.id }));
     }
     if (sub === 'add' || sub === 'remove' || sub === 'rename') tickets.assertStaff(interaction.member);
     if (sub === 'add' || sub === 'remove') {

@@ -119,7 +119,7 @@ module.exports = {
     if (action === 'transcript') {
       tickets.assertParticipant(interaction.member, record);
       await interaction.deferReply({ ephemeral: true });
-      return interaction.editReply(await tickets.transcriptPayload(interaction.channel));
+      return interaction.editReply(await tickets.transcriptPayload(interaction.channel, { userId: interaction.user.id }));
     }
     if (action === 'close') {
       tickets.assertParticipant(interaction.member, record);

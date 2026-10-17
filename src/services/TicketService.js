@@ -17,6 +17,8 @@ const logger = createLogger('tickets');
 const TRANSCRIPT_MAX = 1000;
 /** Délai minimal entre deux ouvertures de ticket d'un même membre (évite les boucles qui pinguent le staff). */
 const OPEN_COOLDOWN_MS = 60_000;
+/** Délai entre deux transcripts demandés par un même membre dans un même ticket (jusqu'à 11 lectures d'historique chacun). */
+const TRANSCRIPT_COOLDOWN_MS = 15_000;
 /** Mention de transcript : les fichiers ne sont pas copiés, seuls leurs liens figurent. */
 const ATTACHMENTS_NOTE = 'Les pièces jointes ne sont pas archivées : seuls leurs liens figurent, et ils expirent une fois le salon supprimé.';
 /** Mention de transcript quand `tickets.archiveAttachments` est activé. */
@@ -260,6 +262,25 @@ class TicketService {
     /** Dernière ouverture par membre (`guildId:userId` → horodatage). */
     this.lastOpened = new Map();
     this.openCooldownMs = OPEN_COOLDOWN_MS;
+    /** Transcripts en cours de génération (salon → promesse) : partagés entre demandes simultanées. */
+    this.transcriptJobs = new Map();
+    /** Dernier transcript demandé (`salon:membre` → horodatage). */
+    this.lastTranscript = new Map();
+    this.transcriptCooldownMs = TRANSCRIPT_COOLDOWN_MS;
+  }
+
+  /** Refuse un transcript redemandé trop tôt par le même membre dans le même ticket (synchrone). */
+  #assertTranscriptCooldown(channelId, userId, now = Date.now()) {
+    if (!userId) return;
+    const key = `${channelId}:${userId}`;
+    const last = this.lastTranscript.get(key);
+    if (last && now - last < this.transcriptCooldownMs) {
+      throw new UserError(`Transcript déjà demandé : patientez avant d'en générer un nouveau (${discordTimestamp(last + this.transcriptCooldownMs, 'R')}).`);
+    }
+    if (this.lastTranscript.size >= 1000) {
+      for (const [k, at] of this.lastTranscript) if (now - at >= this.transcriptCooldownMs) this.lastTranscript.delete(k);
+    }
+    this.lastTranscript.set(key, now);
   }
 
   /** Refuse une nouvelle ouverture trop rapprochée de la précédente (boucle ouverture/fermeture). */
@@ -579,11 +600,19 @@ class TicketService {
   /**
    * Transcript prêt à envoyer (carte + fichier), pour un ticket ouvert.
    * @param {import('discord.js').TextChannel} channel
+   * @param {{ userId?: string|null }} [opts] userId : demandeur (délai entre deux demandes)
    */
-  async transcriptPayload(channel) {
+  async transcriptPayload(channel, { userId = null } = {}) {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
-    const { content, count } = await this.#transcript(channel);
+    this.#assertTranscriptCooldown(channel.id, userId);
+    // Une seule génération à la fois par salon : les demandes simultanées partagent le résultat.
+    let job = this.transcriptJobs.get(channel.id);
+    if (!job) {
+      job = this.#transcript(channel).finally(() => this.transcriptJobs.delete(channel.id));
+      this.transcriptJobs.set(channel.id, job);
+    }
+    const { content, count } = await job;
     return {
       embeds: [
         card({
@@ -782,6 +811,7 @@ module.exports = {
   TRANSCRIPT_MAX,
   MAX_REASONS,
   OPEN_COOLDOWN_MS,
+  TRANSCRIPT_COOLDOWN_MS,
   supportRoles,
   reasonFromTopic,
   fetchChannelHistory,
