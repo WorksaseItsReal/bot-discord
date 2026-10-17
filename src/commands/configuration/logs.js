@@ -622,7 +622,15 @@ module.exports = {
         staffRoleId: cfg.staffRoleId,
         reason: `Salons de logs réparés par ${interaction.user.tag}`,
       });
-      const notice = `🛠️ **${categories.length}** catégorie(s) réparée(s)${result.created.length ? ` · ${result.created.length} salon(s) recréé(s)` : ''}.`;
+      // État relu après coup : une permission que je n'ai pas pu corriger n'est pas « réparée ».
+      const still = categories.filter((k) => BROKEN.has(categoryState(client, interaction.guild, k)));
+      const fixed = categories.length - still.length;
+      const notice = [
+        fixed ? `🛠️ **${fixed}** catégorie(s) réparée(s)${result.created.length ? ` · ${result.created.length} salon(s) recréé(s)` : ''}.` : null,
+        still.length
+          ? `${ICONS.error} Échec pour ${still.map((k) => `**${LOG_CATEGORIES[k].label}**`).join(', ')} : je ne peux pas corriger les permissions de ce salon (il me faut **Voir le salon** et **Gérer les rôles** dedans). Rétablissez-les à la main, ou supprimez le salon pour que je le recrée.`
+          : null,
+      ].filter(Boolean).join('\n');
       await interaction.editReply(render(client, interaction.guild, 'home', notice));
     },
     /** Suppression (après confirmation) des salons créés par le bot. */

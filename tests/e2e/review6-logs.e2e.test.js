@@ -625,3 +625,29 @@ test('R58 : la troncature des logs ne coupe jamais la fin d\'un spoiler (texte c
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R59
+
+test('R59 : « Réparer » n\'annonce pas une réparation qui a échoué', async () => {
+  const h = await createHarness({ botAdministrator: false });
+  try {
+    const cfg = await adminCreatesLogs(h, { categories: ['messages'] });
+    const id = cfg.logChannels.messages;
+    // Un administrateur retire au bot l'accès au salon : il ne peut plus en corriger les permissions.
+    const raw = h.fake.channels.get(id);
+    raw.permission_overwrites = raw.permission_overwrites.filter((o) => o.id !== IDS.users.bot);
+    raw.permission_overwrites.push({ id: IDS.users.bot, type: 1, allow: '0', deny: String(P.ViewChannel) });
+    h.fake.dispatchNow('CHANNEL_UPDATE', raw, 'bot exclu du salon de logs');
+    await h.settle();
+    assert.equal(h.client.services.logging.channelStatus(h.guild, id), 'noperm');
+    const panel = await panelOf(h, 'admin');
+    const r = await h.click(panel, 'cmd:logs:repair', { as: 'admin' });
+    const text = JSON.stringify(h.message(panel.id).embeds) + h.replyText(r);
+    assert.equal(h.client.services.logging.channelStatus(h.guild, id), 'noperm');
+    assert.ok(!/1\*\* catégorie\(s\) réparée/.test(text), 'réparation annoncée alors que rien n\'a été réparé');
+    assert.match(text, /échec|Impossible/i);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
