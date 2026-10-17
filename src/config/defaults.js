@@ -128,6 +128,15 @@ const defaultGuildConfig = Object.freeze({
     destructiveWindowSeconds: 10,
     punishExecutor: 'strip', // strip (retire les rôles) | ban | none
   },
+  // Riposte native de Discord (/lockdown riposte, RaidResponseService) : à une vague d'arrivées
+  // de l'AntiRaid, suspend les invitations (et/ou les MP entre membres) pendant `hours` heures
+  // (24 h au plus, jamais renouvelée automatiquement). Coupée par défaut.
+  raidResponse: {
+    onWave: false,
+    invites: true,
+    dms: false,
+    hours: 6, // 1 | 3 | 6 | 12 | 24
+  },
   whitelist: {
     users: [],
     roles: [],

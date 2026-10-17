@@ -682,6 +682,8 @@ class ModerationService {
    */
   async softban(guild, targetUser, moderator, reason, { deleteMessageSeconds = 86_400, targetMember = null } = {}) {
     if (!SNOWFLAKE.test(String(targetUser?.id ?? ''))) throw new UserError('Utilisateur invalide.');
+    // Liste noire (SEC3) : le débannissement immédiat du softban est refusé pour un blacklisté.
+    guild.client?.services?.blacklist?.assertNotBlacklisted?.(guild.id, targetUser.id, 'softban');
     if (targetUser.id === moderator?.id) throw new UserError('Vous ne pouvez pas vous softbannir vous-même.');
     if (targetMember) {
       assertCanModerate(moderator, targetMember, guild.members.me, { action: 'softbannir' });
@@ -821,6 +823,9 @@ class ModerationService {
    */
   async unban(guild, userId, moderator, reason) {
     if (typeof userId !== 'string' || !SNOWFLAKE.test(userId)) throw new UserError('Identifiant utilisateur invalide.');
+    // Liste noire (SEC3) : un blacklisté ne se débannit que par /secur blacklist retirer (/unban,
+    // bouton « Débannir », levée d'une sanction).
+    guild.client?.services?.blacklist?.assertNotBlacklisted?.(guild.id, userId, 'unban');
     let fetchError = null;
     const existing = await guild.bans.fetch(userId).catch((err) => {
       fetchError = err;

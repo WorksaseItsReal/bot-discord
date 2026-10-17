@@ -62,7 +62,13 @@ module.exports = {
       logger.debug('invites', e?.message);
       return null;
     });
-    const raid = await client.services.antiraid.handleJoin(member).catch(() => null);
+    // Liste noire (SEC3) AVANT l'AntiRaid : un blacklisté rebanni ne reçoit ni accueil, ni rôles
+    // d'arrivée, et n'est pas compté dans une vague d'arrivées.
+    const listed = await client.services.blacklist?.handleJoin(member).catch((e) => {
+      logger.warn('Liste noire à l\'arrivée :', e?.message);
+      return null;
+    });
+    const raid = listed?.punished ? listed : await client.services.antiraid.handleJoin(member).catch(() => null);
     // Log d'arrivée en parallèle : il attend l'attribution, au plus `logWaitMs` (l'arrivée
     // reste enregistrée ensuite par le suivi des invitations).
     const logged = logJoin(client, member, invite).catch((e) => logger.warn('Log d\'arrivée :', e?.message));
