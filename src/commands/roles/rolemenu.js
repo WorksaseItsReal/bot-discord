@@ -30,6 +30,12 @@ const FORBIDDEN_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.MoveMembers,
   PermissionFlagsBits.ManageThreads,
   PermissionFlagsBits.ManageEvents,
+  // Création d'emojis / autocollants / sons et d'événements (visibles par tout le serveur),
+  // statistiques et revenus du serveur.
+  PermissionFlagsBits.CreateGuildExpressions,
+  PermissionFlagsBits.CreateEvents,
+  PermissionFlagsBits.ViewCreatorMonetizationAnalytics,
+  PermissionFlagsBits.ViewGuildInsights,
 ]);
 
 /**
@@ -51,6 +57,18 @@ function forbiddenOverwriteChannel(role) {
  */
 function hasForbiddenPermissions(role) {
   return Boolean(role.permissions.any(FORBIDDEN_PERMISSIONS) || forbiddenOverwriteChannel(role));
+}
+
+/**
+ * Rôle réservé au bot (rôle de mute, rôle de vérification) : un membre ne doit jamais pouvoir se
+ * le donner ni se le retirer lui-même (se démuter, contourner la vérification).
+ * @returns {string|null} raison du refus
+ */
+function reservedRoleReason(client, guild, role) {
+  if (!role) return null;
+  if (role.id === client?.services?.moderation?.mutedRole?.(guild)?.id) return `Le rôle ${role.name} est le rôle de mute`;
+  if (role.id === client?.services?.config?.get?.(guild.id)?.welcome?.verification?.roleId) return `Le rôle ${role.name} est le rôle de vérification`;
+  return null;
 }
 
 /**
@@ -88,6 +106,7 @@ module.exports = {
   FORBIDDEN_PERMISSIONS,
   hasForbiddenPermissions,
   forbiddenOverwriteChannel,
+  reservedRoleReason,
   data: new SlashCommandBuilder()
     .setName('rolemenu')
     .setDescription('Crée un menu de rôles auto-attribuables.')
@@ -118,6 +137,8 @@ module.exports = {
       if (hasForbiddenPermissions(r)) {
         throw new UserError(`Le rôle ${r.name} possède des permissions de modération ou d'administration : il ne peut pas être auto-attribuable.`);
       }
+      const reserved = reservedRoleReason(client, guild, r);
+      if (reserved) throw new UserError(`${reserved} : il ne peut pas faire partie d'un menu de rôles.`);
       if (r.position >= me.roles.highest.position) throw new UserError(`Le rôle ${r.name} est trop haut pour que je puisse l'attribuer.`);
       if (!isOwner && r.position >= interaction.member.roles.highest.position) {
         throw new UserError(`Le rôle ${r.name} est au-dessus (ou égal) à votre rôle le plus haut.`);

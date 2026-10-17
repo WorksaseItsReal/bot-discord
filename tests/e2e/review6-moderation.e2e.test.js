@@ -492,3 +492,27 @@ test('R25 /derank : raison limitée à 512 caractères, raison d\'audit tronqué
     await h.close();
   }
 });
+
+test('R107 /rolemenu refuse le rôle de mute et le rôle de vérification ; un menu existant ne permet pas de se démuter', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ antiraid: { enabled: false }, moderation: { mutedRoleId: IDS.roles.muted }, welcome: { verification: { enabled: true, mode: 'add', roleId: IDS.roles.temp } } });
+  try {
+    for (const roleId of [IDS.roles.muted, IDS.roles.temp]) {
+      const rec = await h.slash('rolemenu', [opt('titre', 3, 'Rôles'), opt('role1', 8, IDS.roles.notif), opt('role2', 8, roleId)], { as: 'admin' });
+      assert.ok(h.isError(rec), `rôle réservé ${roleId} accepté dans un menu de rôles`);
+    }
+    // Menu publié avant le correctif avec le rôle de mute : le membre muet ne peut pas le retirer.
+    await h.slash('mute', [opt('membre', 6, IDS.users.target), opt('duree', 3, '1d')], { as: 'mod' });
+    assert.ok(h.fake.members.get(IDS.users.target).roles.includes(IDS.roles.muted));
+    const msg = h.fake.buildMessage({ channelId: IDS.channels.general, body: { content: '', components: [{ type: 1, components: [{ type: 3, custom_id: 'rolemenu:pending', options: [{ label: 'Muet', value: IDS.roles.muted }], min_values: 0, max_values: 1 }] }] }, author: h.fake.users.get(h.client.user.id) });
+    const id = h.client.repositories.roleMenus.create({ guildId: h.guild.id, channelId: IDS.channels.general, data: { title: 'Ancien', intro: null, roles: [{ roleId: IDS.roles.muted, label: 'Muet' }] } });
+    h.client.repositories.roleMenus.setMessage(id, msg.id);
+    msg.components[0].components[0].custom_id = `rolemenu:${id}`;
+    await h.click(msg, `rolemenu:${id}`, { as: 'target', values: [IDS.roles.muted] });
+    assert.ok(h.fake.members.get(IDS.users.target).roles.includes(IDS.roles.muted), 'le membre muet s\'est démuté via le menu de rôles');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -69,3 +69,12 @@ test('R22 audit log : rôle Muted retiré par le bot hors /unmute → mute levé
   assert.equal(row.revoke_reason, 'Rôle Muted retiré via le bot');
   assert.equal(repo.get('g1', due).active, 1, 'levée automatique court-circuitée');
 });
+
+test('R24 FORBIDDEN_PERMISSIONS : toute permission Manage*/Create* de gestion et les statistiques du serveur', () => {
+  const { PermissionFlagsBits: P } = require('discord.js');
+  const { FORBIDDEN_PERMISSIONS } = require('../src/commands/roles/rolemenu');
+  const memberCreates = new Set(['CreateInstantInvite', 'CreatePublicThreads', 'CreatePrivateThreads']);
+  const expected = Object.keys(P).filter((k) => (/^Manage/.test(k) || (/^Create/.test(k) && !memberCreates.has(k))));
+  expected.push('ViewCreatorMonetizationAnalytics', 'ViewGuildInsights', 'ViewAuditLog');
+  for (const name of expected) assert.ok(FORBIDDEN_PERMISSIONS.includes(P[name]), `${name} absent`);
+});
