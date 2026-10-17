@@ -1,8 +1,8 @@
 'use strict';
 
-const { PermissionFlagsBits, ChannelType, OverwriteType } = require('discord.js');
+const { PermissionFlagsBits, ChannelType, OverwriteType, embedLength } = require('discord.js');
 const { createLogger } = require('../core/logger');
-const { card, wide, ICONS } = require('../utils/ui');
+const { card, wide, ICONS, fitEmbeds } = require('../utils/ui');
 const { LOG_CATEGORIES, EVENT_CATEGORY } = require('../utils/logCatalog');
 const { canReadCached } = require('../utils/channelAccess');
 
@@ -154,6 +154,27 @@ function fitList(items, max = 1000, separator = ' ') {
   return out.join(separator);
 }
 
+/**
+ * File d'envoi par salon de logs (Discord : ~5 messages / 5 s par salon). Les catégories
+ * prioritaires (alertes de sécurité, sanctions) passent devant et ne sont jamais abandonnées ;
+ * les autres sont plafonnées par salon (au-delà : abandonnées et comptées), et regroupées par
+ * lots de 10 cartes par message dès qu'elles s'accumulent.
+ */
+const PRIORITY_CATEGORIES = new Set(['security', 'moderation']);
+const MAX_PENDING = 200;
+const GROUP_FROM = 5;
+const GROUP_MAX = 10;
+const GROUP_CHARS = 5_500; // limite de Discord : 6 000 caractères d'embeds par message
+
+/** Taille (caractères comptés par Discord) d'une carte. */
+function embedSize(embed) {
+  try {
+    return embedLength(embed?.data ?? embed ?? {});
+  } catch {
+    return GROUP_CHARS;
+  }
+}
+
 /** Le bot peut-il joindre des fichiers dans ce salon (d'après le cache) ? */
 function canAttach(channel) {
   const me = channel?.guild?.members?.me;
@@ -165,6 +186,17 @@ function canAttach(channel) {
 function withoutFilesNote(embed) {
   if (typeof embed?.addFields !== 'function' || embed.data?.fields?.some((f) => f.name.includes('Fichier non joint'))) return;
   embed.addFields(wide(ICONS.warning, 'Fichier non joint', 'Il me manque la permission **Joindre des fichiers** dans ce salon de logs.'));
+}
+
+/** Carte « logs abandonnés » publiée quand une inondation se termine. */
+function floodCard(n) {
+  return card({
+    tone: 'warning',
+    section: { emoji: '📋', label: 'Logs' },
+    icon: ICONS.warning,
+    title: 'Logs non envoyés',
+    description: `**${n}** log(s) ignoré(s) : trop d'événements d'un coup pour ce salon (limite d'envoi de Discord). Les alertes de sécurité et les sanctions passent toujours, en priorité.`,
+  });
 }
 
 /**
@@ -181,6 +213,8 @@ class LoggingService {
     this.config = configService;
     /** Messages supprimés par le bot (AutoMod…) : déjà journalisés, pas de « Message supprimé » en double. */
     this.suppressed = new Map();
+    /** Files d'envoi par salon : salon → { channel, items, running, dropped }. */
+    this.queues = new Map();
   }
 
   /** Marque un message que le bot va supprimer lui-même (TTL 30 s). */
@@ -267,35 +301,113 @@ class LoggingService {
       // (des centaines de 403/404 peuvent faire bannir temporairement l'IP du bot).
       const channel = await this.#target(guildId, cfg.logChannels[category]);
       if (!channel) return false;
-      const payload = { embeds: [embed] };
-      if (components?.length) payload.components = components;
-      // Pièces jointes (transcription d'une purge) : sans « Joindre des fichiers », la carte part
-      // quand même, sans le fichier et avec une explication (sinon 50013 : log entier perdu).
-      if (ctx.files?.length) {
-        if (canAttach(channel)) payload.files = ctx.files;
-        else withoutFilesNote(embed);
+      return await this.#enqueue(channel, { guildId, category, embed, components, ctx });
+    } catch (err) {
+      logger.debug(`Impossible d'envoyer un log (${category}) pour ${guildId}:`, err?.message);
+      return false;
+    }
+  }
+
+  /** Met une carte dans la file de son salon ; résolu (true/false) une fois envoyée ou abandonnée. */
+  #enqueue(channel, item) {
+    let q = this.queues.get(channel.id);
+    if (!q) {
+      q = { channel, items: [], running: false, dropped: 0 };
+      this.queues.set(channel.id, q);
+    }
+    q.channel = channel;
+    const priority = PRIORITY_CATEGORIES.has(item.category);
+    if (!priority && q.items.reduce((n, i) => n + (i.priority ? 0 : 1), 0) >= MAX_PENDING) {
+      q.dropped += 1;
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      const entry = { ...item, priority, resolve };
+      // Prioritaire : après les autres cartes prioritaires en attente, devant tout le reste.
+      const at = priority ? q.items.findIndex((i) => !i.priority) : -1;
+      if (at === -1) q.items.push(entry);
+      else q.items.splice(at, 0, entry);
+      if (!q.running) this.#drain(q);
+    });
+  }
+
+  /** Vide la file d'un salon, un message à la fois. */
+  async #drain(q) {
+    q.running = true;
+    try {
+      while (q.items.length) {
+        await this.#deliver(q.channel, this.#nextBatch(q));
+        if (!q.items.length && q.dropped) {
+          const n = q.dropped;
+          q.dropped = 0;
+          await q.channel.send({ embeds: [floodCard(n)] }).catch(() => {});
+        }
       }
-      let message;
-      try {
-        message = await channel.send(payload);
-      } catch (err) {
-        if (!payload.files || err?.code !== 50013) throw err;
-        delete payload.files;
-        withoutFilesNote(embed);
-        message = await channel.send(payload);
-      }
+    } finally {
+      q.running = false;
+      if (!q.items.length && this.queues.get(q.channel.id) === q) this.queues.delete(q.channel.id);
+    }
+  }
+
+  /** Prochain envoi : une carte, ou un lot de cartes simples quand elles s'accumulent. */
+  #nextBatch(q) {
+    const plain = (i) => !i.priority && !i.components?.length && !i.ctx.files?.length && typeof i.ctx.onSent !== 'function';
+    const first = q.items.shift();
+    if (!plain(first) || q.items.length + 1 < GROUP_FROM) return [first];
+    const batch = [first];
+    let size = embedSize(first.embed);
+    while (batch.length < GROUP_MAX && q.items.length && plain(q.items[0])) {
+      const next = embedSize(q.items[0].embed);
+      if (size + next > GROUP_CHARS) break;
+      size += next;
+      batch.push(q.items.shift());
+    }
+    return batch;
+  }
+
+  async #deliver(channel, batch) {
+    if (batch.length > 1) {
+      const ok = await channel.send({ embeds: fitEmbeds(batch.map((i) => i.embed)) }).then(() => true, (err) => {
+        logger.debug(`Impossible d'envoyer ${batch.length} logs groupés :`, err?.message);
+        return false;
+      });
+      for (const i of batch) i.resolve(ok);
+      return;
+    }
+    const [item] = batch;
+    try {
+      const message = await this.#sendOne(channel, item);
       // Optionnel : l'appelant peut mémoriser le message (ex : fiche de sanction mise à jour plus tard).
-      if (typeof ctx.onSent === 'function') {
+      if (typeof item.ctx.onSent === 'function') {
         try {
-          ctx.onSent(message);
+          item.ctx.onSent(message);
         } catch (err) {
           logger.debug('onSent a échoué :', err?.message);
         }
       }
-      return true;
+      item.resolve(true);
     } catch (err) {
-      logger.debug(`Impossible d'envoyer un log (${category}) pour ${guildId}:`, err?.message);
-      return false;
+      logger.debug(`Impossible d'envoyer un log (${item.category}) pour ${item.guildId}:`, err?.message);
+      item.resolve(false);
+    }
+  }
+
+  async #sendOne(channel, { embed, components, ctx }) {
+    const payload = { embeds: [embed] };
+    if (components?.length) payload.components = components;
+    // Pièces jointes (transcription d'une purge) : sans « Joindre des fichiers », la carte part
+    // quand même, sans le fichier et avec une explication (sinon 50013 : log entier perdu).
+    if (ctx.files?.length) {
+      if (canAttach(channel)) payload.files = ctx.files;
+      else withoutFilesNote(embed);
+    }
+    try {
+      return await channel.send(payload);
+    } catch (err) {
+      if (!payload.files || err?.code !== 50013) throw err;
+      delete payload.files;
+      withoutFilesNote(embed);
+      return channel.send(payload);
     }
   }
 

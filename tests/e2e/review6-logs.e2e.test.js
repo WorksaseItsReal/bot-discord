@@ -517,3 +517,47 @@ test('R55 : un salon de logs créé par le bot rendu visible par @everyone est s
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R56
+
+test('R56 : inondation de logs — cartes regroupées, alerte de sécurité envoyée en priorité', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    // Comme @discordjs/rest : les envois dans un même salon partent un par un (file par route).
+    const rest = h.client.rest;
+    const request = rest.request;
+    let chain = Promise.resolve();
+    rest.request = (options) => {
+      if (String(options.method).toUpperCase() !== 'POST' || options.fullRoute !== `/channels/${IDS.channels.logs}/messages`) return request.call(rest, options);
+      const p = chain.then(() => new Promise((r) => setTimeout(r, 2))).then(() => request.call(rest, options));
+      chain = p.catch(() => {});
+      return p;
+    };
+    const postsTo = (mark) => h.fake.calls.slice(mark).filter((c) => c.method === 'POST' && c.route === `/channels/${IDS.channels.logs}/messages`);
+    const mark = h.fake.calls.length;
+    for (let i = 0; i < 50; i++) {
+      h.fake.setVoice(IDS.users.member, IDS.channels.voice);
+      h.fake.setVoice(IDS.users.member, null);
+    }
+    // Attente du premier envoi SANS attendre la fin des autres (h.waitFor attendrait tout).
+    for (const start = Date.now(); postsTo(mark).length < 1 && Date.now() - start < 2_000;) await new Promise((r) => setTimeout(r, 1));
+    // Alerte de sécurité en pleine inondation : elle passe devant les cartes vocales en attente.
+    const secMark = h.fake.calls.length;
+    const { logCard } = require('../../src/services/LoggingService');
+    const alert = h.client.services.logging.send(h.guild.id, 'security', logCard({ category: 'security', tone: 'danger', title: 'ALERTE-PRIORITAIRE', description: 'Raid en cours' }), undefined, { event: 'antiraid' });
+    await h.settle({ timeout: 10_000 });
+    assert.equal(await alert, true);
+    const after = postsTo(secMark);
+    const at = after.findIndex((c) => JSON.stringify(c.body).includes('ALERTE-PRIORITAIRE'));
+    assert.ok(at !== -1 && at <= 1, `alerte de sécurité envoyée en position ${at} derrière les cartes vocales`);
+    const posts = postsTo(mark);
+    const embeds = posts.flatMap((c) => c.body?.embeds ?? []);
+    const voice = embeds.filter((e) => /Connexion vocale|Déconnexion vocale/.test(e.title ?? ''));
+    assert.equal(voice.length, 100, 'cartes vocales perdues');
+    assert.ok(posts.length <= 25, `${posts.length} messages pour 100 événements : aucun regroupement`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

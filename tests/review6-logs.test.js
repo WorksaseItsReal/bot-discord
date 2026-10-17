@@ -73,3 +73,36 @@ test('R54 : une autre erreur n\'est pas réessayée', async () => {
   assert.equal(await logging.send(GUILD, 'messages', embed(), undefined, { files: [file] }), false);
   assert.equal(calls, 1);
 });
+
+// ---------------------------------------------------------------- R56
+
+test('R56 : file bornée par salon — cartes en trop abandonnées et comptées, prioritaires jamais abandonnées', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const sent = [];
+  const { logging } = world(async (payload) => {
+    await gate;
+    sent.push(payload);
+    return { id: String(sent.length) };
+  });
+  const config = logging.config;
+  config.update(GUILD, { logChannels: { voice: LOGS, security: LOGS } });
+  const voice = (i) => logging.send(GUILD, 'voice', card({ title: `Connexion vocale ${i}` }), undefined, { event: 'voiceJoin' });
+  const results = [];
+  for (let i = 0; i < 205; i++) results.push(voice(i));
+  const alert = logging.send(GUILD, 'security', card({ title: 'ALERTE' }), undefined, { event: 'antiraid' });
+  release();
+  const done = await Promise.all(results);
+  assert.equal(await alert, true, 'alerte prioritaire abandonnée');
+  // 1 carte en cours d'envoi + 200 en attente ; les 4 suivantes sont abandonnées.
+  assert.equal(done.filter((x) => x === false).length, 4);
+  await new Promise((r) => setImmediate(r));
+  const titles = sent.flatMap((p) => p.embeds.map((e) => e.title ?? e.data?.title ?? ''));
+  assert.equal(titles.filter((t) => /Connexion vocale/.test(t)).length, 201);
+  assert.ok(sent.length < 40, `${sent.length} messages : aucun regroupement`);
+  // L'alerte part juste après la carte déjà en cours d'envoi, devant les 200 en attente.
+  assert.match(JSON.stringify(sent[1].embeds), /ALERTE/);
+  // Fin de l'inondation : une carte indique combien de logs ont été ignorés.
+  assert.match(JSON.stringify(sent.at(-1).embeds), /4\*\* log\(s\) ignoré/);
+  assert.equal(logging.queues.size, 0, 'file non libérée');
+});
