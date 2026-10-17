@@ -390,3 +390,46 @@ test('R105 : plusieurs nouveautés dans une lecture : le rôle n\'est mentionné
   assert.equal(sent.length, 4);
   assert.equal(pings(), 1, 'une mention par article publié');
 });
+
+/* ------------------------------------------------------------------ */
+/* R106 : /jeu, verrous par joueur propres à chaque serveur             */
+/* ------------------------------------------------------------------ */
+
+const { GameService } = require('../src/services/GameService');
+const jeu = require('../src/commands/fun/jeu');
+
+function jeuInteraction(guildId, channelId, userId, sub, { opponent = null } = {}) {
+  return {
+    guildId,
+    channelId,
+    user: { id: userId },
+    channel: { isThread: () => false },
+    options: {
+      getSubcommand: () => sub,
+      getUser: (n) => (n === 'adversaire' && opponent ? { id: opponent, bot: false } : null),
+      getMember: (n) => (n === 'adversaire' && opponent ? { id: opponent } : null),
+      getString: () => null,
+      getInteger: () => null,
+    },
+    async reply() {
+      return { id: `${guildId.slice(-3)}000000000000000` };
+    },
+  };
+}
+
+test('R106 : une partie sur un serveur ne bloque pas le même jeu sur un autre serveur (ni ne le révèle)', async () => {
+  const games = new GameService({});
+  const client = { user: { id: '999999999999999999' }, services: { games } };
+  const U = '200000000000000002';
+  const OTHER = '200000000000000003';
+  try {
+    await jeu.execute(jeuInteraction('100000000000000001', '400000000000000001', U, 'devine'), client);
+    await jeu.execute(jeuInteraction('100000000000000002', '400000000000000099', U, 'devine'), client);
+    await jeu.execute(jeuInteraction('100000000000000001', '400000000000000001', U, 'morpion'), client);
+    await jeu.execute(jeuInteraction('100000000000000002', '400000000000000099', OTHER, 'morpion', { opponent: U }), client);
+    // Même serveur : toujours refusé.
+    await assert.rejects(jeu.execute(jeuInteraction('100000000000000001', '400000000000000002', U, 'devine'), client), /déjà une partie/);
+  } finally {
+    games.stop();
+  }
+});
