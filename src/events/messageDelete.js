@@ -3,7 +3,7 @@
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
 const { field, wide, ICONS, userLine } = require('../utils/ui');
-const { logCard, PRIVATE_CONTENT } = require('../services/LoggingService');
+const { logCard, truncateContent, PRIVATE_CONTENT } = require('../services/LoggingService');
 
 module.exports = {
   name: 'messageDelete',
@@ -38,7 +38,7 @@ module.exports = {
         field(ICONS.user, 'Auteur', author ? userLine(author) : '*Inconnu (hors cache)*'),
         field(ICONS.channel, 'Salon', `${message.channel}`),
         field(ICONS.date, 'Envoyé', message.createdTimestamp ? discordTimestamp(message.createdTimestamp, 'R') : '—'),
-        wide('📄', 'Contenu', hidden ? PRIVATE_CONTENT : message.content ? truncate(message.content, 1024) : '*Aucun contenu texte*'),
+        wide('📄', 'Contenu', hidden ? PRIVATE_CONTENT : message.content ? truncateContent(message.content, 1024) : '*Aucun contenu texte*'),
         files.length ? wide('📎', `Pièces jointes (${files.length})`, hidden ? '*Noms masqués (salon privé).*' : truncate(files.join(' · '), 1024)) : null,
       ],
       id: author?.id ?? message.id,

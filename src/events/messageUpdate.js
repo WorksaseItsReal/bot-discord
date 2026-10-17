@@ -1,8 +1,7 @@
 'use strict';
 
-const { truncate } = require('../utils/embeds');
 const { field, wide, ICONS, userLine, linkButton, buttonRows } = require('../utils/ui');
-const { logCard, PRIVATE_CONTENT } = require('../services/LoggingService');
+const { logCard, truncateContent, PRIVATE_CONTENT } = require('../services/LoggingService');
 
 module.exports = {
   name: 'messageUpdate',
@@ -42,8 +41,8 @@ module.exports = {
         ...(hidden
           ? [wide('📄', 'Contenu', PRIVATE_CONTENT)]
           : [
-            wide('⬅️', 'Avant', oldMessage.content ? truncate(oldMessage.content, 1024) : '*Vide*'),
-            wide('➡️', 'Après', newMessage.content ? truncate(newMessage.content, 1024) : '*Vide*'),
+            wide('⬅️', 'Avant', oldMessage.content ? truncateContent(oldMessage.content, 1024) : '*Vide*'),
+            wide('➡️', 'Après', newMessage.content ? truncateContent(newMessage.content, 1024) : '*Vide*'),
           ]),
       ],
     });

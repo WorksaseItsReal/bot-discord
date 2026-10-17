@@ -3,7 +3,7 @@
 const { AttachmentBuilder, GuildVerificationLevel } = require('discord.js');
 const { truncate } = require('../utils/embeds');
 const { field, wide, ICONS, userLine, code } = require('../utils/ui');
-const { logCard, PRIVATE_CONTENT } = require('../services/LoggingService');
+const { logCard, truncateContent, PRIVATE_CONTENT } = require('../services/LoggingService');
 const { discordTimestamp } = require('../utils/time');
 const { boostChange } = require('../services/AutomationService');
 
@@ -58,7 +58,7 @@ module.exports = [
       const preview = list
         .filter((m) => m.content)
         .slice(-10)
-        .map((m) => `**${m.author?.username ?? '?'}** : ${truncate(m.content.replace(/\n/g, ' '), 90)}`);
+        .map((m) => `**${m.author?.username ?? '?'}** : ${truncateContent(m.content.replace(/\n/g, ' '), 90)}`);
       const ctx = {
         event: 'messageBulkDelete',
         channelId: channel.id,
@@ -85,7 +85,7 @@ module.exports = [
           field(ICONS.channel, 'Salon', `${channel}`),
           field(ICONS.count, 'Messages', `${messages.size}`),
           field(ICONS.members, 'Auteurs', `${authors.size}`),
-          preview.length ? wide(ICONS.list, 'Derniers messages en cache', truncate(preview.join('\n'), 1024)) : null,
+          preview.length ? wide(ICONS.list, 'Derniers messages en cache', truncateContent(preview.join('\n'), 1024)) : null,
           transcript ? wide('📄', 'Transcription', 'Fichier joint (messages encore en cache).') : null,
           hidden ? wide('📄', 'Contenu', `${PRIVATE_CONTENT}\nAucune transcription jointe.`) : null,
         ],

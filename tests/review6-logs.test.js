@@ -106,3 +106,24 @@ test('R56 : file bornée par salon — cartes en trop abandonnées et comptées,
   assert.match(JSON.stringify(sent.at(-1).embeds), /4\*\* log\(s\) ignoré/);
   assert.equal(logging.queues.size, 0, 'file non libérée');
 });
+
+// ---------------------------------------------------------------- R58
+
+test('R58 : truncateContent referme un spoiler ou un bloc de code coupé, sans dépasser la limite', () => {
+  const { truncateContent } = require('../src/services/LoggingService');
+  const pipes = (t) => (t.match(/\|\|/g) ?? []).length;
+  const a = truncateContent(`${'x'.repeat(50)} ||secret qui continue longtemps après la coupure||`, 70);
+  assert.ok(a.length <= 70);
+  assert.equal(pipes(a) % 2, 0, a);
+  assert.ok(a.endsWith('||'));
+  const b = truncateContent(`début \`\`\`js\n${'code '.repeat(40)}\`\`\` fin`, 80);
+  assert.ok(b.length <= 80);
+  assert.equal((b.match(/```/g) ?? []).length % 2, 0, b);
+  // « || » dans un bloc de code n'est pas un spoiler : rien à refermer.
+  const c = truncateContent(`\`\`\`a || b\`\`\` ${'z'.repeat(100)}`, 60);
+  assert.ok(!c.endsWith('||'), c);
+  // Spoiler ouvert puis bloc de code coupé : les deux sont refermés, dans l'ordre.
+  const d = truncateContent(`||caché \`\`\`${'k'.repeat(100)}\`\`\`||`, 50);
+  assert.ok(d.endsWith('```||'), d);
+  assert.equal(truncateContent('court', 10), 'court');
+});

@@ -175,6 +175,22 @@ function embedSize(embed) {
   }
 }
 
+/**
+ * Tronque un contenu de message (Markdown) sans rien révéler : un spoiler `||` ou un bloc de code
+ * ``` laissé ouvert par la coupure est refermé (sinon la fin du texte caché s'afficherait en
+ * clair). Pur.
+ */
+function truncateContent(value, max) {
+  const str = value == null ? '' : String(value);
+  if (str.length <= max) return str;
+  const cut = str.slice(0, Math.max(0, max - 6)); // place pour « … », « ``` » et « || »
+  const segments = cut.split('```');
+  const inCode = segments.length % 2 === 0;
+  // Spoilers comptés hors des blocs de code (où « || » est du texte).
+  const spoilers = segments.filter((_, i) => i % 2 === 0).reduce((n, seg) => n + (seg.match(/\|\|/g) ?? []).length, 0);
+  return `${cut}…${inCode ? '```' : ''}${spoilers % 2 ? '||' : ''}`;
+}
+
 /** Le bot peut-il joindre des fichiers dans ce salon (d'après le cache) ? */
 function canAttach(channel) {
   const me = channel?.guild?.members?.me;
@@ -428,4 +444,4 @@ class LoggingService {
   }
 }
 
-module.exports = { LoggingService, LOG_SECTIONS, logSection, logCard, fitList, shouldLog, sourceLessVisible, canAttach, PRIVATE_CONTENT, REQUIRED_PERMISSIONS };
+module.exports = { LoggingService, LOG_SECTIONS, logSection, logCard, fitList, shouldLog, sourceLessVisible, canAttach, truncateContent, PRIVATE_CONTENT, REQUIRED_PERMISSIONS };

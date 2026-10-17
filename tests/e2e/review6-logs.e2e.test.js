@@ -599,3 +599,29 @@ test('R57 : logs AutoMod en pause — le message supprimé par l\'AutoMod est jo
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R58
+
+test('R58 : la troncature des logs ne coupe jamais la fin d\'un spoiler (texte caché affiché en clair)', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const mark = h.fake.messageLog.length;
+    const tw = await h.userMessage({ as: 'member', content: 'Attention TW : ||description détaillée, longue, que seuls ceux qui cliquent doivent voir, vraiment longue||' });
+    const long = await h.userMessage({ as: 'member', content: `${'x'.repeat(1000)} ||adresse perso : 12 rue des Lilas, Paris||` });
+    await h.editUserMessage(long.id, `${'y'.repeat(1000)} ||nouvelle adresse : 3 place du Marché||`);
+    await h.deleteUserMessage(long.id);
+    h.fake.dispatchNow('MESSAGE_DELETE_BULK', { ids: [tw.id], channel_id: IDS.channels.general, guild_id: h.guild.id }, 'purge');
+    await h.settle();
+    const fields = botPostsIn(h, mark, IDS.channels.logs).flatMap((m) => m.embeds[0].fields ?? []).filter((f) => /Contenu|Avant|Après|Derniers/.test(f.name));
+    assert.ok(fields.length >= 4, `champs attendus : ${fields.map((f) => f.name)}`);
+    for (const f of fields) {
+      const pipes = (f.value.match(/\|\|/g) ?? []).length;
+      assert.equal(pipes % 2, 0, `« ${f.name} » : spoiler ouvert (texte caché en clair) → …${f.value.slice(-50)}`);
+      assert.ok(f.value.length <= 1024);
+    }
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
