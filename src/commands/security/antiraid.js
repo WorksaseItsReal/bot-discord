@@ -642,27 +642,30 @@ module.exports = {
       guard(interaction);
       const action = interaction.values?.[0];
       if (!own(WAVE_ACTIONS, action)) throw new UserError('Action inconnue.');
+      const changed = cfgOf(client, interaction.guildId).antiraid?.action !== action;
       client.services.config.update(interaction.guildId, { antiraid: { action } });
       await interaction.update(render(client, interaction.guild, 'joins', `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`));
-      await journal(client, interaction, `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`);
+      if (changed) await journal(client, interaction, `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`);
     },
     /** Menu : sanction des comptes récents et bots. */
     async newaccount(interaction, client) {
       guard(interaction);
       const value = interaction.values?.[0];
       if (!own(NEW_ACCOUNT_ACTIONS, value)) throw new UserError('Sanction inconnue.');
+      const changed = newAccountAction(cfgOf(client, interaction.guildId).antiraid) !== value;
       client.services.config.update(interaction.guildId, { antiraid: { newAccountAction: value } });
       await interaction.update(render(client, interaction.guild, 'accounts', `Comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`));
-      await journal(client, interaction, `Sanction des comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`);
+      if (changed) await journal(client, interaction, `Sanction des comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`);
     },
     /** Menu : sanction de l'auteur d'actions destructrices. */
     async executor(interaction, client) {
       guard(interaction);
       const punishExecutor = interaction.values?.[0];
       if (!own(EXECUTOR_ACTIONS, punishExecutor)) throw new UserError('Sanction inconnue.');
+      const changed = cfgOf(client, interaction.guildId).antiraid?.punishExecutor !== punishExecutor;
       client.services.config.update(interaction.guildId, { antiraid: { punishExecutor } });
       await interaction.update(render(client, interaction.guild, 'destructive', `Sanction de l'auteur : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`));
-      await journal(client, interaction, `Sanction de l'auteur d'actions destructrices : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`);
+      if (changed) await journal(client, interaction, `Sanction de l'auteur d'actions destructrices : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`);
     },
     /** cmd:antiraid:set:<joins|accounts|destructive> — ouvre le formulaire de réglages. */
     async set(interaction, client, [kind]) {
@@ -758,9 +761,11 @@ module.exports = {
       guard(interaction);
       const preset = own(PRESETS, key) ? PRESETS[key] : null;
       if (!preset) throw new UserError('Préréglage inconnu.');
+      const current = cfgOf(client, interaction.guildId).antiraid ?? {};
+      const changed = Object.entries(preset.patch).some(([k, v]) => current[k] !== v);
       client.services.config.update(interaction.guildId, { antiraid: preset.patch });
       await interaction.update(render(client, interaction.guild, 'home', `Préréglage ${preset.emoji} **${preset.label}** appliqué. Salon d'alerte et whitelist conservés.`));
-      await journal(client, interaction, `Préréglage ${preset.emoji} **${preset.label}** appliqué (AntiRaid activé).`);
+      if (changed) await journal(client, interaction, `Préréglage ${preset.emoji} **${preset.label}** appliqué (AntiRaid activé).`);
     },
     /** Simulation sans effet : nouveau message éphémère (le tableau de bord reste en place). */
     async simulate(interaction, client) {
