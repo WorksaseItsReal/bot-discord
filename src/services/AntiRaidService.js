@@ -1,8 +1,8 @@
 'use strict';
 
-const { PermissionFlagsBits } = require('discord.js');
+const { PermissionFlagsBits, escapeMarkdown } = require('discord.js');
 const { SlidingWindow } = require('../utils/rate');
-const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
+const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, fitEmbeds } = require('../utils/ui');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('antiraid');
@@ -513,6 +513,7 @@ class AntiRaidService {
         outcome.note ? wide(ICONS.warning, 'Attention', outcome.note) : null,
       ],
       footer: `ID : ${executorId}`,
+      fallback: true,
     });
   }
 
@@ -611,9 +612,12 @@ class AntiRaidService {
 
   /**
    * Publie une alerte (carte danger/caution) dans le salon d'alertes et les logs sécurité.
+   * Alerte critique (`fallback`) reçue nulle part (salon supprimé par un nukeur, logs sécurité
+   * débranchés ou mis en pause, permissions) : MP au propriétaire, sinon salon système.
    * @param {import('discord.js').Guild} guild
    * @param {string | { tone?: string, icon?: string, title: string, description?: string, fields?: object[],
-   *   thumbnail?: string, footer?: string, buttons?: import('discord.js').ButtonBuilder[] }} alert
+   *   thumbnail?: string, footer?: string, buttons?: import('discord.js').ButtonBuilder[], trigger?: boolean, fallback?: boolean }} alert
+   * @returns {Promise<boolean>} true si l'alerte a été publiée quelque part
    */
   async alert(guild, alert) {
     const a = typeof alert === 'string' ? { description: alert } : alert;
@@ -632,13 +636,33 @@ class AntiRaidService {
       footer: a.footer,
     });
     const components = buttonRows(...(a.buttons ?? []));
+    let delivered = false;
     // Salon d'alertes dédié uniquement s'il diffère du salon de logs sécurité,
     // sinon l'alerte serait postée deux fois au même endroit.
     if (alertChannelId && alertChannelId !== guildCfg.logChannels?.security) {
-      const channel = await this.client.channels.fetch(alertChannelId).catch(() => null);
-      if (channel?.isTextBased()) await channel.send({ embeds: [embed], components }).catch(() => {});
+      const channel = guild.channels?.cache?.get?.(alertChannelId) ?? (await this.client.channels?.fetch?.(alertChannelId).catch(() => null));
+      if (typeof channel?.send === 'function') delivered = await channel.send({ embeds: [embed], components }).then(() => true, () => false);
     }
-    await this.logging.send(guild.id, 'security', embed, components, { event: 'antiraid' });
+    const logged = await this.logging.send(guild.id, 'security', embed, components, { event: 'antiraid' });
+    delivered = delivered || logged === true;
+    if (!delivered && a.fallback) delivered = await this.#fallback(guild, embed);
+    return delivered;
+  }
+
+  /** Repli d'une alerte critique perdue : MP au propriétaire, sinon salon système (sans boutons). */
+  async #fallback(guild, embed) {
+    const payload = {
+      content: `${ICONS.warning} **Alerte AntiRaid** sur **${escapeMarkdown(String(guild.name ?? guild.id)).slice(0, 100)}** : ni le salon d'alerte ni les logs sécurité n'ont pu la recevoir (salon supprimé, logs coupés ou permissions). Vérifiez /antiraid et /logs.`,
+      embeds: fitEmbeds([embed]),
+      allowedMentions: { parse: [] },
+    };
+    const owner = guild.ownerId ? await this.client.users?.fetch?.(guild.ownerId).catch(() => null) : null;
+    if (owner && (await owner.send(payload).then(() => true, () => false))) return true;
+    const system = guild.systemChannel;
+    const me = guild.members?.me;
+    if (typeof system?.send !== 'function') return false;
+    if (me && typeof system.permissionsFor === 'function' && !system.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) return false;
+    return system.send(payload).then(() => true, () => false);
   }
 }
 

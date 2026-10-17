@@ -124,3 +124,79 @@ test('R29 : vague en mode ban, les comptes récents déjà bannis ne sont pas re
   assert.equal(res.punished, true);
   assert.deepEqual(w.banned.sort(), ['frais', 'vieux1', 'vieux2'], 'un compte banni deux fois');
 });
+
+// ---------------------------------------------------------------- R30
+
+/** Service AntiRaid dont les logs sécurité sont injoignables (salon supprimé / débranché / en pause). */
+function lostAlertWorld({ logged = false, ownerDm = true, system = true } = {}) {
+  const dms = [];
+  const systemPosts = [];
+  const channelPosts = [];
+  const executor = {
+    id: 'nuker',
+    roles: { cache: new Collection([['r1', { id: 'r1', editable: true, permissions: { any: () => false }, toString: () => '<@&r1>' }]]), remove: async () => {} },
+    user: { id: 'nuker', tag: 'nuker', toString: () => '<@nuker>', displayAvatarURL: () => null },
+  };
+  const guild = {
+    id: G,
+    name: 'Serveur',
+    ownerId: 'owner',
+    members: { cache: new Map(), fetch: async () => executor, me: { id: 'bot' } },
+    roles: { everyone: { id: G, permissions: { any: () => false } } },
+    channels: { cache: new Collection() },
+    systemChannel: system ? { id: 'sys', send: async (p) => systemPosts.push(p), permissionsFor: () => ({ has: () => true }) } : null,
+  };
+  const cfg = {
+    antiraid: { enabled: true, channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, destructiveWindowSeconds: 10, punishExecutor: 'strip', alertChannel: 'deleted-alert', joinThreshold: 50, joinWindowSeconds: 10 },
+    whitelist: { users: [], roles: [] },
+    logChannels: { security: null },
+  };
+  const client = {
+    user: { id: 'bot' },
+    services: {},
+    channels: { fetch: async (id) => (id === 'alive' ? { id, send: async (p) => channelPosts.push(p) } : Promise.reject(new Error('Unknown Channel'))) },
+    users: { fetch: async (id) => ({ id, send: async (p) => (ownerDm ? dms.push([id, p]) : Promise.reject(new Error('Cannot send messages to this user'))) }) },
+  };
+  const service = new AntiRaidService({ client, config: { get: () => cfg }, logging: { send: async () => logged } });
+  return { service, guild, cfg, dms, systemPosts, channelPosts };
+}
+
+const nuke = async (w) => {
+  for (let i = 0; i < 3; i += 1) await w.service.handleDestructive(w.guild, 'nuker', 'channelDelete');
+};
+
+test('R30 : alerte de destruction sans salon d\'alerte ni logs sécurité → MP au propriétaire', async () => {
+  const w = lostAlertWorld();
+  await nuke(w);
+  assert.equal(w.dms.length, 1, 'alerte perdue sans repli');
+  const [to, payload] = w.dms[0];
+  assert.equal(to, 'owner');
+  assert.match(json(payload.embeds[0]).title, /Activité destructrice/);
+  assert.match(payload.content, /Serveur/);
+  assert.deepEqual(payload.allowedMentions, { parse: [] });
+  assert.equal(payload.components, undefined, 'boutons du serveur inutilisables en MP');
+  assert.equal(w.systemPosts.length, 0);
+});
+
+test('R30 : MP du propriétaire fermés → repli sur le salon système', async () => {
+  const w = lostAlertWorld({ ownerDm: false });
+  await nuke(w);
+  assert.equal(w.dms.length, 0);
+  assert.equal(w.systemPosts.length, 1, 'aucun repli quand le MP échoue');
+  assert.match(json(w.systemPosts[0].embeds[0]).title, /Activité destructrice/);
+});
+
+test('R30 : alerte bien reçue (logs sécurité ou salon d\'alerte) → aucun repli ; alertes ordinaires jamais en MP', async () => {
+  const delivered = lostAlertWorld({ logged: true });
+  await nuke(delivered);
+  assert.equal(delivered.dms.length + delivered.systemPosts.length, 0);
+  const alertChannel = lostAlertWorld();
+  alertChannel.cfg.antiraid.alertChannel = 'alive';
+  await nuke(alertChannel);
+  assert.equal(alertChannel.channelPosts.length, 1);
+  assert.equal(alertChannel.dms.length + alertChannel.systemPosts.length, 0);
+  // Alerte non critique (nouveau membre sanctionné) : pas de MP au propriétaire.
+  const quiet = lostAlertWorld();
+  await quiet.service.alert(quiet.guild, { tone: 'caution', title: 'Nouveau membre expulsé' });
+  assert.equal(quiet.dms.length + quiet.systemPosts.length, 0);
+});

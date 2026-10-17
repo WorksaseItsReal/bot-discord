@@ -72,3 +72,50 @@ test('R29 : raid de comptes récents dont le bannissement échoue → alerte d\'
     await h.close();
   }
 });
+
+/** Messages du bot dans ses MP avec `userId`. */
+const dmsTo = (h, mark, userId) => botMessages(h, mark, (m) => h.fake.dms.get(m.channel_id)?.recipients?.[0]?.id === userId);
+
+test('R30 : nuke qui commence par supprimer #logs (alerte + logs sécurité) → alerte en MP au propriétaire', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll(); // salon d'alerte = logs sécurité = #logs
+    h.configure({ antiraid: { channelDeleteThreshold: 3, punishExecutor: 'strip' } });
+    const mark = h.fake.messageLog.length;
+    for (const key of ['logs', 'rules', 'announcements', 'staff']) {
+      const id = IDS.channels[key];
+      const ch = h.fake.channels.get(id);
+      h.fake.channels.delete(id);
+      h.fake.dispatchNow('CHANNEL_DELETE', ch, `suppression de #${ch.name}`);
+      await h.settle();
+      await h.auditEntry({ action_type: 12, target_id: id, user_id: IDS.users.mod });
+    }
+    await h.settle({ timeout: 10_000 });
+    assert.equal(h.client.services.config.get(h.guild.id).logChannels.security, null, 'logs sécurité débranchés');
+    const dms = dmsTo(h, mark, IDS.users.owner);
+    assert.equal(dms.length, 1, 'alerte de destruction perdue sans repli');
+    assert.match(dms[0].embeds[0].title, /Activité destructrice/);
+    assert.match(dms[0].content, /ni le salon d'alerte ni les logs sécurité/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R30 : catégorie Sécurité mise en pause dans /logs → la vague d\'arrivées arrive quand même au propriétaire', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ logs: { disabledCategories: ['security'] }, antiraid: { joinThreshold: 3, minAccountAgeDays: 0, action: 'lockdown' } });
+    const mark = h.fake.messageLog.length;
+    for (let i = 0; i < 3; i += 1) await h.memberJoin(h.addUser(`Vague${i}`));
+    await h.settle();
+    assert.equal(botMessages(h, mark, titled(/Vague d'arrivées/)).filter((m) => !h.fake.dms.has(m.channel_id)).length, 0, 'pause ignorée');
+    const dms = dmsTo(h, mark, IDS.users.owner);
+    assert.equal(dms.length, 1, 'alerte de vague coupée par la pause des logs');
+    assert.match(dms[0].embeds[0].title, /Vague d'arrivées/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
