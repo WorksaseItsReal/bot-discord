@@ -378,3 +378,25 @@ test('R96 : /emoji info ne révèle pas le nom d\'un autre serveur du bot dont l
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* R93 : /serverinfo « Salons »                                          */
+/* ------------------------------------------------------------------ */
+
+test('R93 : /serverinfo « Salons » ne liste pas les catégories privées à un membre (la gestion les voit)', async () => {
+  const h = await setup();
+  try {
+    const g = h.guild;
+    const cat = await g.channels.create({ name: 'Enquête interne', type: ChannelType.GuildCategory, permissionOverwrites: [{ id: g.id, type: OverwriteType.Role, deny: P.ViewChannel }] });
+    await g.channels.create({ name: 'preuves', type: ChannelType.GuildText, parent: cat.id });
+    await h.settle();
+    const rec = await h.slash('serverinfo', [], { as: 'member' });
+    const click = await h.click(h.messagesOf(rec)[0], 'cmd:serverinfo:channels', { as: 'member' });
+    assert.doesNotMatch(JSON.stringify(h.messagesOf(click)[0].embeds), /Enquête interne/, 'catégorie privée montrée à un membre');
+    const adm = await h.slash('serverinfo', [], { as: 'admin' });
+    const admClick = await h.click(h.messagesOf(adm)[0], 'cmd:serverinfo:channels', { as: 'admin' });
+    assert.match(JSON.stringify(h.messagesOf(admClick)[0].embeds), /Enquête interne/);
+  } finally {
+    await h.close();
+  }
+});

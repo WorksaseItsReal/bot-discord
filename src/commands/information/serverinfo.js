@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder, ChannelType } = require('discord.js');
+const { SlashCommandBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
 const { discordTimestamp } = require('../../utils/time');
 const { card, field, wide, ICONS, code, subtext, userLine, linkButton, actionButton, buttonRows } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
@@ -118,9 +118,11 @@ module.exports = {
     async channels(interaction) {
       const guild = guildOnlyCheck(interaction);
       const c = channelCounts(guild.channels.cache);
-      const categories = [...guild.channels.cache.filter((ch) => ch.type === ChannelType.GuildCategory).values()]
+      // Seules les catégories (et salons) que l'auteur peut voir sont nommées : jamais une catégorie privée.
+      const sees = (ch) => Boolean(ch.permissionsFor?.(interaction.member)?.has(PermissionFlagsBits.ViewChannel));
+      const categories = [...guild.channels.cache.filter((ch) => ch.type === ChannelType.GuildCategory && sees(ch)).values()]
         .sort((a, b) => a.rawPosition - b.rawPosition)
-        .map((cat) => `${ICONS.category} **${cat.name}** · ${cat.children?.cache?.size ?? 0}`);
+        .map((cat) => `${ICONS.category} **${cat.name}** · ${cat.children?.cache?.filter(sees).size ?? 0}`);
       const rules = guild.rulesChannelId ? `<#${guild.rulesChannelId}>` : null;
       const system = guild.systemChannelId ? `<#${guild.systemChannelId}>` : null;
       const afk = guild.afkChannelId ? `<#${guild.afkChannelId}>` : null;
