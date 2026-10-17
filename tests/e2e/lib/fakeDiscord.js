@@ -100,6 +100,28 @@ class FakeDiscord {
     this.commands = [];
     this.routes = [];
     this.#defineRoutes();
+    this.#loadRoutePlugins();
+  }
+
+  /**
+   * Routes ajoutées par fonctionnalité : chaque fichier de fakeRoutes/ exporte
+   * `(fake, route, helpers) => {}` (chargés par ordre alphabétique, après les routes de base).
+   * `route(method, pattern, handler, { prepend })` : `prepend` place la route avant celles
+   * de base (sinon la première route qui correspond gagne). `helpers.error(call, status, code,
+   * message, errors)` construit une DiscordAPIError comme les routes de base.
+   */
+  #loadRoutePlugins() {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = path.join(__dirname, 'fakeRoutes');
+    if (!fs.existsSync(dir)) return;
+    const route = (method, pattern, handler, { prepend = false } = {}) => {
+      const entry = { method, ...compileRoute(pattern), handler: handler.bind(this) };
+      if (prepend) this.routes.unshift(entry);
+      else this.routes.push(entry);
+    };
+    const helpers = { error: (...args) => this.#error(...args) };
+    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js')).sort()) require(path.join(dir, file))(this, route, helpers);
   }
 
   /* ------------------------------------------------------------------ */

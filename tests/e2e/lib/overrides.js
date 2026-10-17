@@ -163,4 +163,18 @@ const OVERRIDES = {
   'voice cleanup': { salon: IDS.channels.voice },
 };
 
+// Valeurs ajoutées par fonctionnalité : chaque fichier de overrides.d/ exporte un objet de la même
+// forme (fusionnés par ordre alphabétique ; une clé déjà définie est une erreur, pas un écrasement).
+const fs = require('node:fs');
+const path = require('node:path');
+
+const EXTRA_DIR = path.join(__dirname, 'overrides.d');
+for (const file of fs.existsSync(EXTRA_DIR) ? fs.readdirSync(EXTRA_DIR).filter((f) => f.endsWith('.js')).sort() : []) {
+  const extra = require(path.join(EXTRA_DIR, file));
+  for (const [key, value] of Object.entries(extra)) {
+    if (Object.hasOwn(OVERRIDES, key)) throw new Error(`overrides.d/${file} : la clé « ${key} » est déjà définie.`);
+    OVERRIDES[key] = value;
+  }
+}
+
 module.exports = { OVERRIDES, freshMember, throwawayChannel };
