@@ -624,7 +624,7 @@ test('/role modifier : couleur hexadécimale ou « aucune » ; sous-commande dé
 
 test('/channel : info + sous-commandes de gestion ; noms nettoyés', () => {
   const subs = channel.data.toJSON().options.map((o) => o.name);
-  assert.deepEqual(subs, ['info', 'creer', 'supprimer', 'cloner', 'renommer', 'sujet', 'nsfw']);
+  assert.deepEqual(subs, ['info', 'creer', 'supprimer', 'cloner', 'renommer', 'sujet', 'nsfw', 'renouveler']);
   assert.equal(channel.cleanChannelName('  mon   salon '), 'mon salon');
   assert.throws(() => channel.cleanChannelName('   '), /vide/);
   assert.throws(() => channel.cleanChannelName('x'.repeat(101)), /trop long/);
