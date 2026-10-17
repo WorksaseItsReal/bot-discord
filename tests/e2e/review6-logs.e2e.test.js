@@ -463,3 +463,57 @@ test('R54 : sans « Joindre des fichiers », la purge est journalisée sans tran
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R55
+
+test('R55 : changer ou retirer le rôle staff retire l\'accès de l\'ancien rôle aux salons de logs', async () => {
+  const h = await createHarness();
+  try {
+    const panel = await panelOf(h, 'admin');
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    await h.click(panel, 'cmd:logs:staff', { as: 'admin', values: [IDS.roles.gamer], componentType: ROLE_MENU });
+    await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    const cfg1 = h.client.services.config.get(h.guild.id).logs;
+    const ids = [cfg1.categoryId, ...cfg1.createdChannels];
+    const gamer = h.guild.members.cache.get(IDS.users.member); // porte le rôle Joueur
+    assert.ok(ids.every((id) => h.client.channels.cache.get(id).permissionsFor(gamer).has(P.ViewChannel)));
+
+    // Plus de rôle staff : le tableau de bord prévient que l'ancien rôle garde l'accès jusqu'à « Créer ».
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    await h.click(panel, 'cmd:logs:staff', { as: 'admin', values: [], componentType: ROLE_MENU });
+    assert.match(JSON.stringify(h.message(panel.id).embeds), /garde l'accès/);
+    await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    for (const id of ids) {
+      const ch = h.client.channels.cache.get(id);
+      assert.ok(!ch.permissionOverwrites.cache.has(IDS.roles.gamer), `#${ch.name} : surcharge de l'ancien rôle staff conservée`);
+      assert.ok(!ch.permissionsFor(gamer).has(P.ViewChannel), `#${ch.name} : l'ancien rôle staff voit encore le salon`);
+    }
+    // Nouveau rôle staff : posé partout, y compris sur les salons hors du plan (réparation partielle).
+    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+    await h.click(panel, 'cmd:logs:staff', { as: 'admin', values: [IDS.roles.mod], componentType: ROLE_MENU });
+    await h.click(panel, 'cmd:logs:create', { as: 'admin' });
+    const mod = h.guild.members.cache.get(IDS.users.mod);
+    assert.ok(ids.every((id) => h.client.channels.cache.get(id).permissionsFor(mod).has(P.ViewChannel)));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R55 : un salon de logs créé par le bot rendu visible par @everyone est signalé', async () => {
+  const h = await createHarness();
+  try {
+    const cfg = await adminCreatesLogs(h, { categories: ['messages'] });
+    const raw = h.fake.channels.get(cfg.logChannels.messages);
+    raw.permission_overwrites = raw.permission_overwrites.filter((o) => o.id !== IDS.roles.everyone);
+    raw.permission_overwrites.push({ id: IDS.roles.everyone, type: 0, allow: String(P.ViewChannel), deny: '0' });
+    h.fake.dispatchNow('CHANNEL_UPDATE', raw, 'salon de logs rendu public');
+    await h.settle();
+    const panel = await panelOf(h, 'admin');
+    await h.click(panel, 'cmd:logs:nav', { as: 'admin', values: ['cat:messages'] });
+    assert.match(JSON.stringify(h.message(panel.id).embeds), /visible par @everyone/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

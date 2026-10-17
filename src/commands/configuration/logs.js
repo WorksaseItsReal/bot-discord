@@ -132,9 +132,9 @@ function repairable(client, guild) {
   });
 }
 
-/** Le salon est-il visible par @everyone (et non créé par le bot) ? */
+/** Le salon est-il visible par @everyone (salons créés par le bot compris : leurs permissions ont pu changer) ? */
 function isPublic(guild, cfg, channelId) {
-  if (!channelId || cfg.logs?.createdChannels?.includes(channelId)) return false;
+  if (!channelId) return false;
   const channel = guild.channels?.cache?.get(channelId);
   const everyone = guild.roles?.everyone;
   if (!channel?.permissionsFor || !everyone) return false;
@@ -306,6 +306,9 @@ function setupView(client, guild, notice) {
   const plan = planChannels(layoutKey, selected);
   const staff = cfg.logs?.staffRoleId && guild.roles?.cache?.has(cfg.logs.staffRoleId) ? cfg.logs.staffRoleId : null;
   const existing = cfg.logs?.categoryId && guild.channels?.cache?.get(cfg.logs.categoryId);
+  // Rôle staff posé sur les salons existants, différent de celui choisi : appliqué au prochain « Créer ».
+  const applied = cfg.logs?.appliedStaffRoleId ?? null;
+  const pending = existing && applied && applied !== staff;
 
   const roleMenu = new RoleSelectMenuBuilder().setCustomId('cmd:logs:staff').setPlaceholder('Rôle staff qui pourra lire les logs (optionnel)').setMinValues(0).setMaxValues(1);
   if (staff) roleMenu.setDefaultRoles(staff);
@@ -324,6 +327,7 @@ function setupView(client, guild, notice) {
           '2. Choisissez le **rôle staff** qui pourra lire (sans écrire).',
           '3. Cliquez sur **Créer les salons**.',
           existing ? `\n${ICONS.info} Une catégorie de logs existe déjà (${existing}) : elle sera complétée, rien ne sera dupliqué.` : null,
+          pending ? `\n${ICONS.warning} Le rôle staff a changé : <@&${applied}> garde l'accès aux salons de logs jusqu'à ce que vous cliquiez sur **Créer les salons**.` : null,
         ],
         fields: [
           field(LAYOUTS[layoutKey].emoji, 'Disposition', LAYOUTS[layoutKey].label),

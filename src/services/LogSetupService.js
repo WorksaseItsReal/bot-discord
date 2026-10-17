@@ -107,12 +107,27 @@ class LogSetupService {
     const perms = overwrites(guild, staffRoleId);
     const auditReason = reason ?? 'Création automatique des salons de logs';
     const known = new Set(cfg.createdChannels ?? []);
+    // Rôle staff réellement posé (null : aucun ou inconnu, anciennes versions) et rôle posé cette fois.
+    const staffNow = perms.some((o) => o.id === staffRoleId) ? staffRoleId : null;
+    const staffBefore = cfg.appliedStaffRoleId ?? null;
     // Chaque étape est enregistrée AUSSITÔT : un échec en cours de route ne laisse
     // aucun salon « orphelin », et une nouvelle tentative les réutilise.
     const remember = (patch) => this.config.update(guild.id, patch);
 
     let category = cfg.categoryId ? guild.channels.cache.get(cfg.categoryId) : null;
     if (category && category.type !== ChannelType.GuildCategory) category = null;
+    // Rôle staff changé ou retiré : l'ancien perd l'accès à TOUS les salons du bot (et à la
+    // catégorie), le nouveau l'obtient partout, même hors du plan (réparation partielle).
+    if (staffBefore !== staffNow) {
+      const staffEntry = perms.filter((o) => o.id === staffNow);
+      const owned = [category, ...[...known].map((id) => guild.channels.cache.get(id))].filter(Boolean);
+      for (const channel of owned) {
+        if (staffBefore && channel.permissionOverwrites?.cache?.has(staffBefore)) {
+          await channel.permissionOverwrites.delete(staffBefore, auditReason).catch(() => {});
+        }
+        await mergeOverwrites(channel, staffEntry, auditReason);
+      }
+    }
     if (category) {
       await mergeOverwrites(category, perms, auditReason);
     } else {
@@ -174,6 +189,7 @@ class LogSetupService {
         categoryId: category.id,
         createdChannels: [...known],
         staffRoleId: staffRoleId ?? null,
+        appliedStaffRoleId: staffNow,
         disabledCategories: (cfg.disabledCategories ?? []).filter((c) => !mapping[c]),
       },
     });

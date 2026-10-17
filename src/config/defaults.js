@@ -26,6 +26,7 @@ const defaultGuildConfig = Object.freeze({
     ignoredChannels: [],     // messages de ces salons (et de leurs fils) non journalisés
     ignoreBots: true,        // messages des bots non journalisés
     staffRoleId: null,       // rôle qui peut lire les salons de logs créés automatiquement
+    appliedStaffRoleId: null, // rôle staff réellement posé sur ces salons (son accès est retiré s'il change)
     categoryId: null,        // catégorie « Logs » créée automatiquement
     createdChannels: [],     // salons créés par le bot (pour le nettoyage)
     setup: { layout: 'perCategory', categories: ['moderation', 'messages', 'members', 'roles', 'channels', 'voice', 'security', 'automod', 'server'] },
