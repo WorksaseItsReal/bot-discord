@@ -3,6 +3,7 @@
 const { PermissionFlagsBits, PermissionsBitField } = require('discord.js');
 const { UserError } = require('../core/errors');
 const { permissionLabel } = require('./permissionNames');
+const { defaultGuildConfig } = require('../config/defaults');
 
 /**
  * Secur (anti-nuke) : source UNIQUE des modules, préréglages, bornes et niveaux de sécurité.
@@ -95,10 +96,11 @@ function own(obj, key) {
   return typeof key === 'string' && !FORBIDDEN_KEYS.has(key) && obj != null && Object.prototype.hasOwnProperty.call(obj, key);
 }
 
-/** Réglages d'un module, défauts compris. Pur. */
+/** Réglages d'un module : défauts communs, défauts propres au module (defaults.js), valeurs stockées. Pur. */
 function moduleConfig(cfg, key) {
+  const own_ = own(defaultGuildConfig.secur?.modules, key) ? defaultGuildConfig.secur.modules[key] : {};
   const stored = own(cfg?.secur?.modules, key) ? cfg.secur.modules[key] : null;
-  return { ...MODULE_DEFAULTS, ...(stored && typeof stored === 'object' ? stored : {}) };
+  return { ...MODULE_DEFAULTS, ...own_, ...(stored && typeof stored === 'object' ? stored : {}) };
 }
 
 /** Mode effectif d'un module (valeur inconnue → off). Pur. */

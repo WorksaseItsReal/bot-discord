@@ -112,7 +112,8 @@ class UndoQueue {
     this.size = 0;
     if (this.running) {
       let t;
-      await Promise.race([this.running.catch(() => {}), new Promise((r) => { t = setTimeout(r, waitMs); t.unref?.(); })]);
+      // Minuteur NON « unref » (borné à waitMs) : il doit réveiller l'arrêt même si plus rien ne tourne.
+      await Promise.race([this.running.catch(() => {}), new Promise((r) => { t = setTimeout(r, waitMs); })]);
       clearTimeout(t);
     }
     return dropped;
