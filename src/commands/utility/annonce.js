@@ -165,6 +165,15 @@ function assertChannel(interaction, channelId) {
   return channel;
 }
 
+/**
+ * Permissions de l'auteur dans le salon de PUBLICATION (surcharges comprises) : « Mentionner
+ * @everyone » refusé dans ce salon doit l'emporter sur la permission du salon de la commande.
+ */
+function permsIn(interaction, channelId) {
+  const channel = interaction.guild?.channels?.cache?.get(channelId);
+  return interaction.member && typeof channel?.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : interaction.memberPermissions;
+}
+
 /** Brouillon de l'auteur, ou UserError. */
 function ownDraft(client, interaction, id) {
   const row = /^\d{1,10}$/.test(id ?? '') ? client.repositories.announcements.get(interaction.guildId, Number(id)) : null;
@@ -211,7 +220,7 @@ module.exports = {
     const repeat = interaction.options.getString('repetition') ?? 'none';
     if (!REPEATS[repeat]) throw new UserError('Répétition inconnue.');
     const role = interaction.options.getRole('role');
-    assertMentionAllowed(guild, role?.id ?? null, interaction.memberPermissions);
+    assertMentionAllowed(guild, role?.id ?? null, permsIn(interaction, channel.id));
     if (client.repositories.announcements.countScheduled(guild.id) >= MAX_SCHEDULED) {
       throw new UserError(`${MAX_SCHEDULED} annonces programmées au maximum : supprimez-en une avec \`/annonce liste\`.`);
     }
@@ -244,7 +253,7 @@ module.exports = {
       guard(interaction);
       const draft = ownDraft(client, interaction, id);
       assertChannel(interaction, draft.channel_id);
-      assertMentionAllowed(interaction.guild, draft.role_id, interaction.memberPermissions);
+      assertMentionAllowed(interaction.guild, draft.role_id, permsIn(interaction, draft.channel_id));
       const repo = client.repositories.announcements;
       if (repo.countScheduled(interaction.guildId) >= MAX_SCHEDULED) throw new UserError(`${MAX_SCHEDULED} annonces programmées au maximum.`);
       let runAt = draft.next_run;
@@ -287,7 +296,11 @@ module.exports = {
       const row = client.repositories.announcements.get(interaction.guildId, Number(id));
       if (row?.status === 'sending') throw new UserError('Cette annonce est déjà en cours de publication.');
       if (!row || row.status !== 'scheduled') throw new UserError('Cette annonce n\'est plus programmée.');
-      assertMentionAllowed(interaction.guild, row.role_id, interaction.memberPermissions);
+      const perms = permsIn(interaction, row.channel_id);
+      if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+        throw new UserError(`Vous ne pouvez pas écrire dans <#${row.channel_id}> : vous ne pouvez pas y publier cette annonce.`);
+      }
+      assertMentionAllowed(interaction.guild, row.role_id, perms);
       await interaction.deferUpdate();
       let notice;
       try {

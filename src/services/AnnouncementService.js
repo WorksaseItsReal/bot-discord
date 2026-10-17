@@ -131,7 +131,9 @@ class AnnouncementService {
    * @returns {Promise<string|null>} raison du refus (définitif), ou null
    */
   async #authorMentionIssue(guild, row) {
-    return mentionAuthorIssue(guild, { roleId: row.role_id, authorId: row.author_id });
+    // Vérifié dans le salon de publication : une surcharge qui y refuse « Mentionner @everyone » l'emporte.
+    const channel = guild.channels?.cache?.get(row.channel_id) ?? null;
+    return mentionAuthorIssue(guild, { roleId: row.role_id, authorId: row.author_id, channel });
   }
 
   /**
@@ -157,6 +159,12 @@ class AnnouncementService {
     const row = this.repo.get(guild.id, id);
     if (row?.status === 'sending') throw new UserError('Cette annonce est déjà en cours de publication.');
     if (!row || row.status !== 'scheduled') throw new UserError('Cette annonce n\'est plus programmée.');
+    // Comme à l'échéance : l'auteur doit toujours pouvoir faire cette mention dans le salon.
+    const mentionIssue = await this.#authorMentionIssue(guild, row);
+    if (mentionIssue) {
+      await this.#disable(guild, row, mentionIssue);
+      throw new UserError(`Annonce non publiée : ${mentionIssue}. Elle a été désactivée.`);
+    }
     // Réservation atomique : le second clic (ou le scheduler) trouve la ligne déjà prise.
     if (!this.repo.reserve(row.id)) throw new UserError('Cette annonce est déjà en cours de publication.');
     let result;

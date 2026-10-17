@@ -252,3 +252,69 @@ test('R100 /alertes dans un fil privé : vérifications d\'appartenance bornées
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R80 : /annonce et « Mentionner @everyone »
+
+async function modWithEveryoneDeniedIn(h, channelKey) {
+  updateRole(h, IDS.roles.mod, (p) => p | P.ManageGuild | P.MentionEveryone, 'préparation : Modérateur gère le serveur');
+  const ch = h.fake.channels.get(IDS.channels[channelKey]);
+  const updated = { ...ch, permission_overwrites: [...ch.permission_overwrites, { id: IDS.roles.mod, type: 0, allow: '0', deny: P.MentionEveryone.toString() }] };
+  h.fake.channels.set(ch.id, updated);
+  h.fake.dispatchNow('CHANNEL_UPDATE', updated, `préparation : @everyone refusé au Modérateur dans #${channelKey}`);
+  await h.settle();
+}
+
+test('R80 /annonce : « Mentionner @everyone » vérifié dans le salon de publication (programmation, échéance, envoi immédiat)', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    await modWithEveryoneDeniedIn(h, 'general');
+    assert.equal(h.client.channels.cache.get(IDS.channels.general).permissionsFor(h.member('mod')).has(P.MentionEveryone), false);
+
+    // 1. Programmation depuis #staff vers #général : refusée.
+    const rec = await h.slash('annonce', sub('programmer', [opt('salon', 7, IDS.channels.general), opt('date', 3, '+2h'), opt('role', 8, IDS.guild)]), { as: 'mod', channel: 'staff' });
+    assert.ok(h.isError(rec), 'programmation acceptée malgré la surcharge');
+    assert.match(h.replyText(rec), /@everyone/);
+
+    // 2. Annonce déjà programmée (avant la surcharge, simulée en base) : désactivée à l'échéance.
+    const repo = h.client.repositories.announcements;
+    const now = Date.now();
+    const draftId = repo.createDraft({ guildId: h.guild.id, channelId: IDS.channels.general, authorId: IDS.users.mod, roleId: IDS.guild, repeat: 'none', timeZone: 'Europe/Paris', runAt: now + 3_600_000, now });
+    repo.setContent(h.guild.id, draftId, { title: 'Annonce', message: 'Réveil général', color: null, image: null });
+    repo.schedule(h.guild.id, draftId, now + 3_600_000, { anchorAt: now + 3_600_000, runs: 0 });
+    h.client.database.db.prepare('UPDATE scheduled_announcements SET next_run = ?, anchor_at = ? WHERE id = ?').run(now - 1000, now - 1000, draftId);
+    let mark = h.fake.calls.length;
+    await h.client.services.scheduler.tick();
+    await h.settle();
+    const posted = (m) => h.fake.calls.slice(m).filter((c) => c.method === 'POST' && c.route === `/channels/${IDS.channels.general}/messages` && c.body?.allowed_mentions?.parse?.includes('everyone'));
+    assert.equal(posted(mark).length, 0, '@everyone publié à l\'échéance malgré la surcharge');
+    assert.equal(repo.get(h.guild.id, draftId).status, 'disabled');
+
+    // 3. « Envoyer maintenant » d'une annonce programmée par l'admin, cliqué par le modérateur : refusé.
+    const second = repo.createDraft({ guildId: h.guild.id, channelId: IDS.channels.general, authorId: IDS.users.admin, roleId: IDS.guild, repeat: 'none', timeZone: 'Europe/Paris', runAt: now + 3_600_000, now });
+    repo.setContent(h.guild.id, second, { title: 'Annonce', message: 'Deuxième', color: null, image: null });
+    repo.schedule(h.guild.id, second, now + 3_600_000, { anchorAt: now + 3_600_000, runs: 0 });
+    const list = await h.slash('annonce', sub('liste'), { as: 'mod', channel: 'staff' });
+    const sendBtn = h.messagesOf(list)[0].components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith(`cmd:annonce:asend:${second}:`));
+    assert.ok(sendBtn, 'bouton « Envoyer maintenant » absent');
+    mark = h.fake.calls.length;
+    const click = await h.click(h.messagesOf(list)[0], sendBtn.custom_id, { as: 'mod', channel: 'staff' });
+    await h.settle();
+    assert.equal(posted(mark).length, 0, '@everyone publié par « Envoyer maintenant » malgré la surcharge');
+    assert.match(h.replyText(click), /@everyone/);
+    assert.equal(repo.get(h.guild.id, second).status, 'scheduled');
+
+    // 4. Témoin : l'admin (Administrateur) publie normalement.
+    const list2 = await h.slash('annonce', sub('liste'), { as: 'admin', channel: 'staff' });
+    const btn2 = h.messagesOf(list2)[0].components.flatMap((r) => r.components).find((c) => c.custom_id?.startsWith(`cmd:annonce:asend:${second}:`));
+    mark = h.fake.calls.length;
+    await h.click(h.messagesOf(list2)[0], btn2.custom_id, { as: 'admin', channel: 'staff' });
+    await h.settle();
+    assert.equal(posted(mark).length, 1, 'annonce de l\'admin non publiée');
+    assert.equal(h.problems().massMentions.length, 1, 'seul le @everyone légitime de l\'admin est publié');
+    h.fake.massMentions.length = 0;
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -324,7 +324,11 @@ function annWorld() {
   const author = H.fakeMember(guild, H.USER.mod);
   author.permissions = new PermissionsBitField(PermissionFlagsBits.MentionEveryone);
   guild.members.cache.set(author.id, author);
-  return { guild, client, repo, service, author, channel: guild.channels.cache.get(H.CH.general) };
+  const channel = guild.channels.cache.get(H.CH.general);
+  // Vue d'un membre dans le salon : ses permissions (aucune surcharge) ; le bot garde la sienne.
+  const botView = channel.permissionsFor;
+  channel.permissionsFor = (target) => (target && target !== guild.members.me && target.permissions ? target.permissions : botView(target));
+  return { guild, client, repo, service, author, channel };
 }
 
 function scheduled(repo, { runAt = Date.now() - 1000, repeat = 'none', roleId = GUILD } = {}) {
