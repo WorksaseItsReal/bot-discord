@@ -25,7 +25,7 @@ const { securRequirements } = require('./securityAudit');
  * @property {string} guildId
  * @property {string|null} ownerId propriétaire du serveur
  * @property {object} cfg configuration du serveur
- * @property {Array<object>} modules état des 18 modules (services.secur.moduleStatus)
+ * @property {Array<object>} modules état des modules déclarés (services.secur.moduleStatus)
  * @property {boolean} canEdit niveau owner (modifications)
  * @property {boolean} canManageOwners propriétaire (ou OWNER_IDS de confiance)
  * @property {boolean} isGuildOwner
@@ -118,7 +118,7 @@ function navRow(current) {
 
 const backHome = () => actionButton({ command: 'secur', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
 
-/** Menu « Ouvrir un module » (18 options). Pur. */
+/** Menu « Ouvrir un module » (une option par module, 25 au plus). Pur. */
 function moduleSelect(modules) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()

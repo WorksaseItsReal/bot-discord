@@ -174,7 +174,7 @@ class SecurService {
     return this.registry.keys().some((k) => S.moduleMode(cfg, k) !== 'off');
   }
 
-  /** État des 18 modules déclarés (panneau, section statut). */
+  /** État des modules déclarés (panneau, section statut). */
   moduleStatus(guildId) {
     const cfg = this.config.get(guildId);
     return S.MODULE_KEYS.map((key) => ({

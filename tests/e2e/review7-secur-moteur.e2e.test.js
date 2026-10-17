@@ -657,3 +657,269 @@ test('S43 : rôle soutien (statut), membre hors cache puis PRESENCE_UPDATE sans 
     await h.close();
   }
 });
+
+/* ========================================================================================== */
+/* Périmètre, journal, audit                                                                  */
+/* ========================================================================================== */
+
+const S = require('../../src/utils/secur');
+const embedText = (m) => (m?.embeds ?? []).flatMap((e) => [e.title, e.description, ...(e.fields ?? []).flatMap((f) => [f.name, f.value])]).filter(Boolean).join('\n');
+const updatedMsg = (h, rec) => h.message(rec.componentMessageId ?? rec.original);
+
+/* ------------------------------------------------------------------------------------------ */
+/* S13 : seuil ban/kick hérité par Secur                                                       */
+/* ------------------------------------------------------------------------------------------ */
+
+async function raiseBanThreshold(h, as, value) {
+  const dash = await h.slash('antiraid', [], { as });
+  const view = await h.click(h.message(dash.original), 'cmd:antiraid:nav', { as, values: ['destructive'] });
+  const text = embedText(updatedMsg(h, view));
+  const form = await h.click(updatedMsg(h, view), 'cmd:antiraid:set:destructive', { as });
+  const saved = await h.submitModal(form, { channelDeleteThreshold: '', roleDeleteThreshold: '', banThreshold: String(value), kickThreshold: '', destructiveWindowSeconds: '' }, { as });
+  return { text, saved };
+}
+
+test('S13 : relever via /antiraid le seuil « Bannissements » repris par Secur exige le niveau owner, et le relèvement est critique', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({
+      logChannels: { security: IDS.channels.logs },
+      antiraid: { enabled: false, banThreshold: 3, alertChannel: IDS.channels.logs },
+      automod: { enabled: false },
+      secur: { modules: { ban: { mode: 'on', limit: null } } },
+    });
+    const limit = () => S.effectiveLimit(h.client.services.config.get(h.guild.id), 'ban');
+    const { text, saved } = await raiseBanThreshold(h, 'admin', 100);
+    assert.doesNotMatch(text, /Bannissements \(mode on\)[^\n]*ne s'appliquent plus/, 'texte faux : ce seuil EST celui de Secur');
+    assert.match(text, /Repris par Secur/);
+    assert.ok(h.isError(saved), 'un admin non owner abaisse Secur via /antiraid');
+    assert.equal(limit(), 3);
+    // Owner : accepté, mais journalisé comme critique (carte critique + MP au propriétaire hors filtres).
+    const mark = h.fake.messageLog.length;
+    const ok = await raiseBanThreshold(h, 'owner', 100);
+    assert.ok(!h.isError(ok.saved), h.replyText(ok.saved));
+    assert.equal(limit(), 100);
+    await h.settle();
+    const critical = botMessages(h, mark, (m) => /Secur abaissé : Bannissements \(limite 3 → 100\)/.test(embedText(m)));
+    assert.ok(critical.length >= 1, 'relèvement du seuil Secur hérité non classé critique');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S13 (annexe) : un owner resserre /secur module ban de 50 (hérité) à 10 → jamais classé « Secur abaissé »', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({ logChannels: { security: IDS.channels.logs }, antiraid: { enabled: false, banThreshold: 50 }, automod: { enabled: false }, secur: { modules: { ban: { mode: 'on', limit: null } } } });
+    const mark = h.fake.messageLog.length;
+    const rec = await h.slash('secur', [{ name: 'module', type: 1, options: [opt('module', 3, 'ban'), opt('mode', 3, 'on'), opt('seuil', 4, 10)] }], { as: 'owner' });
+    assert.ok(!h.isError(rec), h.replyText(rec));
+    await h.settle();
+    assert.equal(S.effectiveLimit(h.client.services.config.get(h.guild.id), 'ban'), 10);
+    assert.equal(botMessages(h, mark, (m) => /Secur abaissé/.test(embedText(m))).length, 0, 'resserrement classé « Secur abaissé (limite 3 → 10) »');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S15 : le bot perd « Voir les logs du serveur »                                              */
+/* ------------------------------------------------------------------------------------------ */
+
+/** Bot sans Administrateur ; co-admin au-dessus de lui ; entrées d'audit remises au bot SEULEMENT s'il a « Voir les logs » (règle de Discord). */
+async function blindHarness() {
+  const h = await createHarness({ botAdministrator: false });
+  h.configureAll();
+  h.configure({ logChannels: { security: IDS.channels.general }, antiraid: { alertChannel: IDS.channels.general }, secur: { modules: { channelDelete: { mode: 'on' } } } });
+  h.fake.roles.get(IDS.roles.admin).position = 8;
+  h.guild.roles.cache.get(IDS.roles.admin).rawPosition = 8;
+  const viewAudit = () => {
+    const m = h.fake.members.get(IDS.users.bot);
+    let bits = BigInt(h.fake.roles.get(h.guild.id).permissions);
+    for (const r of m?.roles ?? []) bits |= BigInt(h.fake.roles.get(r)?.permissions ?? 0);
+    return (bits & P.Administrator) !== 0n || (bits & P.ViewAuditLog) !== 0n;
+  };
+  const orig = h.fake.dispatchNow.bind(h.fake);
+  h.fake.dispatchNow = (t, d, label) => (t === 'GUILD_AUDIT_LOG_ENTRY_CREATE' && !viewAudit() ? undefined : orig(t, d, label));
+  return h;
+}
+const blindAlerts = (h, mark) => botMessages(h, mark, titled(/Secur est aveugle|Secur affaibli/));
+
+test('S15 : un co-admin retire « Voir les logs » au rôle du bot → alerte critique (salon + MP au propriétaire) avant le nuke invisible', async () => {
+  const h = await blindHarness();
+  try {
+    const mark = h.fake.messageLog.length;
+    const botRole = h.fake.roles.get(IDS.roles.bot);
+    await h.asHuman('admin').editRole(IDS.roles.bot, { permissions: String(BigInt(botRole.permissions) & ~P.ViewAuditLog) });
+    await h.settle();
+    const alerts = blindAlerts(h, mark);
+    assert.ok(alerts.some(inGuild(h)), 'perte de « Voir les logs » sans alerte');
+    assert.ok(alerts.some((m) => h.fake.dms.get(m.channel_id)?.recipients?.[0]?.id === IDS.users.owner), 'propriétaire non prévenu en MP');
+    assert.match(embedText(alerts[0]), /Voir les logs/);
+    // Une permission accordée au bot (réglage d'un admin) ne déclenche rien.
+    const again = h.fake.messageLog.length;
+    await h.asHuman('admin').editRole(IDS.roles.bot, { permissions: String(BigInt(h.fake.roles.get(IDS.roles.bot).permissions) | P.ViewAuditLog) });
+    await h.settle();
+    assert.equal(blindAlerts(h, again).length, 0);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S15 : rôle non géré qui donnait « Gérer les rôles » retiré au bot → alerte « Secur affaibli » ; Secur coupé → aucune alerte', async () => {
+  const h = await blindHarness();
+  try {
+    const botRole = h.fake.roles.get(IDS.roles.bot);
+    botRole.permissions = String(BigInt(botRole.permissions) & ~P.ManageRoles);
+    h.fake.dispatchNow('GUILD_ROLE_UPDATE', { guild_id: h.guild.id, role: botRole });
+    const keeper = addRole(h, { name: 'Gardien', permissions: P.ManageRoles, position: 2 });
+    giveRoles(h, IDS.users.bot, [keeper.id]);
+    await h.settle();
+    const mark = h.fake.messageLog.length;
+    await h.asHuman('admin').removeRole('bot', keeper.id);
+    await h.settle();
+    const alerts = blindAlerts(h, mark).filter(inGuild(h));
+    assert.equal(alerts.length, 1, 'perte de « Gérer les rôles » sans alerte');
+    assert.match(embedText(alerts[0]), /Gérer les rôles/);
+    // Secur coupé (et AntiRaid coupé) : rien à protéger, aucune alerte.
+    h.configure({ antiraid: { enabled: false }, secur: { modules: { channelDelete: { mode: 'off' } } } });
+    giveRoles(h, IDS.users.bot, [keeper.id]);
+    await h.settle();
+    const quiet = h.fake.messageLog.length;
+    await h.asHuman('admin').removeRole('bot', keeper.id);
+    await h.settle();
+    assert.equal(blindAlerts(h, quiet).length, 0);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S16 : timeouts en masse et suppressions de fils                                             */
+/* ------------------------------------------------------------------------------------------ */
+
+async function addPlain(h, name) {
+  const u = h.addUser(name, { ageDays: 900 });
+  const m = rawMember(u, [], 300);
+  h.fake.members.set(u.id, m);
+  h.fake.dispatchNow('GUILD_MEMBER_ADD', { ...m, guild_id: h.guild.id });
+  await h.settle();
+  return u.id;
+}
+
+test('S16 : préréglage max — un modérateur met 6 membres en timeout 27 jours → incident, dérank, timeouts levés', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({ logChannels: { security: IDS.channels.logs }, antiraid: { enabled: false }, automod: { enabled: false } });
+    const { defaultGuildConfig } = require('../../src/config/defaults');
+    h.configure({ secur: { modules: S.presetPatch('max', defaultGuildConfig.secur.modules) } });
+    assert.ok(h.client.services.secur.registry.has('timeout'), 'module « timeout » absent');
+    const victims = [];
+    for (let i = 0; i < 6; i += 1) victims.push(await addPlain(h, `Muet${i}`));
+    const until = new Date(Date.now() + 27 * 86_400_000).toISOString();
+    for (const id of victims) await h.asHuman('mod').perform('PATCH', `/guilds/${h.guild.id}/members/${id}`, { communication_disabled_until: until }).catch(() => {});
+    await drain(h);
+    const [incident] = incidentsOf(h);
+    assert.ok(incident, 'timeouts en masse sans incident, même en max');
+    assert.match(String(incident.modules), /timeout/);
+    assert.equal(hasRole(h, IDS.users.mod, IDS.roles.mod), false, 'modérateur non sanctionné');
+    const still = victims.filter((id) => h.fake.members.get(id)?.communication_disabled_until);
+    assert.equal(still.length, 0, `timeouts non levés : ${still.length}/6`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S16 : préréglage on — suppression de 5 posts de forum (audit 112) → incident ; un timeout retiré n\'est jamais compté', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({ logChannels: { security: IDS.channels.logs }, antiraid: { enabled: false }, automod: { enabled: false } });
+    const { defaultGuildConfig } = require('../../src/config/defaults');
+    h.configure({ secur: { modules: S.presetPatch('on', defaultGuildConfig.secur.modules) } });
+    // Lever un timeout (retour à la normale) : jamais destructeur.
+    const muted = await addPlain(h, 'DejaMuet');
+    h.fake.members.get(muted).communication_disabled_until = new Date(Date.now() + 3_600_000).toISOString();
+    for (let i = 0; i < 6; i += 1) await h.auditEntry({ action_type: 24, target_id: muted, user_id: IDS.users.mod, changes: [{ key: 'communication_disabled_until', old_value: new Date(Date.now() + 3_600_000).toISOString() }] });
+    await drain(h);
+    assert.equal(incidentsOf(h).length, 0, 'levée de timeout comptée');
+    const limit = S.effectiveLimit(h.client.services.config.get(h.guild.id), 'threadDelete');
+    for (let i = 0; i < limit; i += 1) await h.auditEntry({ action_type: 112, target_id: nextId(), user_id: IDS.users.mod, changes: [{ key: 'name', old_value: `post-${i}` }, { key: 'type', old_value: 11 }] });
+    await drain(h);
+    const [incident] = incidentsOf(h);
+    assert.ok(incident, 'suppressions de fils sans incident');
+    assert.equal(hasRole(h, IDS.users.mod, IDS.roles.mod), false);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S33 : mode strict et restrictions posées par le propriétaire                                */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S33 : /ban restreinte par le propriétaire (sanctions lourdes) → un administrateur ne peut pas couper le mode strict ; le propriétaire le peut', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const perm = (name, options, as) => h.slash('permissions', sub(name, options), { as });
+    const assigned = await perm('commande', [opt('nom', 3, 'ban'), opt('niveau', 4, 3)], 'owner');
+    assert.ok(!h.isError(assigned), h.replyText(assigned));
+    h.configure({ permissions: { strict: true } });
+    const home = await perm('panneau', [], 'admin');
+    const panel = h.messagesOf(home)[0];
+    const view = await h.click(panel, 'cmd:permissions:nav', { as: 'admin', values: ['strict'] });
+    const strictMsg = h.message(view.componentMessageId ?? panel.id);
+    const off = await h.click(strictMsg, 'cmd:permissions:strict:off', { as: 'admin' });
+    assert.ok(h.isError(off), 'un administrateur neutralise la restriction du propriétaire');
+    assert.match(h.replyText(off), /propriétaire/);
+    assert.equal(h.client.services.permissions.settings(h.guild.id).strict, true);
+    const byOwner = await h.click(strictMsg, 'cmd:permissions:strict:off', { as: 'owner' });
+    assert.ok(!h.isError(byOwner), h.replyText(byOwner));
+    assert.equal(h.client.services.permissions.settings(h.guild.id).strict, false);
+    // Réactiver reste ouvert aux administrateurs (cela ne fait que restreindre).
+    const on = await h.click(h.message(strictMsg.id), 'cmd:permissions:strict:on', { as: 'admin' });
+    assert.ok(!h.isError(on), h.replyText(on));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* S46 : correction C1 et « Mentionner @everyone » du bot                                      */
+/* ------------------------------------------------------------------------------------------ */
+
+test('S46 : C1 prévient que le bot perdra « Mentionner @everyone » ; /invite le demande et /diagnostics le signale ensuite', async () => {
+  const { INVITE_PERMISSIONS } = require('../../src/commands/utility/invite');
+  assert.ok(INVITE_PERMISSIONS.includes('MentionEveryone'), '/invite ne demande pas « Mentionner @everyone »');
+  const h = await createHarness({ botAdministrator: false });
+  try {
+    h.configureAll();
+    const everyonePerms = () => BigInt(h.fake.roles.get(IDS.roles.everyone).permissions);
+    await h.asHuman('owner').editRole(IDS.roles.everyone, { permissions: String(everyonePerms() | P.MentionEveryone) });
+    await h.settle();
+    assert.ok(h.guild.members.me.permissions.has(P.MentionEveryone));
+    const rec = await h.slash('diagnostics', [], { as: 'admin' });
+    const msg = h.messagesOf(rec)[0];
+    await h.click(msg, 'cmd:diagnostics:audit', { as: 'admin' });
+    await h.settle();
+    let view = h.message(msg.id);
+    await h.click(view, 'cmd:diagnostics:fix:everyone_perms', { as: 'admin' });
+    view = h.message(msg.id);
+    assert.match(embedText(view), /perdrai moi-même[^\n]*Mentionner @everyone/, 'la confirmation ne prévient pas que le bot perd la permission');
+    await h.click(view, 'cmd:diagnostics:fixok:everyone_perms', { as: 'admin' });
+    await h.settle();
+    assert.equal(h.guild.members.me.permissions.has(P.MentionEveryone), false);
+    const rec2 = await h.slash('diagnostics', [], { as: 'admin' });
+    assert.match(JSON.stringify(h.messagesOf(rec2)[0].embeds), /Mentionner @everyone/, '/diagnostics ne signale pas la permission perdue');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

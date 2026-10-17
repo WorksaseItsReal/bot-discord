@@ -15,6 +15,9 @@ const INVITE_PERMISSIONS = [
   'BanMembers', 'ModerateMembers', 'MuteMembers', 'DeafenMembers', 'MoveMembers', 'ViewAuditLog', 'SendPolls', 'Connect',
   // /emoji ajouter|supprimer|renommer ; fils automatiques ; entretiens de candidature en fil privé.
   'ManageGuildExpressions', 'CreatePublicThreads', 'CreatePrivateThreads',
+  // Annonces @everyone, /embed notifier_tous, pings de rôles non mentionnables (raid ping, flux…) :
+  // sans elle sur le rôle du bot, la correction C1 de l'audit (@everyone) la lui retirerait.
+  'MentionEveryone',
 ];
 
 /** Emoji du bouton « Inviter » (identique dans /invite, /botinfo et /help). */

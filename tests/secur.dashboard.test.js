@@ -200,7 +200,7 @@ test('/secur : 10 options de premier niveau au plus 25, sections chargées (pann
   assert.ok(data.options.length <= 25);
   assert.equal(data.default_member_permissions, String(P.Administrator));
   const module = data.options.find((o) => o.name === 'module');
-  assert.equal(module.options.find((o) => o.name === 'module').choices.length, 18);
+  assert.equal(module.options.find((o) => o.name === 'module').choices.length, S.MODULE_KEYS.length);
   for (const o of data.options) assert.ok(o.description.length <= 100 && o.description.length > 0);
 });
 

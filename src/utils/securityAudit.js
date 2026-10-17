@@ -33,6 +33,8 @@ const MODULE_PERMS = Object.freeze({
   voiceKick: [],
   everyone: ['ManageMessages'],
   messagePurge: [],
+  timeout: ['ModerateMembers'],
+  threadDelete: [],
 });
 /** Permission du bot requise par la sanction d'un module. */
 const PUNISH_PERMS = Object.freeze({ none: [], derank: ['ManageRoles'], kick: ['KickMembers'], ban: ['BanMembers'] });
@@ -238,11 +240,17 @@ function auditSecurity(guild, cfg = {}, { now = Date.now(), groups = null, pendi
   // C1 — @everyone a une permission dangereuse.
   const everyone = everyoneRole(guild);
   const evBits = dangerousBits(everyone?.permissions);
+  // Bits que le bot ne tient QUE via @everyone (sans Administrateur) : la correction les lui retire.
+  const selfLost = isAdmin(myPerms) ? [] : evBits.filter((b) => !values(me?.roles?.cache).some((r) => r.id !== guild?.id && has(r.permissions, P[b])));
+  const myRole = me?.roles?.highest && me.roles.highest.id !== guild?.id ? ` ${me.roles.highest}` : '';
+  const selfWarning = selfLost.length
+    ? [`⚠️ Je perdrai moi-même ${selfLost.map((b) => `« ${permissionLabel(b)} »`).join(', ')} (je ne la tiens que par @everyone) : accordez-la d'abord à mon rôle${myRole}.`]
+    : [];
   push(evBits.length
     ? {
       id: 'C1', level: 'fail', label: '@everyone',
       text: `@everyone a des permissions dangereuses : ${evBits.map(permissionLabel).join(', ')}`,
-      fix: canTouchBits(myPerms, evBits) ? fixFor('everyone_perms', [`@everyone : retirer ${evBits.map((b) => `« ${permissionLabel(b)} »`).join(', ')}`], { bits: evBits }) : null,
+      fix: canTouchBits(myPerms, evBits) ? fixFor('everyone_perms', [`@everyone : retirer ${evBits.map((b) => `« ${permissionLabel(b)} »`).join(', ')}`, ...selfWarning], { bits: evBits }) : null,
     }
     : { id: 'C1', level: 'ok', label: '@everyone', text: '@everyone n\'a aucune permission dangereuse' });
 

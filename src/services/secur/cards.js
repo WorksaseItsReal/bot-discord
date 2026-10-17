@@ -138,6 +138,26 @@ function conflictCard({ moduleKey, targetKey, until }) {
   });
 }
 
+/**
+ * Carte « le bot a perdu une permission clé » (Secur aveugle ou affaibli). Pure.
+ * @param {{ lost: string[], blind: boolean }} opts libellés français des permissions perdues
+ */
+function botPermsCard({ lost, blind }) {
+  return card({
+    tone: 'danger',
+    section: 'security',
+    icon: ICONS.warning,
+    title: blind ? 'Secur est aveugle' : 'Secur affaibli',
+    description: blind
+      ? `J'ai perdu **Voir les logs du serveur** : Discord ne m'envoie plus aucune entrée du journal d'audit. **Plus aucune suppression, modification ni sanction faite hors du bot ne sera détectée ni annulée** (Secur et AntiRaid).`
+      : 'J\'ai perdu une permission dont Secur a besoin pour annuler les actions et sanctionner leurs auteurs.',
+    fields: [
+      wide(ICONS.lock, 'Permissions perdues', lost.join(', ').slice(0, 1_000)),
+      wide(ICONS.info, 'Que faire ?', 'Rendez-les à mon rôle tout de suite. Si ce n\'était pas prévu, un compte qui peut modifier mon rôle est peut-être compromis : vérifiez le journal d\'audit.'),
+    ],
+  });
+}
+
 /** Carte du journal « tentative bloquée » (pré-contrôle). Pure. */
 function blockedCard({ userId, label, count, limit }) {
   return card({
@@ -177,5 +197,6 @@ module.exports = {
   grantCard,
   grantButtons,
   conflictCard,
+  botPermsCard,
   blockedCard,
 };

@@ -210,9 +210,9 @@ test('effectiveLimit : null hérite des seuils AntiRaid (3 si le seuil vaut 0), 
   assert.equal(S.effectiveLimit({ ...defaultGuildConfig }, 'ban'), defaultGuildConfig.antiraid.banThreshold);
 });
 
-test('configuration : les 18 modules déclarés ont leur bloc par défaut, tout coupé ; préréglages sans toucher punish ni undo', () => {
+test('configuration : les 20 modules déclarés ont leur bloc par défaut, tout coupé ; préréglages sans toucher punish ni undo', () => {
   assert.deepEqual(Object.keys(defaultGuildConfig.secur.modules).sort(), [...S.MODULE_KEYS].sort());
-  assert.equal(S.MODULE_KEYS.length, 18);
+  assert.equal(S.MODULE_KEYS.length, 20); // revue 7 (S16) : + timeout, threadDelete
   for (const key of S.MODULE_KEYS) assert.equal(defaultGuildConfig.secur.modules[key].mode, 'off', key);
   assert.equal(defaultGuildConfig.secur.modules.everyone.punish, 'none');
   const max = S.presetPatch('max', defaultGuildConfig.secur.modules);
