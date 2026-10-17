@@ -142,13 +142,22 @@ test('AntiRaid : /channel supprimer et /role delete comptent au nom du modérate
   h.configure({ antiraid: { enabled: true, joinThreshold: 1000, channelDeleteThreshold: 3, roleDeleteThreshold: 3, destructiveWindowSeconds: 60, punishExecutor: 'strip' } });
   try {
     let mark = h.fake.messageLog.length;
+    // ADM2 : /channel supprimer est pré-contrôlé. Les deux premières suppressions, signées par le
+    // bot, comptent au nom du modérateur : la 3ᵉ, qui atteindrait le seuil, est refusée d'emblée.
     for (let i = 0; i < 3; i += 1) {
       const id = await throwawayChannel(h, `nuke-${i}`);
-      await h.confirm(await h.slash('channel', sub('supprimer', [opt('salon', 7, id)]), { as: 'admin' }));
-      assert.ok(!h.fake.channels.has(id));
+      const rec = await h.slash('channel', sub('supprimer', [opt('salon', 7, id)]), { as: 'admin' });
+      if (i < 2) {
+        await h.confirm(rec);
+        assert.ok(!h.fake.channels.has(id));
+        continue;
+      }
+      assert.ok(h.isError(rec), 'suppression de salon au seuil proposée : les suppressions via le bot ne comptent pas');
+      assert.match(h.replyText(rec), /Action bloquée par la sécurité \(Suppression de salons\)/);
+      assert.ok(h.fake.channels.has(id));
     }
-    assert.equal(destructiveAlerts(h, mark).length, 1, 'suppressions de salons via le bot invisibles pour l\'AntiRaid');
-    assert.deepEqual(h.fake.members.get(IDS.users.admin).roles, [], 'rôles de l\'auteur non retirés');
+    assert.equal(destructiveAlerts(h, mark).length, 0, 'aucune suppression au seuil : aucune alerte');
+    assert.notDeepEqual(h.fake.members.get(IDS.users.admin).roles, [], 'auteur dérangé pour une suppression refusée');
 
     // Rôles : rétablit l'administrateur puis supprime trois rôles via /role delete.
     h.fake.members.get(IDS.users.admin).roles = [IDS.roles.admin];
