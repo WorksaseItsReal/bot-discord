@@ -177,8 +177,21 @@ class ApplicationService {
     this.tickets = tickets;
     /** Entretiens en cours d'ouverture (`guildId:id`) : anti double clic. */
     this.opening = new Set();
+    /** Panneaux en cours de publication (`guildId:formId`) : un double clic ne publie qu'un panneau. */
+    this.publishing = new Set();
     /** Dernier ping du rôle par formulaire (ms) : un candidat ne peut pas pinguer l'équipe en boucle. */
     this.lastPings = new Map();
+    // Tickets d'entretien : reconnus par le service des tickets (fermeture réservée à l'équipe,
+    // sans notation) ; leur fermeture remet à jour la carte de la candidature.
+    if (tickets) {
+      tickets.interviews = {
+        lookup: (guildId, channelId) => this.applications.getByInterviewChannel?.(guildId, channelId) ?? null,
+        closed: async (guild, app) => {
+          const fresh = this.applications.getApplication(guild.id, app.id) ?? app;
+          await this.refreshCard(guild, fresh);
+        },
+      };
+    }
   }
 
   // ------------------------------------------------------------ formulaires
@@ -313,7 +326,19 @@ class ApplicationService {
    * Publie (ou met à jour) le panneau dans son salon.
    * @returns {Promise<{ form: object, updated: boolean, url: string }>}
    */
-  async publishPanel(guild, form) {
+  async publishPanel(guild, current) {
+    const key = `${guild.id}:${current.id}`;
+    if (this.publishing.has(key)) throw new UserError('Le panneau est déjà en cours de publication : patientez un instant.');
+    this.publishing.add(key);
+    try {
+      // Relu : une publication précédente a pu mémoriser son panneau entre-temps.
+      return await this.#publishPanel(guild, this.applications.getForm(guild.id, current.id) ?? current);
+    } finally {
+      this.publishing.delete(key);
+    }
+  }
+
+  async #publishPanel(guild, form) {
     if (!form.panel_channel_id) throw new UserError('Choisissez d\'abord le salon du panneau.');
     const channel = guild.channels?.cache?.get(form.panel_channel_id) ?? (await guild.channels?.fetch?.(form.panel_channel_id).catch(() => null));
     if (!channel?.send || !TEXT_TYPES.includes(channel.type)) throw new UserError('Le salon du panneau est introuvable : choisissez-en un autre.');
@@ -444,6 +469,8 @@ class ApplicationService {
    */
   cardPayload(guild, app, { fit = false } = {}) {
     const st = STATUS[app.status] ?? STATUS.pending;
+    // Entretien terminé (salon supprimé) : ni lien mort, et le bouton « Entretien » revient.
+    const interviewOpen = Boolean(app.interview_channel_id && guild.channels?.cache?.has?.(app.interview_channel_id));
     const decided = app.status !== 'pending' && app.decided_at;
     const by = app.status === 'withdrawn' ? ' par le candidat' : app.reviewer_id ? ` par <@${app.reviewer_id}>` : '';
     const embed = card({
@@ -453,7 +480,7 @@ class ApplicationService {
       title: `Candidature #${app.id} · ${truncate(app.form_name, 100)}`,
       description: [
         `${st.emoji} **${st.label}**${decided ? `${by} ${discordTimestamp(app.decided_at, 'R')}` : ''}`,
-        app.interview_channel_id ? `${INTERVIEW_ICON} Entretien : <#${app.interview_channel_id}>` : null,
+        interviewOpen ? `${INTERVIEW_ICON} Entretien : <#${app.interview_channel_id}>` : null,
       ],
       fields: [
         field(ICONS.user, 'Candidat', `<@${app.user_id}>\n${code(app.user_id)}`),
@@ -468,7 +495,7 @@ class ApplicationService {
     });
     const pending = app.status === 'pending';
     const act = (action, label, emoji, style) => actionButton({ command: 'candidatures', action, args: [app.id], label, emoji, style });
-    const interview = app.interview_channel_id ? linkButton('Entretien', `https://discord.com/channels/${guild.id}/${app.interview_channel_id}`, INTERVIEW_ICON) : null;
+    const interview = interviewOpen ? linkButton('Entretien', `https://discord.com/channels/${guild.id}/${app.interview_channel_id}`, INTERVIEW_ICON) : null;
     const components = buttonRows(
       pending ? act('accept', 'Accepter', ICONS.success, ButtonStyle.Success) : null,
       pending ? act('reject', 'Refuser', ICONS.error, ButtonStyle.Danger) : null,

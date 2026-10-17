@@ -6,27 +6,59 @@ const { card, field, wide, ICONS, userLine, code, subtext, status, actionButton,
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 // transcriptLine : partagée avec les tickets (les messages ModMail sont surtout des cartes).
-const { fetchChannelHistory, channelGone, createInCategory, transcriptLine, TRANSCRIPT_MAX, attachmentFields, archiveContinuationCard } = require('./TicketService');
+const {
+  fetchChannelHistory,
+  channelGone,
+  createInCategory,
+  transcriptLine,
+  TRANSCRIPT_MAX,
+  attachmentFields,
+  archiveContinuationCard,
+  resolveArchiveChannel,
+  archiveFailedPayload,
+  snapshotsOf,
+} = require('./TicketService');
 const { sendTranscriptArchive } = require('../utils/transcriptArchive');
+const { selectMenu, row } = require('../utils/components');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('modmail');
 
 /** Durée du cache négatif « aucun serveur ModMail commun ». */
 const NO_GUILD_TTL_MS = 10 * 60_000;
+/** Délai pour choisir le serveur à contacter (membre de plusieurs serveurs ModMail). */
+const PICK_TTL_MS = 10 * 60_000;
+/** MP mis en attente au plus pendant ce choix. */
+const PICK_MAX_MESSAGES = 10;
+/** Serveurs proposés au plus (limite d'un menu Discord). */
+const PICK_MAX_GUILDS = 25;
 
 /** Section « nom du serveur » pour les cartes envoyées en MP. */
 function guildSection(guild) {
   return { emoji: ICONS.mail, label: guild?.name ? `ModMail · ${guild.name}` : 'ModMail' };
 }
 
-/** Liste des pièces jointes d'un message (liens). */
-function attachmentsList(message) {
-  const list = message.attachments ? [...message.attachments.values()] : [];
-  if (!list.length) return null;
-  return list.slice(0, 10).map((a) => `[${truncate(a.name ?? 'fichier', 60)}](${a.url})`).join('\n');
+/** Pièces jointes au plus reprises d'un MP (fichiers du message et des messages transférés). */
+const MAX_ATTACHMENT_LINKS = 40;
+/** Budget de caractères d'une carte relayée (limite Discord : 6000 par message, marge comprise). */
+const CARD_BUDGET = 5600;
+
+/** Liens des pièces jointes d'un MP, messages transférés compris (une ligne par fichier). Pur. */
+function attachmentLinks(message) {
+  const list = [message, ...snapshotsOf(message)].flatMap((m) => (m?.attachments?.values ? [...m.attachments.values()] : []));
+  return list.slice(0, MAX_ATTACHMENT_LINKS).map((a) => `[${truncate(String(a.name ?? 'fichier').replace(/[[\]\n]/g, '_'), 60)}](${a.url})`);
 }
 
+/** Lignes regroupées en blocs d'au plus `max` caractères (une ligne n'est jamais coupée). Pur. */
+function chunkLines(lines, max = 1024) {
+  const chunks = [];
+  for (const line of lines) {
+    const last = chunks[chunks.length - 1];
+    if (last && last.length + 1 + line.length <= max) chunks[chunks.length - 1] = `${last}\n${line}`;
+    else chunks.push(line.slice(0, max));
+  }
+  return chunks;
+}
 
 /** Transcript texte d'une conversation ModMail. Pur. */
 function buildTranscript(thread, channel, history) {
@@ -80,13 +112,16 @@ class ModmailService {
     );
   }
 
-  /** Traite un DM entrant : crée le thread si besoin, relaie au salon staff. */
-  async handleUserDM(message) {
+  /**
+   * Traite un DM entrant : crée le thread si besoin, relaie au salon staff.
+   * @param {{ guild?: import('discord.js').Guild }} [opts] guild : serveur choisi par le membre
+   */
+  async handleUserDM(message, opts = {}) {
     // Verrou par utilisateur : les DM d'un même membre sont traités en série
     // pour ne jamais créer deux salons ModMail en parallèle.
     const userId = message.author.id;
     const previous = this.#locks.get(userId) ?? Promise.resolve();
-    const run = previous.catch(() => {}).then(() => this.#handleUserDM(message));
+    const run = previous.catch(() => {}).then(() => this.#handleUserDM(message, opts));
     this.#locks.set(userId, run);
     try {
       return await run;
@@ -126,9 +161,9 @@ class ModmailService {
    * permissions…), le membre est prévenu que son message n'est pas parti, puis
    * l'erreur remonte (journalisée par l'événement messageCreate).
    */
-  async #handleUserDM(message) {
+  async #handleUserDM(message, opts = {}) {
     try {
-      await this.#relay(message);
+      await this.#relay(message, opts);
     } catch (err) {
       await message
         .reply({
@@ -144,13 +179,21 @@ class ModmailService {
     }
   }
 
-  async #relay(message) {
+  /**
+   * @param {import('discord.js').Message} message
+   * @param {{ lost?: object|null, guild?: import('discord.js').Guild|null }} [opts] lost : conversation
+   *   précédente dont le salon est devenu inaccessible au bot (signalée au staff dans la nouvelle
+   *   conversation) · guild : serveur choisi (sinon cherché parmi les serveurs communs)
+   */
+  async #relay(message, { lost = null, guild: chosen = null } = {}) {
     const userId = message.author.id;
     let guild = null;
     let channel = null;
+    /** Conversation précédente devenue inaccessible (signalée dans la carte d'ouverture). */
+    let previous = lost;
 
     // Conversation déjà ouverte : on la réutilise (si son salon existe encore).
-    const thread = this.modmail.getOpenByUser(userId);
+    const thread = lost ? null : this.modmail.getOpenByUser(userId);
     if (thread) {
       guild = this.client.guilds.cache.get(thread.guild_id) ?? null;
       channel = guild ? guild.channels.cache?.get?.(thread.channel_id) ?? (await guild.channels.fetch(thread.channel_id).catch(() => null)) : null;
@@ -165,16 +208,27 @@ class ModmailService {
             throw new Error(`Salon ModMail ${thread.channel_id} momentanément inaccessible (conversation #${thread.id}).`);
           }
           logger.warn(`ModMail : accès perdu au salon ${thread.channel_id} (conversation #${thread.id}), nouvelle conversation.`);
+          previous = thread;
         }
         this.modmail.close(thread.channel_id);
+        // Accès perdu : la nouvelle conversation s'ouvre sur le même serveur (sans redemander).
+        if (previous) chosen = guild;
         guild = null;
       }
     }
 
     if (!guild) {
-      // Déjà cherché récemment sans succès (et déjà prévenu) : on ignore sans rescanner.
-      if (this.isNoGuildCached(userId)) return;
-      guild = await this.#findGuild(userId);
+      if (chosen) {
+        guild = chosen;
+      } else {
+        // Déjà cherché récemment sans succès (et déjà prévenu) : on ignore sans rescanner.
+        if (this.isNoGuildCached(userId)) return;
+        const guilds = await this.#eligibleGuilds(userId);
+        // Plusieurs serveurs possibles : le membre choisit AVANT tout relais (jamais « le premier
+        // du cache » : son message privé partirait chez le staff d'une autre communauté).
+        if (guilds.length > 1) return this.#askGuild(message, guilds);
+        guild = guilds[0] ?? null;
+      }
     }
     if (!guild) {
       this.#rememberNoGuild(userId);
@@ -218,7 +272,7 @@ class ModmailService {
         content: staffRoleId ? `<@&${staffRoleId}>` : undefined,
         // Le client n'autorise que les mentions d'utilisateurs par défaut : le rôle staff doit être explicite.
         allowedMentions: { roles: staffRoleId && staffRoleId !== guild.id ? [staffRoleId] : [] },
-        embeds: [this.#openingCard(message.author, member)],
+        embeds: [this.#openingCard(message.author, member, previous)],
         components: this.controls(),
       });
 
@@ -243,12 +297,25 @@ class ModmailService {
         .catch(() => {});
     }
 
-    await channel.send({ embeds: [this.#incomingCard(message)] });
+    const [first, ...more] = this.#incomingCards(message);
+    try {
+      await channel.send({ embeds: [first] });
+    } catch (err) {
+      // Salon encore en cache mais devenu inaccessible au bot (surcharge retirée, Envoyer refusé) :
+      // sans issue, chaque MP échouerait indéfiniment. On ferme cette conversation et on en ouvre
+      // une nouvelle, où le staff est prévenu (une seule fois : jamais en boucle).
+      if (!thread || lost || (err?.code !== 50001 && err?.code !== 50013)) throw err;
+      logger.warn(`ModMail : accès perdu au salon ${thread.channel_id} (conversation #${thread.id}), nouvelle conversation.`);
+      this.modmail.close(thread.channel_id);
+      return this.#relay(message, { lost: thread, guild });
+    }
+    // Pièces jointes qui ne tiennent pas dans la première carte (6000 caractères par message).
+    for (const extra of more) await channel.send({ embeds: [extra] });
     await message.react(ICONS.mail).catch(() => {});
   }
 
   /** Carte d'ouverture côté staff : qui écrit, depuis quand il est là. */
-  #openingCard(user, member) {
+  #openingCard(user, member, lost = null) {
     return card({
       tone: 'brand',
       section: 'tickets',
@@ -262,6 +329,9 @@ class ModmailService {
         field('📥', 'Arrivée', member?.joinedTimestamp ? discordTimestamp(member.joinedTimestamp, 'R') : '*Inconnue*'),
         field(ICONS.role, 'Rôle principal', member && member.roles?.highest && member.roles.highest.id !== member.guild?.id ? `${member.roles.highest}` : '—'),
         field(ICONS.status, 'Statut', '🟢 Ouverte'),
+        lost
+          ? wide(ICONS.warning, 'Conversation précédente', `La conversation #${lost.id} (<#${lost.channel_id}>) m'est devenue inaccessible : elle a été fermée sans archive.`)
+          : null,
         wide(ICONS.help, 'Répondre', 'Bouton **✉️ Répondre** ou `/modmail reply`. Fermez avec **🔒 Fermer** ou `/modmail close`.'),
       ],
       thumbnail: user.displayAvatarURL?.({ size: 256 }) ?? null,
@@ -269,18 +339,40 @@ class ModmailService {
     });
   }
 
-  /** Message du membre relayé côté staff. */
-  #incomingCard(message) {
+  /**
+   * Message du membre relayé côté staff : texte (et texte des messages transférés), puis liens
+   * des pièces jointes répartis en champs de 1024 caractères ; ce qui ne tient pas dans la carte
+   * (6000 caractères par message) part dans des cartes de suite. Jamais de lien perdu.
+   * @returns {object[]} cartes (la première porte le texte)
+   */
+  #incomingCards(message) {
     const author = message.author;
-    const files = attachmentsList(message);
-    return card({
-      tone: 'neutral',
-      section: { emoji: '📥', label: `${author.tag ?? author.username} a écrit` },
-      description: truncate(message.content || '*(pièce jointe uniquement)*', 4000),
-      fields: files ? [wide('📎', 'Pièces jointes', files)] : [],
-      thumbnail: author.displayAvatarURL?.({ size: 64 }) ?? null,
-      footer: `Utilisateur ${author.id}`,
-    });
+    const section = { emoji: '📥', label: `${author.tag ?? author.username} a écrit` };
+    const forwarded = snapshotsOf(message)
+      .map((snap) => snap?.content)
+      .filter(Boolean)
+      .map((content) => `**↪️ Message transféré**\n${content.split('\n').map((l) => `> ${l}`).join('\n')}`);
+    const description = truncate([message.content, ...forwarded].filter(Boolean).join('\n\n') || '*(pièce jointe uniquement)*', 4000);
+    const chunks = chunkLines(attachmentLinks(message), 1024);
+    const label = (i) => (chunks.length > 1 ? `Pièces jointes (${i + 1}/${chunks.length})` : 'Pièces jointes');
+    const avatar = author.displayAvatarURL?.({ size: 64 }) ?? null;
+    const cards = [];
+    let fields = [];
+    let budget = CARD_BUDGET - description.length - section.label.length;
+    const push = () => {
+      const first = !cards.length;
+      cards.push(card({ tone: 'neutral', section, description: first ? description : subtext('Suite des pièces jointes.'), fields, thumbnail: first ? avatar : null, footer: `Utilisateur ${author.id}` }));
+      fields = [];
+      budget = CARD_BUDGET - section.label.length - 40;
+    };
+    for (const [i, chunk] of chunks.entries()) {
+      const cost = chunk.length + 40;
+      if (fields.length >= 10 || cost > budget) push();
+      fields.push(wide('📎', label(i), chunk));
+      budget -= cost;
+    }
+    push();
+    return cards;
   }
 
   async reply(channel, staff, content) {
@@ -321,6 +413,20 @@ class ModmailService {
     });
   }
 
+  /** Salons ModMail en cours de fermeture (double clic, nouvelle tentative d'archive). */
+  #closing = new Set();
+
+  /**
+   * Conversation fermable depuis ce salon : ouverte, ou déjà fermée mais dont le salon a été
+   * conservé faute d'archive (nouvelle tentative). Lève une UserError sinon.
+   */
+  assertClosable(channelId) {
+    const thread = this.modmail.getByChannel(channelId);
+    if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+    if (this.#closing.has(channelId)) throw new UserError('Cette conversation ModMail est déjà en cours de fermeture.');
+    return thread;
+  }
+
   /**
    * @param {import('discord.js').TextChannel} channel
    * @param {import('discord.js').User} [closedBy] auteur de la fermeture (pour l'archive)
@@ -329,13 +435,29 @@ class ModmailService {
   async close(channel, closedBy) {
     const thread = this.modmail.getByChannel(channel.id);
     if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
+    if (this.#closing.has(channel.id)) return false;
+    // Conversation déjà fermée dont le salon a été conservé (archive impossible) : nouvelle
+    // tentative d'archive, sans nouveau MP au membre.
+    const retry = thread.status === 'closed';
     // Garde atomique : seul le premier appel prévient le membre et supprime le salon.
-    if (!this.modmail.close(channel.id)) return false;
+    if (!retry && !this.modmail.close(channel.id)) return false;
+    this.#closing.add(channel.id);
+    try {
+      return await this.#close(channel, thread, closedBy, retry);
+    } finally {
+      this.#closing.delete(channel.id);
+    }
+  }
+
+  async #close(channel, thread, closedBy, retry) {
     const user = await this.client.users.fetch(thread.user_id).catch(() => null);
     const guild = channel.guild ?? this.client.guilds.cache.get(thread.guild_id);
     // Archive AVANT la suppression du salon (sinon l'historique est perdu).
-    await this.#archive(channel, thread, guild, user, closedBy).catch((e) => logger.warn('Archive ModMail impossible :', e?.message));
-    if (user) {
+    let archiveError = null;
+    await this.#archive(channel, thread, guild, user, closedBy).catch((e) => {
+      archiveError = e;
+    });
+    if (user && !retry) {
       await user
         .send({
           embeds: [
@@ -353,16 +475,39 @@ class ModmailService {
         })
         .catch(() => {});
     }
+    if (archiveError) {
+      // Jamais de suppression sans archive : la conversation reste fermée, le salon est conservé
+      // et le staff prévenu (refermer après correction publie l'archive et supprime le salon).
+      const logChannelId = this.config.get(guild.id).modmail?.logChannel;
+      logger.warn(`Archive ModMail #${thread.id} impossible, salon conservé :`, archiveError?.message ?? archiveError);
+      if (typeof channel.send === 'function') {
+        await channel
+          .send(archiveFailedPayload({
+            logChannelId,
+            error: archiveError,
+            what: 'Cette conversation',
+            components: buttonRows(actionButton({ command: 'modmail', action: 'close', label: 'Refermer', emoji: ICONS.lock, style: ButtonStyle.Danger })),
+          }))
+          .catch(() => {});
+      }
+      return true;
+    }
     await channel.delete().catch(() => {});
     return true;
   }
 
-  /** Publie le transcript (.txt) dans le salon de logs ModMail configuré (`modmail.logChannel`). */
+  /**
+   * Publie le transcript (.txt) dans le salon de logs ModMail configuré (`modmail.logChannel`).
+   * @returns {Promise<boolean>} false : aucune archive à publier (pas de salon, ou salon supprimé) ;
+   *   lève une erreur si l'archive n'a pas pu être publiée.
+   */
   async #archive(channel, thread, guild, user, closedBy) {
     const logChannelId = guild ? this.config.get(guild.id).modmail?.logChannel : null;
     if (!logChannelId || typeof channel.messages?.fetch !== 'function') return false;
-    const logCh = await guild.channels.fetch(logChannelId).catch(() => null);
-    if (!logCh?.isTextBased?.()) return false;
+    // null : salon d'archive supprimé (confirmé par Discord) ; accès refusé ou panne : levé.
+    const logCh = await resolveArchiveChannel(guild, logChannelId);
+    if (!logCh) return false;
+    if (!logCh.isTextBased?.()) throw new Error('le salon des transcripts n\'est pas un salon textuel');
     const history = await fetchChannelHistory(channel, TRANSCRIPT_MAX);
     const transcript = buildTranscript(thread, channel, history);
     const count = history?.messages.length ?? 0;
@@ -418,18 +563,92 @@ class ModmailService {
   }
 
   /**
-   * Trouve le serveur (avec ModMail activé) dont l'utilisateur est réellement
-   * membre. Aucun repli sur « le premier serveur » : cela ferait fuiter ses
-   * messages vers un serveur dont il ne fait pas partie.
+   * Serveurs (avec ModMail activé) dont l'utilisateur est réellement membre. Aucun repli sur
+   * « le premier serveur » : cela ferait fuiter ses messages vers un serveur dont il ne fait pas partie.
+   * @returns {Promise<import('discord.js').Guild[]>}
    */
-  async #findGuild(userId) {
+  async #eligibleGuilds(userId) {
+    const out = [];
     for (const guild of this.client.guilds.cache.values()) {
       if (!this.config.get(guild.id).modmail?.enabled) continue;
       const member = guild.members.cache.get(userId) ?? (await guild.members.fetch(userId).catch(() => null));
-      if (member) return guild;
+      if (member) out.push(guild);
     }
-    return null;
+    return out;
+  }
+
+  /** MP en attente du choix du serveur : utilisateur → { messages, until }. @type {Map<string, { messages: object[], until: number }>} */
+  #pending = new Map();
+
+  /** Met le MP en attente et demande (une fois) au membre quel serveur contacter. */
+  async #askGuild(message, guilds) {
+    const userId = message.author.id;
+    const now = Date.now();
+    const entry = this.#pending.get(userId);
+    if (entry && entry.until > now) {
+      if (entry.messages.length < PICK_MAX_MESSAGES) entry.messages.push(message);
+      return;
+    }
+    // Mémoire bornée : purge des choix expirés quand la table grossit.
+    if (this.#pending.size >= 1000) {
+      for (const [id, e] of this.#pending) if (e.until <= now) this.#pending.delete(id);
+    }
+    this.#pending.set(userId, { messages: [message], until: now + PICK_TTL_MS });
+    await message
+      .reply({
+        embeds: [
+          card({
+            tone: 'info',
+            section: guildSection(null),
+            icon: ICONS.mail,
+            title: 'Quel serveur voulez-vous contacter ?',
+            description: [
+              'Vous êtes membre de plusieurs serveurs qui utilisent ce ModMail.',
+              'Choisissez celui dont vous voulez joindre l\'équipe : votre message ne sera transmis qu\'après votre choix.',
+              subtext('Choix valable 10 minutes. Vos messages suivants seront transmis au même serveur.'),
+            ],
+          }),
+        ],
+        components: [
+          row(
+            selectMenu({
+              id: 'cmd:modmail:pick',
+              placeholder: 'Choisissez un serveur…',
+              options: guilds.slice(0, PICK_MAX_GUILDS).map((g) => ({ value: g.id, label: truncate(g.name ?? g.id, 100), emoji: ICONS.server })),
+            }),
+          ),
+        ],
+      })
+      .catch(() => {});
+  }
+
+  /**
+   * Choix du serveur par le membre (menu envoyé en MP) : revérifie qu'il est éligible, puis relaie
+   * les MP en attente à ce serveur.
+   * @returns {Promise<{ guild: import('discord.js').Guild, relayed: number, failed: number }>}
+   */
+  async choose(userId, guildId) {
+    const entry = this.#pending.get(userId);
+    if (!entry || entry.until <= Date.now()) {
+      this.#pending.delete(userId);
+      throw new UserError('Ce choix a expiré : écrivez-moi à nouveau pour contacter un serveur.');
+    }
+    const guild = (await this.#eligibleGuilds(userId)).find((g) => g.id === guildId);
+    if (!guild) throw new UserError('Ce serveur n\'est plus disponible pour le ModMail (ModMail désactivé ou vous n\'en êtes plus membre).');
+    this.#pending.delete(userId);
+    let relayed = 0;
+    let failed = 0;
+    for (const message of entry.messages) {
+      try {
+        await this.handleUserDM(message, { guild });
+        relayed += 1;
+      } catch (err) {
+        failed += 1;
+        logger.warn('ModMail : MP non transmis après le choix du serveur :', err?.message ?? err);
+      }
+    }
+    return { guild, relayed, failed };
   }
 }
 
-module.exports = { ModmailService, NO_GUILD_TTL_MS, buildTranscript, transcriptLine };
+module.exports = { ModmailService, NO_GUILD_TTL_MS, PICK_TTL_MS, buildTranscript, transcriptLine };

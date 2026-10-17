@@ -3,6 +3,7 @@
 const { card, field, ICONS, linkButton, buttonRows, status, subtext } = require('../utils/ui');
 const { button, row, resetSelectMenu, ButtonStyle } = require('../utils/components');
 const { UserError } = require('../core/errors');
+const { archiveIssue } = require('../services/TicketService');
 
 /**
  * Boutons et menus persistants du système de tickets.
@@ -31,6 +32,8 @@ function closeConfirmation(client, guild) {
   // Salon de transcripts supprimé depuis la configuration : ne pas promettre une archive.
   const cache = typeof guild === 'object' ? guild?.channels?.cache : null;
   const logChannel = configured && (!cache || cache.has(configured)) ? configured : null;
+  // Le bot ne peut pas y publier : l'archive échouera et le salon sera conservé (jamais supprimé sans archive).
+  const issue = logChannel && typeof guild === 'object' ? archiveIssue(guild, logChannel) : null;
   return {
     embeds: [
       card({
@@ -39,12 +42,14 @@ function closeConfirmation(client, guild) {
         icon: ICONS.lock,
         title: 'Fermer ce ticket ?',
         description: [
-          'Le salon sera **supprimé** 5 secondes après confirmation.',
-          logChannel
-            ? `Le transcript sera archivé dans <#${logChannel}>.`
-            : configured
-              ? `${ICONS.warning} Le salon de transcripts configuré n'existe plus : téléchargez le transcript avant de fermer si besoin.`
-              : `${ICONS.warning} Aucun salon de transcripts n'est configuré : téléchargez le transcript avant de fermer si besoin.`,
+          issue ? 'Le ticket sera **fermé** après confirmation.' : 'Le salon sera **supprimé** 5 secondes après confirmation.',
+          issue
+            ? `${ICONS.warning} Je ne peux pas archiver le transcript dans <#${logChannel}> : ${issue}. Le salon sera **conservé** tant que l'archive échoue.`
+            : logChannel
+              ? `Le transcript sera archivé dans <#${logChannel}>.`
+              : configured
+                ? `${ICONS.warning} Le salon de transcripts configuré n'existe plus : téléchargez le transcript avant de fermer si besoin.`
+                : `${ICONS.warning} Aucun salon de transcripts n'est configuré : téléchargez le transcript avant de fermer si besoin.`,
           subtext('Cette action est définitive.'),
         ],
       }),
@@ -114,14 +119,14 @@ module.exports = {
     if (action === 'transcript') {
       tickets.assertParticipant(interaction.member, record);
       await interaction.deferReply({ ephemeral: true });
-      return interaction.editReply(await tickets.transcriptPayload(interaction.channel));
+      return interaction.editReply(await tickets.transcriptPayload(interaction.channel, { userId: interaction.user.id }));
     }
     if (action === 'close') {
-      tickets.assertParticipant(interaction.member, record);
+      tickets.assertCanClose(interaction.member, record);
       return interaction.reply(closeConfirmation(client, interaction.guild ?? interaction.guildId));
     }
     if (action === 'closeconfirm') {
-      tickets.assertParticipant(interaction.member, record);
+      tickets.assertCanClose(interaction.member, record);
       // Un second clic pendant le délai est refusé par le service (UserError).
       await tickets.close(interaction.channel, interaction.user, {
         delayMs: 5000,

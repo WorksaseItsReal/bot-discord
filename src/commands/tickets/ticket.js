@@ -63,7 +63,7 @@ module.exports = {
     if (!record) throw new UserError('Cette commande doit être utilisée dans un salon de ticket.');
 
     if (sub === 'close') {
-      tickets.assertParticipant(interaction.member, record);
+      tickets.assertCanClose(interaction.member, record);
       return tickets.close(interaction.channel, interaction.user, {
         delayMs: 5000,
         onAccepted: () =>
@@ -81,7 +81,7 @@ module.exports = {
     if (sub === 'transcript') {
       tickets.assertParticipant(interaction.member, record);
       await interaction.deferReply({ ephemeral: true });
-      return interaction.editReply(await tickets.transcriptPayload(interaction.channel));
+      return interaction.editReply(await tickets.transcriptPayload(interaction.channel, { userId: interaction.user.id }));
     }
     if (sub === 'add' || sub === 'remove' || sub === 'rename') tickets.assertStaff(interaction.member);
     if (sub === 'add' || sub === 'remove') {

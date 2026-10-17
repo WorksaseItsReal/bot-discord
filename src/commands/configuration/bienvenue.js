@@ -403,7 +403,19 @@ function textChannel(interaction, id) {
   if (!/^\d{17,20}$/.test(id)) throw new UserError('Salon invalide.');
   const ch = interaction.guild.channels.cache.get(id);
   if (!ch || !TEXT_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel du serveur.');
+  assertAuthorCanPost(interaction, ch);
   return ch;
+}
+
+/**
+ * L'auteur doit lui-même pouvoir voir le salon et y écrire (comme /annonce et /flux) : sinon il
+ * ferait publier par le bot un texte qu'il rédige dans un salon qui lui est fermé.
+ */
+function assertAuthorCanPost(interaction, channel) {
+  const perms = interaction.member && typeof channel?.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+  if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+    throw new UserError(`Vous ne pouvez pas écrire dans <#${channel.id}> : choisissez un salon où vous avez le droit de publier.`);
+  }
 }
 
 /**
@@ -611,6 +623,7 @@ module.exports = {
       const msg = cfgOf(client, interaction.guildId)[kind];
       const state = channelState(interaction.guild, msg.channelId);
       if (state !== 'ok') throw new UserError(state === 'unset' ? 'Choisissez d\'abord un salon pour ce message.' : CHANNEL_HINTS[state]);
+      assertAuthorCanPost(interaction, interaction.guild.channels.cache.get(msg.channelId));
       await interaction.deferUpdate();
       const vars = selfVars(interaction);
       let notice;
@@ -703,6 +716,7 @@ module.exports = {
       if (issue) throw new UserError(`Le rôle de vérification est inutilisable : ${issue}.`);
       const state = channelState(guild, v.channelId);
       if (state !== 'ok') throw new UserError(state === 'unset' ? 'Choisissez d\'abord le salon du panneau.' : CHANNEL_HINTS[state]);
+      assertAuthorCanPost(interaction, guild.channels.cache.get(v.channelId));
       // Double clic : une seule publication à la fois par serveur (sinon deux panneaux, dont un orphelin).
       if (publishing.has(guild.id)) throw new UserError('Le panneau est déjà en cours de publication : patientez un instant.');
       publishing.add(guild.id);

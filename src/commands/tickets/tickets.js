@@ -17,7 +17,7 @@ const { card, field, wide, ICONS, subtext, bullets, actionButton, linkButton, bu
 const { discordTimestamp } = require('../../utils/time');
 const { fitList } = require('../../services/LoggingService');
 const { requirePermission } = require('../../services/ModerationService');
-const { supportRoles, MAX_REASONS } = require('../../services/TicketService');
+const { supportRoles, MAX_REASONS, archiveIssue, isPublicChannel, assertPrivateTranscripts } = require('../../services/TicketService');
 const { starBar, formatAverage, formatAvgDuration, parseStars, parseTicketId, MAX_COMMENT } = require('../../services/TicketRatingService');
 const { UserError } = require('../../core/errors');
 const { describeApiError } = require('../../core/apiErrors');
@@ -35,6 +35,8 @@ const { describeApiError } = require('../../core/apiErrors');
  */
 
 const SECTION = 'tickets';
+/** Publications du panneau en cours (serveur) : un double clic ne publie jamais deux panneaux. */
+const publishing = new Set();
 const TEXT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
 const MAX_STAFF = 10;
 const MAX_LIMIT = 10;
@@ -118,6 +120,17 @@ function publishFailure(channel, err) {
   return `${ICONS.error} Publication du panneau refusée par Discord dans ${channel} : ${detail}${code ? ` (code ${code})` : ''}`;
 }
 
+/**
+ * L'auteur doit lui-même pouvoir voir le salon et y écrire (comme /annonce et /flux) : sinon il
+ * ferait publier par le bot, aux couleurs du serveur, un texte libre dans un salon qui lui est fermé.
+ */
+function assertAuthorCanPost(interaction, channel) {
+  const perms = interaction.member && typeof channel?.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+  if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+    throw new UserError(`Vous ne pouvez pas écrire dans <#${channel.id}> : choisissez un salon où vous avez le droit de publier.`);
+  }
+}
+
 /** Inverse de parseReasons (préremplissage du formulaire). Pur. */
 const reasonsToText = (reasons = []) => reasons.map((r) => `${r.emoji ? `${r.emoji} ` : ''}${r.label}${r.description ? ` | ${r.description}` : ''}`).join('\n');
 
@@ -159,6 +172,15 @@ function panelLink(guildId, cfg) {
 }
 
 const has = (cache, id) => Boolean(id) && (!cache || cache.has(id));
+
+/** Salon des transcripts et ses problèmes (visible par tous, archive impossible). */
+function transcriptsValue(guild, id) {
+  const issues = [
+    guild && isPublicChannel(guild, id) ? `${ICONS.warning} visible par @everyone` : null,
+    guild && archiveIssue(guild, id) ? `${ICONS.warning} archive impossible (permissions)` : null,
+  ].filter(Boolean);
+  return [`<#${id}>`, ...issues].join('\n');
+}
 
 // ---------------------------------------------------------------- vues
 
@@ -265,7 +287,7 @@ function setupView(client, guild, notice) {
         fields: [
           field(ICONS.category, 'Catégorie', cfg.categoryId ? `<#${cfg.categoryId}>` : '*Aucune* (haut du serveur)'),
           field(ICONS.role, 'Staff', fitList(roles.map((r) => `<@&${r}>`), 1000) ?? '*Gérer les salons*'),
-          field(ICONS.history, 'Transcripts', cfg.logChannel ? `<#${cfg.logChannel}>` : '*Désactivés*'),
+          field(ICONS.history, 'Transcripts', cfg.logChannel ? transcriptsValue(guild, cfg.logChannel) : '*Désactivés*'),
           field(ICONS.count, 'Limite par membre', `**${max}** ticket${max > 1 ? 's' : ''} ouvert${max > 1 ? 's' : ''}`),
         ],
         footer: 'Videz un menu pour retirer le réglage',
@@ -534,6 +556,41 @@ const textValue = (interaction, id) => {
   }
 };
 
+/** Publie (ou met à jour) le panneau des tickets (verrou tenu par l'appelant). */
+async function publishPanel(interaction, client, cfg) {
+  await interaction.deferUpdate();
+  const guild = interaction.guild;
+  const channel = guild.channels?.cache?.get(cfg.panelChannelId) ?? (await guild.channels?.fetch?.(cfg.panelChannelId).catch(() => null));
+  let notice;
+  if (!channel?.send) {
+    notice = `${ICONS.error} Le salon du panneau est introuvable : choisissez-en un autre.`;
+  } else {
+    const payload = client.services.tickets.panel(guild);
+    let message = null;
+    let updated = false;
+    let failure = null;
+    const remember = (err) => {
+      failure = err;
+      return null;
+    };
+    if (cfg.panelMessageId) {
+      const existing = await channel.messages?.fetch?.(cfg.panelMessageId).catch(() => null);
+      if (existing?.edit) {
+        message = await existing.edit(payload).catch(remember);
+        updated = Boolean(message);
+      }
+    }
+    if (!message) message = await channel.send(payload).catch(remember);
+    if (message?.id) {
+      client.services.config.update(interaction.guildId, { tickets: { panelMessageId: message.id } });
+      notice = `${ICONS.success} Panneau ${updated ? 'mis à jour' : 'publié'} dans ${channel}.`;
+    } else {
+      notice = publishFailure(channel, failure);
+    }
+  }
+  await interaction.editReply(render(client, guild, 'home', notice));
+}
+
 // ---------------------------------------------------------------- commande
 
 module.exports = {
@@ -610,9 +667,17 @@ module.exports = {
         if (!/^\d{17,20}$/.test(id)) throw new UserError('Salon invalide.');
         const ch = interaction.guild.channels?.cache?.get(id);
         if (ch && !TEXT_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel.');
+        // Transcripts = conversations privées : jamais dans un salon lisible par tous.
+        assertPrivateTranscripts(interaction.guild, id);
       }
       client.services.config.update(interaction.guildId, { tickets: { logChannel: id } });
-      await interaction.update(setupView(client, interaction.guild, id ? `${ICONS.success} Transcripts archivés dans <#${id}>.` : `${ICONS.success} Archivage des transcripts désactivé.`));
+      const issue = id ? archiveIssue(interaction.guild, id) : null;
+      const notice = !id
+        ? `${ICONS.success} Archivage des transcripts désactivé.`
+        : issue
+          ? `${ICONS.warning} Transcripts archivés dans <#${id}>, mais ${issue} : tant que l'archive échoue, les tickets fermés sont conservés.`
+          : `${ICONS.success} Transcripts archivés dans <#${id}>.`;
+      await interaction.update(setupView(client, interaction.guild, notice));
     },
     /** Limite de tickets ouverts par membre. */
     async limit(interaction, client) {
@@ -629,6 +694,7 @@ module.exports = {
       if (!/^\d{17,20}$/.test(id ?? '')) throw new UserError('Salon invalide.');
       const ch = interaction.guild.channels?.cache?.get(id);
       if (ch && !TEXT_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel.');
+      if (ch) assertAuthorCanPost(interaction, ch);
       const cfg = cfgOf(client, interaction.guildId);
       // Changer de salon : le prochain envoi crée un nouveau panneau.
       const patch = { panelChannelId: id, ...(cfg.panelChannelId !== id ? { panelMessageId: null } : {}) };
@@ -659,37 +725,16 @@ module.exports = {
       guard(interaction);
       const cfg = cfgOf(client, interaction.guildId);
       if (!cfg.panelChannelId) throw new UserError('Choisissez d\'abord le salon du panneau (section **Panneau**).');
-      await interaction.deferUpdate();
-      const guild = interaction.guild;
-      const channel = guild.channels?.cache?.get(cfg.panelChannelId) ?? (await guild.channels?.fetch?.(cfg.panelChannelId).catch(() => null));
-      let notice;
-      if (!channel?.send) {
-        notice = `${ICONS.error} Le salon du panneau est introuvable : choisissez-en un autre.`;
-      } else {
-        const payload = client.services.tickets.panel(guild);
-        let message = null;
-        let updated = false;
-        let failure = null;
-        const remember = (err) => {
-          failure = err;
-          return null;
-        };
-        if (cfg.panelMessageId) {
-          const existing = await channel.messages?.fetch?.(cfg.panelMessageId).catch(() => null);
-          if (existing?.edit) {
-            message = await existing.edit(payload).catch(remember);
-            updated = Boolean(message);
-          }
-        }
-        if (!message) message = await channel.send(payload).catch(remember);
-        if (message?.id) {
-          client.services.config.update(interaction.guildId, { tickets: { panelMessageId: message.id } });
-          notice = `${ICONS.success} Panneau ${updated ? 'mis à jour' : 'publié'} dans ${channel}.`;
-        } else {
-          notice = publishFailure(channel, failure);
-        }
+      const cached = interaction.guild.channels?.cache?.get(cfg.panelChannelId);
+      if (cached) assertAuthorCanPost(interaction, cached);
+      // Double clic : une seule publication à la fois (sinon deux panneaux, dont un orphelin).
+      if (publishing.has(interaction.guildId)) throw new UserError('Le panneau est déjà en cours de publication : patientez un instant.');
+      publishing.add(interaction.guildId);
+      try {
+        await publishPanel(interaction, client, cfg);
+      } finally {
+        publishing.delete(interaction.guildId);
       }
-      await interaction.editReply(render(client, guild, 'home', notice));
     },
     /** Ouvre le formulaire des motifs. */
     async reasons(interaction, client) {

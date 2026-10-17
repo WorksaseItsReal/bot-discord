@@ -7,11 +7,18 @@ const { card, field, wide, ICONS, userLine, code, subtext, bullets, status } = r
 const { discordTimestamp, formatDuration } = require('../utils/time');
 const { UserError } = require('../core/errors');
 const { sendTranscriptArchive, ARCHIVE_FILE_MAX, ARCHIVE_TOTAL_MAX } = require('../utils/transcriptArchive');
+const { describeApiError } = require('../core/apiErrors');
+const { truncate } = require('../utils/embeds');
+const { createLogger } = require('../core/logger');
+
+const logger = createLogger('tickets');
 
 /** Nombre maximal de messages repris dans un transcript. */
 const TRANSCRIPT_MAX = 1000;
 /** Délai minimal entre deux ouvertures de ticket d'un même membre (évite les boucles qui pinguent le staff). */
 const OPEN_COOLDOWN_MS = 60_000;
+/** Délai entre deux transcripts demandés par un même membre dans un même ticket (jusqu'à 11 lectures d'historique chacun). */
+const TRANSCRIPT_COOLDOWN_MS = 15_000;
 /** Mention de transcript : les fichiers ne sont pas copiés, seuls leurs liens figurent. */
 const ATTACHMENTS_NOTE = 'Les pièces jointes ne sont pas archivées : seuls leurs liens figurent, et ils expirent une fois le salon supprimé.';
 /** Mention de transcript quand `tickets.archiveAttachments` est activé. */
@@ -27,6 +34,85 @@ function attachmentFields(summary) {
     field('📎', 'Pièces jointes', `**${archived}** archivée${archived > 1 ? 's' : ''}${skipped.length ? `\n${skipped.length} non archivée${skipped.length > 1 ? 's' : ''}` : ''}`),
     skipped.length ? wide(ICONS.warning, 'Non archivées', `${lines.join('\n')}${skipped.length > 10 ? `\n${subtext(`+${skipped.length - 10} autre(s) : voir la fin du transcript`)}` : ''}`) : null,
   ].filter(Boolean);
+}
+
+/** Permissions du bot nécessaires pour publier une archive (carte + fichier .txt). */
+const ARCHIVE_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.AttachFiles];
+
+/**
+ * Problème connu d'avance pour publier une archive dans le salon des transcripts (texte), ou
+ * null (salon absent du cache : vérifié à la fermeture). Pur.
+ */
+function archiveIssue(guild, channelId) {
+  const channel = channelId ? guild?.channels?.cache?.get(channelId) : null;
+  if (!channel) return null;
+  if (typeof channel.isTextBased === 'function' && !channel.isTextBased()) return 'ce n\'est pas un salon textuel';
+  const me = guild.members?.me;
+  const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
+  if (perms && !perms.has(ARCHIVE_PERMISSIONS)) return 'il me manque **Voir le salon**, **Envoyer des messages**, **Intégrer des liens** ou **Joindre des fichiers**';
+  return null;
+}
+
+/** Le salon est-il visible par @everyone ? (transcripts : conversations privées). Pur. */
+function isPublicChannel(guild, channelId) {
+  const channel = channelId ? guild?.channels?.cache?.get(channelId) : null;
+  const everyone = guild?.roles?.everyone ?? guild?.roles?.cache?.get?.(guild.id);
+  if (!channel?.permissionsFor || !everyone) return false;
+  try {
+    return channel.permissionsFor(everyone)?.has?.(PermissionFlagsBits.ViewChannel) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Refus d'un salon de transcripts visible par @everyone (UserError). */
+function assertPrivateTranscripts(guild, channelId, what = 'des tickets') {
+  if (isPublicChannel(guild, channelId)) {
+    throw new UserError(`<#${channelId}> est visible par @everyone : les transcripts (conversations privées ${what}) y seraient lisibles par tous. Choisissez un salon réservé à l'équipe.`);
+  }
+}
+
+/**
+ * Salon des transcripts au moment d'archiver : le salon, ou null s'il a été supprimé (confirmé
+ * par Discord, 10003 : la confirmation l'a annoncé). Toute autre erreur (accès, réseau) est levée.
+ */
+async function resolveArchiveChannel(guild, channelId) {
+  const cached = guild?.channels?.cache?.get?.(channelId);
+  if (cached) return cached;
+  try {
+    return (await guild.channels.fetch(channelId)) ?? null;
+  } catch (err) {
+    if (err?.code === 10003) return null;
+    throw err;
+  }
+}
+
+/** Cause lisible d'un échec d'archive. Pur. */
+function archiveFailureReason(err) {
+  return describeApiError(err).friendly ?? truncate(String(err?.message ?? err ?? 'erreur inconnue').replace(/\s+/g, ' '), 200);
+}
+
+/**
+ * Avertissement posté dans un salon conservé parce que son archive a échoué. Pur.
+ * @param {{ logChannelId: string, error: unknown, what?: string, components?: object[] }} opts
+ */
+function archiveFailedPayload({ logChannelId, error, what = 'Ce ticket', components = [] }) {
+  return {
+    embeds: [
+      card({
+        tone: 'warning',
+        section: 'tickets',
+        icon: ICONS.warning,
+        title: 'Archive impossible : salon conservé',
+        description: [
+          `Le transcript n'a pas pu être publié dans <#${logChannelId}>. ${what} est **fermé**, mais ce salon est conservé pour ne pas perdre l'historique.`,
+          subtext('Donnez-moi Voir le salon, Envoyer des messages, Intégrer des liens et Joindre des fichiers dans le salon des transcripts, puis refermez : l\'archive sera publiée et ce salon supprimé.'),
+        ],
+        fields: [wide(ICONS.error, 'Cause', archiveFailureReason(error))],
+      }),
+    ],
+    components,
+  };
 }
 
 /** Carte de suite d'une archive (pièces jointes envoyées en plusieurs messages). Pur. */
@@ -54,6 +140,13 @@ async function createInCategory(guild, options) {
   }
 }
 
+/** Messages transférés d'un message (`messageSnapshots`), ou []. Pur. */
+function snapshotsOf(message) {
+  const snaps = message?.messageSnapshots;
+  if (!snaps) return [];
+  return typeof snaps.values === 'function' ? [...snaps.values()] : Array.isArray(snaps) ? snaps : [];
+}
+
 /**
  * Une ligne de transcript : contenu, puis en-tête et texte de chaque embed (les
  * cartes du bot et les messages relayés sont des embeds), puis liens des pièces jointes. Pur.
@@ -66,7 +159,11 @@ function transcriptLine(m) {
     const body = e.description ?? e.data?.description;
     parts.push(`[${head || 'embed'}]${body ? ` ${body.replace(/\s+/g, ' ')}` : ''}`);
   }
-  const files = m.attachments?.size ? [...m.attachments.values()].map((a) => a.url) : [];
+  // Messages transférés (« Transférer ») : leur texte et leurs fichiers font partie de l'historique.
+  for (const snap of snapshotsOf(m)) {
+    if (snap?.content) parts.push(`[message transféré] ${snap.content}`);
+  }
+  const files = [m, ...snapshotsOf(m)].flatMap((x) => (x?.attachments?.size ? [...x.attachments.values()].map((a) => a.url) : []));
   if (files.length) parts.push(`[pièces jointes : ${files.join(', ')}]`);
   const at = new Date(m.createdTimestamp ?? Date.now()).toISOString();
   return `[${at}] ${m.author?.tag ?? m.author?.username ?? 'inconnu'}: ${parts.join(' ')}`;
@@ -169,6 +266,12 @@ class TicketService {
     this.logging = logging;
     /** Notation des tickets (TicketRatingService, facultatif) : prévenu à chaque fermeture. */
     this.ratings = ratings;
+    /**
+     * Tickets d'entretien de candidature (branché par ApplicationService) :
+     * lookup(guildId, channelId) → candidature | null ; closed(guild, candidature) après suppression.
+     * @type {{ lookup: (guildId: string, channelId: string) => object|null, closed: (guild: object, app: object) => Promise<void> } | null}
+     */
+    this.interviews = null;
     /** Créations en cours (`guildId:userId`) : évite les doublons sur double-clic. */
     this.creating = new Set();
     /** Salons de ticket en cours de fermeture. */
@@ -184,6 +287,25 @@ class TicketService {
     /** Dernière ouverture par membre (`guildId:userId` → horodatage). */
     this.lastOpened = new Map();
     this.openCooldownMs = OPEN_COOLDOWN_MS;
+    /** Transcripts en cours de génération (salon → promesse) : partagés entre demandes simultanées. */
+    this.transcriptJobs = new Map();
+    /** Dernier transcript demandé (`salon:membre` → horodatage). */
+    this.lastTranscript = new Map();
+    this.transcriptCooldownMs = TRANSCRIPT_COOLDOWN_MS;
+  }
+
+  /** Refuse un transcript redemandé trop tôt par le même membre dans le même ticket (synchrone). */
+  #assertTranscriptCooldown(channelId, userId, now = Date.now()) {
+    if (!userId) return;
+    const key = `${channelId}:${userId}`;
+    const last = this.lastTranscript.get(key);
+    if (last && now - last < this.transcriptCooldownMs) {
+      throw new UserError(`Transcript déjà demandé : patientez avant d'en générer un nouveau (${discordTimestamp(last + this.transcriptCooldownMs, 'R')}).`);
+    }
+    if (this.lastTranscript.size >= 1000) {
+      for (const [k, at] of this.lastTranscript) if (now - at >= this.transcriptCooldownMs) this.lastTranscript.delete(k);
+    }
+    this.lastTranscript.set(key, now);
   }
 
   /** Refuse une nouvelle ouverture trop rapprochée de la précédente (boucle ouverture/fermeture). */
@@ -218,6 +340,23 @@ class TicketService {
   assertParticipant(member, ticket) {
     if (member?.id === ticket.user_id || this.isStaff(member)) return;
     throw new UserError('Seuls l\'auteur du ticket et le support peuvent faire cela.');
+  }
+
+  /** Candidature dont ce ticket est l'entretien, ou null. */
+  interviewOf(ticket) {
+    try {
+      return this.interviews?.lookup(ticket.guild_id, ticket.channel_id) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fermeture : auteur ou support ; un entretien de candidature n'est clos que par l'équipe. */
+  assertCanClose(member, ticket) {
+    if (member?.id === ticket.user_id && !this.isStaff(member) && this.interviewOf(ticket)) {
+      throw new UserError('Cet entretien de candidature sera clos par l\'équipe.');
+    }
+    this.assertParticipant(member, ticket);
   }
 
   /**
@@ -342,7 +481,17 @@ class TicketService {
     // « Ticket déjà ouvert » est plus utile que « patientez » : contrôlé avant le délai anti-boucle.
     const cfg = this.config.get(guild.id).tickets;
     const max = cfg.maxPerUser || 1;
-    const open = this.tickets.countOpenByUser(guild.id, user.id);
+    let open = this.tickets.countOpenByUser(guild.id, user.id);
+    if (open >= max) {
+      // Limite atteinte : un ticket dont le salon a été supprimé (à la main, ou pendant l'absence
+      // du bot) ne doit pas bloquer le membre. Verrouillé pendant la vérification (double clic).
+      this.creating.add(lockKey);
+      try {
+        open = await this.#forgetGoneTickets(guild, user.id);
+      } finally {
+        this.creating.delete(lockKey);
+      }
+    }
     if (open >= max) {
       throw new UserError(`Vous avez déjà **${open}** ticket(s) ouvert(s) (limite : ${max}). Terminez-en un avant d'en ouvrir un nouveau.`);
     }
@@ -355,6 +504,18 @@ class TicketService {
     } finally {
       this.creating.delete(lockKey);
     }
+  }
+
+  /**
+   * Oublie les tickets ouverts du membre dont le salon n'existe plus (confirmé par Discord).
+   * @returns {Promise<number>} tickets ouverts restants
+   */
+  async #forgetGoneTickets(guild, userId) {
+    for (const ticket of this.tickets.listByGuild?.(guild.id) ?? []) {
+      if (ticket.user_id !== userId || ticket.status === 'closed') continue;
+      if (await channelGone(guild, ticket.channel_id)) this.tickets.delete(ticket.channel_id);
+    }
+    return this.tickets.countOpenByUser(guild.id, userId);
   }
 
   async #create(guild, user, reason) {
@@ -423,6 +584,11 @@ class TicketService {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
     this.assertStaff(staff);
+    // Fermeture en cours (délai de 5 s) : l'instantané de fermeture effacerait la prise en charge.
+    if (this.closing.has(channel.id)) throw new UserError('Ce ticket est en cours de fermeture : il ne peut plus être pris en charge.');
+    if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé : il ne peut plus être pris en charge.');
+    // Auteur du ticket : il se noterait lui-même (statistiques du staff faussées).
+    if (staff.id === ticket.user_id) throw new UserError('Vous ne pouvez pas prendre en charge votre propre ticket : laissez un autre membre de l\'équipe s\'en occuper.');
     if (ticket.status === 'claimed') {
       throw new UserError(ticket.claimed_by ? `Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.` : 'Ce ticket est déjà pris en charge.');
     }
@@ -502,11 +668,19 @@ class TicketService {
   /**
    * Transcript prêt à envoyer (carte + fichier), pour un ticket ouvert.
    * @param {import('discord.js').TextChannel} channel
+   * @param {{ userId?: string|null }} [opts] userId : demandeur (délai entre deux demandes)
    */
-  async transcriptPayload(channel) {
+  async transcriptPayload(channel, { userId = null } = {}) {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
-    const { content, count } = await this.#transcript(channel);
+    this.#assertTranscriptCooldown(channel.id, userId);
+    // Une seule génération à la fois par salon : les demandes simultanées partagent le résultat.
+    let job = this.transcriptJobs.get(channel.id);
+    if (!job) {
+      job = this.#transcript(channel).finally(() => this.transcriptJobs.delete(channel.id));
+      this.transcriptJobs.set(channel.id, job);
+    }
+    const { content, count } = await job;
     return {
       embeds: [
         card({
@@ -594,35 +768,71 @@ class TicketService {
         };
       });
     }
+    // Ligne relue après le délai : elle fait foi pour l'instantané (prise en charge comprise).
+    ticket = this.tickets.getByChannel(channel.id) ?? ticket;
     const cfg = this.config.get(channel.guild.id).tickets;
     // Arrêt du bot (flush) : archive sans télécharger les pièces jointes (liens seulement),
     // sinon les téléchargements dépassent le délai d'arrêt et le salon n'est jamais supprimé.
     const archiveAttachments = cfg.archiveAttachments === true && !job.flushed;
     const { content: transcript, messages } = await this.#transcript(channel, { archiveAttachments });
-    const closedAt = Date.now();
-    this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
-    this.bumpStat(channel.guild.id, 'closed');
-    // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
-    this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
+    // Ticket déjà fermé dont le salon a été conservé (archive impossible) : nouvelle tentative
+    // d'archive seulement (ni statistique ni MP de notation en double).
+    const alreadyClosed = ticket.status === 'closed';
+    const closedAt = alreadyClosed ? ticket.closed_at ?? Date.now() : Date.now();
+    // Entretien de candidature : ni statistique de support ni MP de notation au candidat.
+    const interview = this.interviewOf(ticket);
+    if (!alreadyClosed) {
+      this.tickets.setStatus(channel.id, 'closed', { claimedBy: ticket.claimed_by ?? null, closedAt });
+      if (!interview) {
+        this.bumpStat(channel.guild.id, 'closed');
+        // Notation : instantané pour les statistiques + MP de notation à l'auteur (n'attend pas l'envoi).
+        this.ratings?.onClosed({ guild: channel.guild, ticket: this.tickets.getByChannel(channel.id) ?? ticket, closedBy, closedAt });
+      }
+    }
 
     if (cfg.logChannel) {
-      const logCh = await channel.guild.channels.fetch(cfg.logChannel).catch(() => null);
-      if (logCh?.isTextBased()) {
-        // Pièces jointes re-téléversées si `tickets.archiveAttachments` (échecs ignorés et listés).
-        await sendTranscriptArchive(logCh, {
-          transcript: { name: `ticket-${ticket.id}.txt`, content: transcript },
-          messages,
-          archiveAttachments,
-          guild: channel.guild,
-          fetchImpl: this.fetch,
-          signal: job.abort?.signal,
-          card: (summary) => this.closureCard(ticket, closedBy, closedAt, channel, summary),
-          continuation: (part, total) => archiveContinuationCard(`Ticket #${ticket.id}`, part, total),
-        }).catch(() => {});
+      try {
+        // null : salon des transcripts supprimé (la confirmation l'a annoncé) → fermeture sans archive.
+        const logCh = await resolveArchiveChannel(channel.guild, cfg.logChannel);
+        if (logCh && !logCh.isTextBased?.()) throw new Error('le salon des transcripts n\'est pas un salon textuel');
+        if (logCh) {
+          // Pièces jointes re-téléversées si `tickets.archiveAttachments` (échecs ignorés et listés).
+          await sendTranscriptArchive(logCh, {
+            transcript: { name: `ticket-${ticket.id}.txt`, content: transcript },
+            messages,
+            archiveAttachments,
+            guild: channel.guild,
+            fetchImpl: this.fetch,
+            signal: job.abort?.signal,
+            card: (summary) => this.closureCard(ticket, closedBy, closedAt, channel, summary),
+            continuation: (part, total) => archiveContinuationCard(`Ticket #${ticket.id}`, part, total),
+          });
+        }
+      } catch (error) {
+        // Archive impossible (accès, permissions, panne) : le salon n'est JAMAIS supprimé sans
+        // son archive. Le ticket reste fermé, le salon est conservé et le staff prévenu.
+        logger.warn(`Ticket #${ticket.id} : archive impossible dans ${cfg.logChannel}, salon conservé :`, error?.message ?? error);
+        if (typeof channel.send === 'function') {
+          await channel
+            .send(archiveFailedPayload({
+              logChannelId: cfg.logChannel,
+              error,
+              components: [
+                row(
+                  button({ id: 'ticket:close', label: 'Refermer', style: ButtonStyle.Danger, emoji: ICONS.lock }),
+                  button({ id: 'ticket:transcript', label: 'Transcript', style: ButtonStyle.Secondary, emoji: '📄' }),
+                ),
+              ],
+            }))
+            .catch(() => {});
+        }
+        return;
       }
     }
     this.tickets.delete(channel.id);
     await channel.delete().catch(() => {});
+    // Carte de la candidature remise à jour (plus de lien mort, bouton « Entretien » de retour).
+    if (interview) await Promise.resolve(this.interviews?.closed(channel.guild, interview)).catch(() => {});
   }
 
   /**
@@ -677,12 +887,20 @@ module.exports = {
   TRANSCRIPT_MAX,
   MAX_REASONS,
   OPEN_COOLDOWN_MS,
+  TRANSCRIPT_COOLDOWN_MS,
   supportRoles,
   reasonFromTopic,
   fetchChannelHistory,
   channelGone,
   createInCategory,
   transcriptLine,
+  snapshotsOf,
   attachmentFields,
   archiveContinuationCard,
+  archiveIssue,
+  isPublicChannel,
+  assertPrivateTranscripts,
+  resolveArchiveChannel,
+  archiveFailedPayload,
+  ARCHIVE_PERMISSIONS,
 };

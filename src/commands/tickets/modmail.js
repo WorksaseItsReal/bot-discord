@@ -2,7 +2,9 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 const { card, field, ICONS, status, subtext } = require('../../utils/ui');
+const { truncate } = require('../../utils/embeds');
 const { UserError } = require('../../core/errors');
+const { archiveIssue, assertPrivateTranscripts } = require('../../services/TicketService');
 
 /** customId du formulaire de réponse (routé vers buttons.send par components/cmd.js). */
 const REPLY_MODAL_ID = 'cmd:modmail:send';
@@ -10,6 +12,8 @@ const REPLY_MODAL_ID = 'cmd:modmail:send';
 module.exports = {
   category: 'tickets',
   assertStaffRole,
+  /** Choix du serveur à contacter : menu envoyé en MP (hors serveur). */
+  dmButtons: ['pick'],
   data: new SlashCommandBuilder()
     .setName('modmail')
     .setDescription('Système ModMail (DM ↔ staff).')
@@ -37,6 +41,8 @@ module.exports = {
       const patch = {};
       const category = interaction.options.getChannel('categorie');
       const logChannel = interaction.options.getChannel('salon_logs');
+      // Transcripts = conversations privées : jamais dans un salon lisible par tous.
+      if (logChannel) assertPrivateTranscripts(interaction.guild, logChannel.id, 'du ModMail');
       if (logChannel) patch.logChannel = logChannel.id;
       const role = interaction.options.getRole('role_staff');
       const active = interaction.options.getBoolean('actif');
@@ -46,6 +52,7 @@ module.exports = {
       if (active !== null) patch.enabled = active;
       config.update(interaction.guild.id, { modmail: patch });
       const cfg = config.get(interaction.guild.id).modmail ?? {};
+      const issue = cfg.logChannel ? archiveIssue(interaction.guild, cfg.logChannel) : null;
       return interaction.reply({
         embeds: [
           card({
@@ -58,6 +65,7 @@ module.exports = {
                 ? 'Les membres peuvent désormais écrire au bot en message privé pour contacter le staff.'
                 : 'La configuration est enregistrée. Activez le ModMail avec l\'option `actif`.',
               subtext('Chaque conversation ouvre un salon privé visible du staff.'),
+              issue ? `${ICONS.warning} Je ne peux pas archiver dans <#${cfg.logChannel}> : ${issue}. Tant que l'archive échoue, les conversations fermées gardent leur salon.` : null,
             ],
             fields: [
               field(ICONS.status, 'État', cfg.enabled ? '🟢 Actif' : '⚫ Inactif'),
@@ -79,13 +87,34 @@ module.exports = {
       return interaction.editReply({ embeds: [status.ok('Votre réponse a été envoyée en message privé.', 'Réponse envoyée')] });
     }
     if (sub === 'close') {
-      assertOpenThread(client, interaction.channel.id);
+      // Ouverte, ou fermée avec un salon conservé faute d'archive (nouvelle tentative).
+      modmail.assertClosable(interaction.channel.id);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
       return modmail.close(interaction.channel, interaction.user);
     }
   },
 
   buttons: {
+    /**
+     * cmd:modmail:pick — choix du serveur à contacter (menu en MP, membre de plusieurs serveurs).
+     * Le service revérifie que le membre fait partie du serveur choisi et que le ModMail y est actif.
+     */
+    async pick(interaction, client) {
+      if (interaction.inGuild?.()) throw new UserError('Ce menu ne s\'utilise qu\'en message privé.');
+      const guildId = interaction.values?.[0];
+      if (!/^\d{17,20}$/.test(guildId ?? '')) throw new UserError('Ce menu est invalide.');
+      await interaction.deferUpdate();
+      const { guild, failed } = await client.services.modmail.choose(interaction.user.id, guildId);
+      await interaction.editReply({
+        embeds: [
+          failed
+            ? status.warn(`Serveur choisi : **${truncate(guild.name, 100)}**, mais ${failed} message(s) n'ont pas pu être transmis. Réessayez dans quelques minutes.`, 'Message non transmis')
+            : status.ok(`Serveur choisi : **${truncate(guild.name, 100)}**. Votre message a été transmis à son équipe.`, 'Serveur choisi'),
+        ],
+        components: [],
+      });
+    },
+
     /** cmd:modmail:reply — ouvre le formulaire de réponse (staff uniquement). */
     async reply(interaction, client) {
       const { modmail } = client.services;
@@ -123,7 +152,7 @@ module.exports = {
     async close(interaction, client) {
       const { modmail } = client.services;
       modmail.assertStaff(interaction.member);
-      assertOpenThread(client, interaction.channelId);
+      modmail.assertClosable(interaction.channelId);
       await interaction.reply({ embeds: [closingCard()], ephemeral: true });
       return modmail.close(interaction.channel, interaction.user);
     },
@@ -140,20 +169,15 @@ function assertStaffRole(role, guild) {
   if (role.managed) throw new UserError(`Le rôle ${role.name} est géré par une intégration : choisissez un rôle staff classique.`);
 }
 
-/** Conversation ModMail encore ouverte (sinon : double clic sur « Fermer », salon non ModMail…). */
-function assertOpenThread(client, channelId) {
-  const thread = modmailThread(client, channelId);
-  if (!thread) throw new UserError('Ce salon n\'est pas une conversation ModMail.');
-  if (thread.status !== 'open') throw new UserError('Cette conversation ModMail est déjà fermée.');
-  return thread;
-}
-
 function closingCard() {
   return card({
     tone: 'neutral',
     section: 'tickets',
     icon: ICONS.lock,
     title: 'Fermeture de la conversation',
-    description: 'Le membre est prévenu en message privé, le transcript est archivé (si un salon est configuré), puis ce salon est supprimé.',
+    description: [
+      'Le membre est prévenu en message privé, le transcript est archivé (si un salon est configuré), puis ce salon est supprimé.',
+      subtext('Si l\'archive ne peut pas être publiée, ce salon est conservé et un avertissement y est posté.'),
+    ],
   });
 }
