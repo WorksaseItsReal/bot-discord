@@ -13,6 +13,26 @@ const { UserError } = require('../../core/errors');
 const ESCALATION_TONES = { timeout: 'caution', kick: 'caution', ban: 'danger' };
 
 /**
+ * Avertissements en cours par membre (`serveur:membre`). Le palier d'escalade n'est connu en base
+ * qu'APRÈS l'appel API (ban, timeout…) : deux avertissements simultanés (deux modérateurs,
+ * /warn + signalement) liraient sinon tous deux « palier non appliqué » et l'appliqueraient deux fois.
+ * @type {Map<string, Promise<unknown>>}
+ */
+const warnQueues = new Map();
+
+/** Exécute `fn` après les avertissements déjà en cours pour ce membre. */
+async function serialWarn(guildId, userId, fn) {
+  const key = `${guildId}:${userId}`;
+  const run = (warnQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
+  warnQueues.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (warnQueues.get(key) === run) warnQueues.delete(key);
+  }
+}
+
+/**
  * Avertit un membre, incrémente ses strikes et applique automatiquement
  * l'escalade configurée (mute/timeout, kick, ban) si un palier est atteint.
  *
@@ -44,12 +64,13 @@ module.exports = {
     await interaction.deferReply();
     const { moderation, strikes } = client.services;
     const guildId = interaction.guild.id;
-    const { id } = await moderation.warn(interaction.guild, member, interaction.member, reason);
-    const { count } = strikes.add(guildId, user.id, 1);
-
-    // Décroissance : seuls les paliers appliqués dans la fenêtre des strikes encore comptés bloquent.
-    const step = strikes.pendingEscalation(guildId, count, moderation.appliedEscalationLevel(guildId, user.id, strikes.activeSince(guildId)));
-    const escalation = step ? await applyEscalation(client, interaction, member, step) : null;
+    const { id, count, escalation } = await serialWarn(guildId, user.id, async () => {
+      const { id: sanctionId } = await moderation.warn(interaction.guild, member, interaction.member, reason);
+      const { count: total } = strikes.add(guildId, user.id, 1);
+      // Décroissance : seuls les paliers appliqués dans la fenêtre des strikes encore comptés bloquent.
+      const step = strikes.pendingEscalation(guildId, total, moderation.appliedEscalationLevel(guildId, user.id, strikes.activeSince(guildId)));
+      return { id: sanctionId, count: total, escalation: step ? await applyEscalation(client, interaction, member, step) : null };
+    });
     const next = strikes.nextThreshold(guildId, count);
 
     await interaction.editReply({
@@ -121,3 +142,4 @@ async function applyEscalation(client, interaction, member, step) {
 }
 
 module.exports.applyEscalation = applyEscalation;
+module.exports.serialWarn = serialWarn;

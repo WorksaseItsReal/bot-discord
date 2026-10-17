@@ -204,3 +204,27 @@ test('R12 tempban échu dont la levée a échoué : /sanctions remove et clear r
     await h.close();
   }
 });
+
+test('R14 deux /warn simultanés n\'appliquent qu\'une fois le palier d\'escalade', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ strikes: { enabled: true, thresholds: [{ strikes: 3, action: 'ban', duration: null }] }, moderation: { dmOnSanction: true } });
+  h.fake.latency = 25;
+  try {
+    const target = IDS.users.target;
+    h.client.services.strikes.add(h.guild.id, target, 2);
+    const opts = [opt('membre', 6, target), opt('raison', 3, 'spam')];
+    await Promise.all([
+      h.slash('warn', opts, { as: 'admin', label: 'warn admin' }),
+      h.slash('warn', opts, { as: 'mod', label: 'warn mod' }),
+    ]);
+    await h.settle();
+    const rows = h.client.repositories.sanctions.listByUser(h.guild.id, target, 50);
+    assert.equal(rows.filter((r) => r.type === 'warn').length, 2);
+    assert.equal(rows.filter((r) => r.escalation_step === 3).length, 1, rows.map((r) => `${r.type} step=${r.escalation_step}`).join(' | '));
+    assert.equal(h.fake.calls.filter((c) => c.method === 'PUT' && /\/bans\//.test(c.route)).length, 1);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
