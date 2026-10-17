@@ -646,7 +646,7 @@ async function nativeView(client, guild, notice) {
         ],
         fields: [
           wide('📜', 'Règles en place', rules == null ? '⚠️ Lecture impossible : il me faut **Gérer le serveur**.' : rules.length ? rules.map((r) => `${r.enabled ? '🟢' : '🔴'} ${r.name}`).join('\n') : '*Aucune*'),
-          wide('🎯', 'Après synchronisation', desired.length ? desired.map((r) => `› ${r.name}`).join('\n') : '*Aucune : activez les mots interdits, l\'anti-spam ou les mentions de masse.*'),
+          wide('🎯', 'Après synchronisation', desired.length ? desired.map((r) => `› ${r.name}`).join('\n') : cfgOf(client, guild.id).enabled === false ? '*Aucune : l\'AutoMod est désactivé.*' : '*Aucune : activez les mots interdits, l\'anti-spam ou les mentions de masse.*'),
         ],
         footer: 'Discord exempte d\'office « Gérer le serveur » et les administrateurs',
       }),
@@ -1172,7 +1172,15 @@ module.exports = {
       guard(interaction);
       const enabled = state === 'on';
       client.services.config.update(interaction.guildId, { automod: { enabled } });
-      await interaction.update(await render(client, interaction.guild, 'home', `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`));
+      let notice = `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`;
+      // Désactivé : les règles natives du bot bloqueraient encore les messages, elles sont retirées.
+      if (!enabled && interaction.guild.members.me?.permissions?.has(PermissionFlagsBits.ManageGuild)) {
+        await interaction.deferUpdate();
+        const n = await native.remove(interaction.guild).catch(() => 0);
+        if (n) notice += `\n${n} règle(s) native(s) de Discord retirée(s) : resynchronisez-les après réactivation (vue « AutoMod de Discord »).`;
+      }
+      const payload = await render(client, interaction.guild, 'home', notice);
+      await (interaction.deferred ? interaction.editReply(payload) : interaction.update(payload));
     },
     /** cmd:automod:fpick:<groupe> — menu « Régler un filtre ». */
     async fpick(interaction, client) {

@@ -252,3 +252,41 @@ test('R45 : listes de domaines et d\'invitations autorisés plafonnées (retrait
     await h.close();
   }
 });
+
+test('R46 : AutoMod natif — double « Synchroniser » sans doublon, doublon existant supprimé, aucune règle AutoMod désactivé', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.fake.latency = 5;
+  try {
+    h.configure({ automod: { enabled: true, filters: { badWords: { enabled: true, words: ['interdit', 'ancienmot'] } } } });
+    const KW = 'Gadget · Mots interdits';
+    const kw = () => [...h.fake.autoModRules.values()].filter((r) => r.name === KW);
+    const rec = await h.slash('automod');
+    const view = h.messagesOf(await h.click(h.messagesOf(rec)[0], 'cmd:automod:nav', { values: ['native'] }))[0];
+    await Promise.all([h.click(view, 'cmd:automod:native:sync'), h.click(view, 'cmd:automod:native:sync', { as: 'owner' })]);
+    await h.settle();
+    assert.equal(kw().length, 1, `règle native en double : ${kw().length}`);
+
+    // Doublon déjà présent (ancienne version) : supprimé à la synchronisation suivante.
+    await h.guild.autoModerationRules.create({ name: KW, eventType: 1, triggerType: 1, triggerMetadata: { keywordFilter: ['ancienmot'] }, actions: [{ type: 1 }], enabled: true });
+    assert.equal(kw().length, 2);
+    h.configure({ automod: { filters: { badWords: { words: ['interdit'] } } } });
+    await h.click(view, 'cmd:automod:native:sync');
+    await h.settle();
+    assert.deepEqual(kw().map((r) => r.trigger_metadata?.keyword_filter), [['interdit']], 'doublon non supprimé ou liste non mise à jour');
+
+    // AutoMod désactivé : les règles natives sont retirées, et aucune n'est recréée.
+    const home = h.messagesOf(await h.slash('automod'))[0];
+    const off = await h.click(home, 'cmd:automod:toggle:off');
+    await h.settle();
+    assert.equal(h.client.services.config.get(h.guild.id).automod.enabled, false);
+    assert.equal([...h.fake.autoModRules.values()].filter((r) => r.name.startsWith('Gadget · ')).length, 0, 'règles natives actives AutoMod désactivé');
+    assert.match(h.replyText(off), /native/i);
+    await h.click(view, 'cmd:automod:native:sync');
+    await h.settle();
+    assert.equal([...h.fake.autoModRules.values()].filter((r) => r.name.startsWith('Gadget · ')).length, 0, 'règles recréées AutoMod désactivé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
