@@ -226,6 +226,8 @@ class LoggingService {
       ? guild.channels?.cache?.get(channelId)
       : this.client.channels?.cache?.get?.(channelId) ?? (await this.client.channels?.fetch?.(channelId).catch(() => null));
     if (!channel || typeof channel.send !== 'function') return null;
+    // Jamais de logs dans un salon d'annonces : ils pourraient être publiés vers les serveurs abonnés.
+    if (channel.type === ChannelType.GuildAnnouncement) return null;
     if (!guild) return channel;
     const me = guild.members?.me;
     if (me && typeof channel.permissionsFor === 'function' && !channel.permissionsFor(me)?.has(REQUIRED_PERMISSIONS)) return null;
@@ -273,13 +275,14 @@ class LoggingService {
 
   /**
    * État d'un salon de logs : 'ok', 'unset' (non configuré), 'missing' (supprimé),
-   * 'noperm' (le bot ne peut pas y écrire).
+   * 'noperm' (le bot ne peut pas y écrire), 'announcement' (salon d'annonces : refusé).
    * @param {import('discord.js').Guild} guild
    */
   channelStatus(guild, channelId) {
     if (!channelId) return 'unset';
     const channel = guild.channels?.cache?.get(channelId);
     if (!channel) return 'missing';
+    if (channel.type === ChannelType.GuildAnnouncement) return 'announcement';
     const me = guild.members?.me;
     const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
     if (perms && !perms.has(REQUIRED_PERMISSIONS)) return 'noperm';

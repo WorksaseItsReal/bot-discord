@@ -28,8 +28,16 @@ const STATUS = {
   missing: ['❌', 'Salon introuvable'],
   noperm: ['🔒', 'Je ne peux pas y écrire'],
   paused: ['⏸️', 'En pause'],
+  announcement: ['📢', 'Salon d\'annonces refusé'],
 };
 const TEXT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
+/**
+ * Salons de logs : textuels uniquement. Les messages d'un salon d'annonces peuvent être publiés
+ * (automatiquement, par un bot) vers tous les serveurs abonnés : jamais de logs dedans.
+ */
+const LOG_TYPES = [ChannelType.GuildText];
+/** États qui empêchent les logs d'arriver (à corriger). */
+const BROKEN = new Set(['missing', 'noperm', 'announcement']);
 const MAX_IGNORED = 25;
 /**
  * Salon de logs créé il y a moins de 10 min : le supprimer ne détruit (presque) aucun historique,
@@ -169,14 +177,14 @@ function homeView(client, guild, notice) {
   const on = cfg.logs?.enabled !== false;
   const states = CATEGORY_KEYS.map((k) => [k, categoryState(client, guild, k)]);
   const active = states.filter(([, s]) => s === 'ok').length;
-  const problems = states.filter(([, s]) => s === 'missing' || s === 'noperm').length;
+  const problems = states.filter(([, s]) => BROKEN.has(s)).length;
   const lines = states.map(([k, s]) => {
     const meta = LOG_CATEGORIES[k];
     const [dot, label] = STATUS[s];
     const channel = cfg.logChannels?.[k] ? `<#${cfg.logChannels[k]}>` : '—';
     const events = enabledEvents(cfg, k).length;
     const total = Object.keys(meta.events).length;
-    return `${dot} ${meta.emoji} **${meta.label}** · ${s === 'unset' ? label : channel}${s === 'missing' || s === 'noperm' || s === 'paused' ? ` · *${label}*` : ''} · ${events}/${total} évén.`;
+    return `${dot} ${meta.emoji} **${meta.label}** · ${s === 'unset' ? label : channel}${BROKEN.has(s) || s === 'paused' ? ` · *${label}*` : ''} · ${events}/${total} évén.`;
   });
   return {
     embeds: [
@@ -189,7 +197,7 @@ function homeView(client, guild, notice) {
           notice ? `${notice}\n` : null,
           on ? '🟢 Les logs sont **actifs**.' : '🔴 Les logs sont **en pause** sur tout le serveur.',
           `\`${progressBar(active / CATEGORY_KEYS.length, 14)}\` **${active}** / ${CATEGORY_KEYS.length} catégories actives`,
-          problems ? `${ICONS.warning} **${problems}** catégorie(s) à réparer (salon supprimé ou permission manquante).` : null,
+          problems ? `${ICONS.warning} **${problems}** catégorie(s) à réparer (salon supprimé, permission manquante ou salon d'annonces).` : null,
           '',
           ...lines,
         ],
@@ -231,7 +239,7 @@ function categoryView(client, guild, key, notice) {
   const channelMenu = new ChannelSelectMenuBuilder()
     .setCustomId(`cmd:logs:channel:${key}`)
     .setPlaceholder('Choisir le salon de cette catégorie…')
-    .setChannelTypes(...TEXT_TYPES)
+    .setChannelTypes(...LOG_TYPES)
     .setMinValues(0)
     .setMaxValues(1);
   if (channelId && guild.channels?.cache?.has(channelId)) channelMenu.setDefaultChannels(channelId);
@@ -241,11 +249,12 @@ function categoryView(client, guild, key, notice) {
     missing: 'Le salon a été supprimé : choisissez-en un autre ou utilisez la création automatique.',
     noperm: 'Donnez-moi **Voir le salon**, **Envoyer des messages** et **Intégrer des liens** dans ce salon.',
     unset: 'Choisissez un salon ci-dessous pour activer cette catégorie.',
+    announcement: 'Ce salon est un salon d\'annonces : ses messages peuvent être publiés vers d\'autres serveurs, je n\'y envoie donc aucun log. Choisissez un salon textuel.',
   };
   return {
     embeds: [
       card({
-        tone: state === 'ok' ? 'success' : state === 'missing' || state === 'noperm' ? 'warning' : 'neutral',
+        tone: state === 'ok' ? 'success' : BROKEN.has(state) ? 'warning' : 'neutral',
         section: { emoji: '📋', label: 'Logs' },
         icon: meta.emoji,
         title: `Logs · ${meta.label}`,
@@ -431,6 +440,7 @@ async function sendTest(client, guild, key, actor) {
   const cfg = full(client, guild.id);
   const channel = cfg.logChannels?.[key] ? guild.channels.cache.get(cfg.logChannels[key]) : null;
   if (!channel) return cfg.logChannels?.[key] ? 'missing' : 'unset';
+  if (channel.type === ChannelType.GuildAnnouncement) return 'announcement';
   const meta = LOG_CATEGORIES[key];
   try {
     await channel.send({
@@ -501,7 +511,10 @@ module.exports = {
       if (id) {
         if (!/^\d{17,20}$/.test(id)) throw new UserError('Salon invalide.');
         const ch = interaction.guild.channels.cache.get(id);
-        if (!ch || !TEXT_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel du serveur.');
+        if (ch?.type === ChannelType.GuildAnnouncement) {
+          throw new UserError('Les salons d\'annonces ne sont pas acceptés : leurs messages peuvent être publiés vers d\'autres serveurs. Choisissez un salon textuel.');
+        }
+        if (!ch || !LOG_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel du serveur.');
       }
       client.services.config.update(interaction.guildId, { logChannels: { [key]: id } });
       const status = client.services.logging.channelStatus(interaction.guild, id);

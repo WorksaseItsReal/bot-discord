@@ -400,3 +400,37 @@ test('R52 : un modérateur exclu d\'un salon (permission propre) ne lit pas son 
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R53
+
+test('R53 : jamais de carte de log dans un salon d\'annonces (publication automatique vers les serveurs abonnés)', async () => {
+  const h = await createHarness();
+  try {
+    h.client.services.automations.delayMs = 5;
+    const ann = IDS.channels.announcements;
+    h.configure({ automations: { crosspost: { enabled: true, channels: [ann] } } });
+    const panel = await panelOf(h, 'admin');
+    await h.click(panel, 'cmd:logs:nav', { as: 'admin', values: ['cat:messages'] });
+    const set = await h.click(panel, 'cmd:logs:channel:messages', { as: 'admin', values: [ann], componentType: CHANNEL_MENU });
+    assert.ok(h.isError(set), 'salon d\'annonces accepté comme salon de logs');
+    assert.notEqual(h.client.services.config.get(h.guild.id).logChannels.messages, ann);
+    const menu = h.findComponent(h.message(panel.id), 'cmd:logs:channel:messages');
+    assert.deepEqual(menu.channel_types, [0], 'le sélecteur ne doit proposer que des salons textuels');
+
+    // Ancienne configuration (avant ce correctif) : salon d'annonces déjà branché.
+    h.configure({ logChannels: { messages: ann } });
+    const mark = h.fake.calls.length;
+    const logMark = h.fake.messageLog.length;
+    const msg = await h.userMessage({ as: 'member', content: 'mon numéro perso : 06 12 34 56 78' });
+    await h.deleteUserMessage(msg.id);
+    await h.waitFor(() => h.fake.calls.slice(mark).some((c) => /\/crosspost$/.test(c.route)), { timeout: 300 }).catch(() => {});
+    assert.deepEqual(h.fake.calls.slice(mark).filter((c) => /\/crosspost$/.test(c.route)).map((c) => c.route), [], 'carte de log publiée vers les serveurs abonnés');
+    assert.equal(botPostsIn(h, logMark, ann).length, 0, 'carte de log envoyée dans le salon d\'annonces');
+    // Le tableau de bord signale le problème.
+    const home = await panelOf(h, 'admin');
+    assert.match(JSON.stringify(h.message(home.id).embeds), /annonces/i);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
