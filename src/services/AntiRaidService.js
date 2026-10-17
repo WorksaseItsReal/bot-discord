@@ -475,6 +475,7 @@ class AntiRaidService {
           ...(counts ? digestFields(counts) : []),
         ],
         buttons: lock && !lock.count ? [retryLockdownButton()] : locked ? [liftLockdownButton()] : [],
+        ping: true, // raid ping (secur.raidPingRoleId) dans le salon d'alerte, une fois par minute au plus
         fallback: true,
       });
     } else if (wave?.punished.length) {
