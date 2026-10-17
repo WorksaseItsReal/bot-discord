@@ -341,6 +341,8 @@ async function scatter(interaction, client, [lotId, ownerId]) {
 module.exports = {
   category: 'voice',
   planMoves,
+  /** Contrôle des droits de l'auteur DANS un vocal (surcharges comprises), exporté pour les tests. */
+  assertVoiceAuthority: assertCanActIn,
   _batches: batches,
   _gathering: gathering,
   data: new SlashCommandBuilder()
