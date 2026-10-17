@@ -11,7 +11,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PermissionFlagsBits: P } = require('discord.js');
 const { createHarness, IDS } = require('./harness');
-const { nextId } = require('./lib/ids');
+const { nextId, snowflakeAt, DAY } = require('./lib/ids');
 
 const ROLE_MENU = 6;
 const CHANNEL_MENU = 8;
@@ -37,12 +37,11 @@ async function giveRole(h, userId, roleId) {
 
 /** Salon textuel ajouté au serveur. */
 async function addChannel(h, name, overwrites = [], extra = {}) {
-  const id = nextId();
-  const raw = { id, type: 0, guild_id: h.guild.id, name, position: 60, permission_overwrites: overwrites, parent_id: IDS.channels.catGeneral, flags: 0, topic: null, nsfw: false, last_message_id: null, rate_limit_per_user: 0, ...extra };
-  h.fake.channels.set(id, raw);
+  const raw = { id: nextId(), type: 0, guild_id: h.guild.id, name, position: 60, permission_overwrites: overwrites, parent_id: IDS.channels.catGeneral, flags: 0, topic: null, nsfw: false, last_message_id: null, rate_limit_per_user: 0, ...extra };
+  h.fake.channels.set(raw.id, raw);
   h.fake.dispatchNow('CHANNEL_CREATE', raw, `salon ${name}`);
   await h.settle();
-  return id;
+  return raw.id;
 }
 
 /** Messages du bot postés dans un salon depuis `mark`. */
@@ -181,13 +180,21 @@ test('R28 : rôle staff refusé s\'il est géré, au-dessus de l\'auteur, automa
   }
 });
 
-test('R28 : suppression par un administrateur signalée à l\'AntiRaid (chaque salon) et carte dans un salon survivant', async () => {
+test('R28 : suppression par un administrateur signalée à l\'AntiRaid (chaque salon ancien) et carte dans un salon survivant', async () => {
   const h = await createHarness();
   try {
-    const cfg0 = await adminCreatesLogs(h);
-    const total = cfg0.logs.createdChannels.length + 1; // + catégorie
-    // Les logs « Salons » vont dans un salon choisi à la main (il survit à la suppression).
-    h.configure({ logChannels: { channels: IDS.channels.modLog } });
+    // Salons de logs créés par le bot il y a deux jours (catégorie + 3 salons, avec leur historique).
+    const old = () => snowflakeAt(Date.now() - 2 * DAY);
+    const category = old();
+    const rawCat = { id: category, type: 4, guild_id: h.guild.id, name: '📋 Logs', position: 20, permission_overwrites: [everyoneDeny()], parent_id: null, flags: 0 };
+    h.fake.channels.set(category, rawCat);
+    h.fake.dispatchNow('CHANNEL_CREATE', rawCat, 'catégorie de logs');
+    const ids = [];
+    for (const name of ['logs-moderation', 'logs-messages', 'logs-membres']) ids.push(await addChannel(h, name, [everyoneDeny()], { id: old(), parent_id: category }));
+    h.configure({
+      logChannels: { moderation: ids[0], messages: ids[1], members: ids[2], channels: IDS.channels.modLog },
+      logs: { categoryId: category, createdChannels: ids },
+    });
     const reports = [];
     const moderation = h.client.services.moderation;
     const original = moderation.reportDestructiveAction.bind(moderation);
@@ -195,19 +202,28 @@ test('R28 : suppression par un administrateur signalée à l\'AntiRaid (chaque s
       reports.push({ user: user.id, type });
       return original(guild, user, type, opts);
     };
-    const panel = await panelOf(h, 'admin');
-    await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
-    const go = await h.click(panel, 'cmd:logs:go:confirmRemove', { as: 'admin' });
-    assert.ok(!h.isError(go), h.replyText(go));
+    const remove = async () => {
+      const panel = await panelOf(h, 'admin');
+      await h.click(panel, 'cmd:logs:go:setup', { as: 'admin' });
+      const go = await h.click(panel, 'cmd:logs:go:confirmRemove', { as: 'admin' });
+      assert.ok(!h.isError(go), h.replyText(go));
+      const rm = await h.click(panel, 'cmd:logs:remove', { as: 'admin' });
+      assert.ok(!h.isError(rm), h.replyText(rm));
+    };
     const mark = h.fake.messageLog.length;
-    const rm = await h.click(panel, 'cmd:logs:remove', { as: 'admin' });
-    assert.ok(!h.isError(rm), h.replyText(rm));
-    for (const id of cfg0.logs.createdChannels) assert.ok(!h.fake.channels.has(id));
-    assert.equal(reports.length, total, 'chaque salon supprimé doit être signalé à l\'AntiRaid');
+    await remove();
+    for (const id of [...ids, category]) assert.ok(!h.fake.channels.has(id), `salon ${id} toujours là`);
+    assert.equal(reports.length, 4, 'chaque salon supprimé (et la catégorie) doit être signalé à l\'AntiRaid');
     assert.ok(reports.every((r) => r.user === IDS.users.admin && r.type === 'channelDelete'));
     const card = botPostsIn(h, mark, IDS.channels.modLog).find((m) => /Salons de logs supprimés/.test(m.embeds[0].title ?? ''));
     assert.ok(card, 'aucune carte « Salons de logs supprimés » dans le salon survivant');
     assert.ok(blob([card]).includes(IDS.users.admin));
+
+    // Salons tout juste créés puis retirés : rien à signaler (aucun historique détruit).
+    reports.length = 0;
+    await adminCreatesLogs(h);
+    await remove();
+    assert.equal(reports.length, 0);
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
@@ -242,6 +258,143 @@ test('R28 : /compteurs — créer, activer/désactiver ou supprimer des salons e
     await h.click(panel, 'cmd:compteurs:go:home', { as: 'target' });
     await h.click(panel, 'cmd:compteurs:go:confirmRemove', { as: 'target' });
     await refused(panel, 'cmd:compteurs:remove');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+// ---------------------------------------------------------------- R52
+
+/** Salon de logs : messages publiés depuis `mark`, par titre. */
+const titled = (posts, re) => posts.filter((m) => re.test(m.embeds[0].title ?? ''));
+
+test('R52 : contenu d\'un salon privé masqué dans un salon de logs lu par des membres qui ne le voient pas', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const admins = await addChannel(h, 'admins', [everyoneDeny()]);
+    const mod = h.guild.members.cache.get(IDS.users.mod);
+    assert.ok(!h.client.channels.cache.get(admins).permissionsFor(mod).has(P.ViewChannel), 'le modérateur ne doit pas voir #admins');
+    assert.ok(h.client.channels.cache.get(IDS.channels.logs).permissionsFor(mod).has(P.ViewChannel), 'le modérateur doit voir #logs');
+
+    const mark = h.fake.messageLog.length;
+    const secret = await h.userMessage({ as: 'admin', channel: admins, content: 'SECRET-A1 vote de rétrogradation' });
+    await h.editUserMessage(secret.id, 'SECRET-A2 vote reporté');
+    await h.deleteUserMessage(secret.id);
+    const m1 = await h.userMessage({ as: 'admin', channel: admins, content: 'SECRET-B3 dossier' });
+    const m2 = await h.userMessage({ as: 'admin', channel: admins, content: 'SECRET-B4 plainte' });
+    h.fake.dispatchNow('MESSAGE_DELETE_BULK', { ids: [m1.id, m2.id], channel_id: admins, guild_id: h.guild.id }, 'purge #admins');
+    await h.settle();
+    // Témoins : salons que le modérateur voit (contenu conservé).
+    const staff = await h.userMessage({ as: 'admin', channel: 'staff', content: 'VISIBLE-S1 réunion' });
+    await h.deleteUserMessage(staff.id);
+    const general = await h.userMessage({ as: 'member', channel: 'general', content: 'VISIBLE-G1 bonjour' });
+    await h.editUserMessage(general.id, 'VISIBLE-G2 bonsoir');
+
+    const posts = botPostsIn(h, mark, IDS.channels.logs);
+    const text = blob(posts);
+    assert.ok(!/SECRET-/.test(text), `contenu de #admins recopié dans #logs : ${text.match(/SECRET-[^"\\]*/g)}`);
+    assert.equal(titled(posts, /Message modifié/).length, 2, 'cartes « Message modifié » (#admins + #général)');
+    assert.equal(titled(posts, /Message supprimé/).length, 2, 'cartes « Message supprimé » (#admins + #staff)');
+    const purge = titled(posts, /Suppression en masse/);
+    assert.equal(purge.length, 1);
+    assert.equal(purge[0].attachments?.length ?? 0, 0, 'transcription de #admins jointe');
+    assert.match(text, /salon privé/);
+    for (const k of ['VISIBLE-S1', 'VISIBLE-G1', 'VISIBLE-G2']) assert.ok(text.includes(k), `${k} manquant (salon visible du lecteur)`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R52 : rebrancher les logs sur un salon que l\'on voit ne révèle pas les salons que l\'on ne voit pas', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const admins = await addChannel(h, 'admins', [everyoneDeny()]);
+    const gestion = addRole(h, 'Gestionnaire', P.ManageGuild | BASIC, 3);
+    await giveRole(h, IDS.users.member, gestion);
+    const own = await addChannel(h, 'gestion', [everyoneDeny(), { id: gestion, type: 0, allow: String(P.ViewChannel), deny: '0' }]);
+    const panel = await panelOf(h, 'member');
+    await h.click(panel, 'cmd:logs:nav', { as: 'member', values: ['cat:messages'] });
+    await h.click(panel, 'cmd:logs:channel:messages', { as: 'member', values: [own], componentType: CHANNEL_MENU });
+    assert.equal(h.client.services.config.get(h.guild.id).logChannels.messages, own);
+
+    const mark = h.fake.messageLog.length;
+    const s = await h.userMessage({ as: 'admin', channel: admins, content: 'SECRET-B1 mot de passe' });
+    await h.editUserMessage(s.id, 'SECRET-B2 changé');
+    await h.deleteUserMessage(s.id);
+    const posts = botPostsIn(h, mark, own);
+    assert.ok(posts.length >= 2, 'les cartes doivent toujours être publiées (auteur, salon, date)');
+    assert.ok(!/SECRET-/.test(blob(posts)), 'contenu de #admins lisible dans #gestion');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R52 : fil privé — contenu et nom masqués si un lecteur des logs n\'a pas « Gérer les fils »', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const threadId = nextId();
+    const raw = {
+      id: threadId, type: 12, guild_id: h.guild.id, parent_id: IDS.channels.general, name: 'SECRET-NOM-du-fil', owner_id: IDS.users.member,
+      rate_limit_per_user: 0, message_count: 0, member_count: 1, total_message_sent: 0, last_message_id: null, flags: 0,
+      thread_metadata: { archived: false, auto_archive_duration: 1440, archive_timestamp: new Date().toISOString(), locked: false, invitable: false },
+    };
+    const openThread = async (id, name) => {
+      const t = { ...raw, id, name };
+      h.fake.channels.set(id, t);
+      h.fake.dispatchNow('THREAD_CREATE', { ...t, newly_created: true }, `fil privé ${name}`);
+      await h.settle();
+      return id;
+    };
+    // 1) Lecteurs des logs : Modérateur (« Gérer les fils » : il voit déjà tous les fils privés) → rien à masquer.
+    let mark = h.fake.messageLog.length;
+    await openThread(threadId, 'VISIBLE-fil');
+    let m = await h.userMessage({ as: 'member', channel: threadId, content: 'VISIBLE-T1' });
+    await h.deleteUserMessage(m.id);
+    let text = blob(botPostsIn(h, mark, IDS.channels.logs));
+    assert.ok(text.includes('VISIBLE-T1') && text.includes('VISIBLE-fil'), 'fil privé masqué alors que tous les lecteurs le voient');
+
+    // 2) Un rôle « Lecteur » sans « Gérer les fils » lit aussi #logs → contenu et nom masqués.
+    const lecteur = addRole(h, 'Lecteur', BASIC, 2);
+    const logs = h.fake.channels.get(IDS.channels.logs);
+    logs.permission_overwrites.push({ id: lecteur, type: 0, allow: String(P.ViewChannel), deny: '0' });
+    h.fake.dispatchNow('CHANNEL_UPDATE', logs, 'Lecteur voit #logs');
+    await h.settle();
+    mark = h.fake.messageLog.length;
+    const second = await openThread(nextId(), 'SECRET-NOM-du-fil');
+    m = await h.userMessage({ as: 'member', channel: second, content: 'SECRET-T2 confidence' });
+    await h.editUserMessage(m.id, 'SECRET-T3 confidence modifiée');
+    await h.deleteUserMessage(m.id);
+    const posts = botPostsIn(h, mark, IDS.channels.logs);
+    text = blob(posts);
+    assert.ok(titled(posts, /Fil créé/).length === 1 && titled(posts, /Message supprimé/).length === 1, 'cartes manquantes');
+    assert.ok(!/SECRET-/.test(text), `contenu ou nom du fil privé recopié : ${text.match(/SECRET-[^"\\]*/g)}`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R52 : un modérateur exclu d\'un salon (permission propre) ne lit pas son contenu dans les logs', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    // #staff : lisible par le rôle Modérateur, sauf pour Modo (refus propre au membre).
+    const staff = h.fake.channels.get(IDS.channels.staff);
+    staff.permission_overwrites.push({ id: IDS.users.mod, type: 1, allow: '0', deny: String(P.ViewChannel) });
+    h.fake.dispatchNow('CHANNEL_UPDATE', staff, 'Modo exclu de #staff');
+    await h.settle();
+    const mark = h.fake.messageLog.length;
+    const m = await h.userMessage({ as: 'admin', channel: 'staff', content: 'SECRET-M1 avis sur Modo' });
+    await h.deleteUserMessage(m.id);
+    const posts = botPostsIn(h, mark, IDS.channels.logs);
+    assert.equal(titled(posts, /Message supprimé/).length, 1);
+    assert.ok(!/SECRET-/.test(blob(posts)), 'contenu de #staff lisible par Modo dans #logs');
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();

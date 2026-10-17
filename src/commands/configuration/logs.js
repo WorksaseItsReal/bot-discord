@@ -31,6 +31,11 @@ const STATUS = {
 };
 const TEXT_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
 const MAX_IGNORED = 25;
+/**
+ * Salon de logs créé il y a moins de 10 min : le supprimer ne détruit (presque) aucun historique,
+ * il n'est pas signalé à l'AntiRaid (créer puis retirer aussitôt les salons ne sanctionne personne).
+ */
+const FRESH_CHANNEL_MS = 10 * 60_000;
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
 
@@ -359,7 +364,7 @@ function confirmRemoveView(client, guild) {
           `Les **${channels.length}** salon(s) créés par le bot et leur historique seront **définitivement supprimés** :`,
           channels.map((id) => `<#${id}>`).join(' ') || '*Aucun salon trouvé.*',
           '',
-          subtext('Les salons que vous avez choisis vous-même ne sont pas touchés.'),
+          subtext('Les salons que vous avez choisis vous-même ne sont pas touchés. Chaque salon supprimé (sauf s\'il vient d\'être créé) compte comme une suppression de salon pour l\'AntiRaid.'),
         ],
       }),
     ],
@@ -606,8 +611,11 @@ module.exports = {
       await interaction.deferUpdate();
       const guild = interaction.guild;
       // Suppressions signées par le bot dans le journal d'audit : l'AUTEUR est signalé à l'AntiRaid
-      // après chaque salon supprimé, comme /channel supprimer.
-      const onDeleted = () => client.services.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+      // après chaque salon supprimé, comme /channel supprimer (sauf salon tout juste créé).
+      const onDeleted = (channel) => {
+        if (Date.now() - (channel.createdTimestamp ?? 0) < FRESH_CHANNEL_MS) return null;
+        return client.services.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+      };
       const n = await client.services.logSetup.remove(guild, `Salons de logs supprimés par ${interaction.user.tag}`, { onDeleted });
       await interaction.editReply(render(client, guild, 'setup', `${ICONS.success} ${n} salon(s) de logs supprimé(s).`));
       if (!n) return;

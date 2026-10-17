@@ -1,9 +1,10 @@
 'use strict';
 
-const { PermissionFlagsBits } = require('discord.js');
+const { PermissionFlagsBits, ChannelType, OverwriteType } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { card } = require('../utils/ui');
 const { LOG_CATEGORIES, EVENT_CATEGORY } = require('../utils/logCatalog');
+const { canReadCached } = require('../utils/channelAccess');
 
 const logger = createLogger('logs');
 
@@ -14,6 +15,75 @@ const LOG_SECTIONS = Object.freeze(
 
 /** Permissions dont le bot a besoin dans un salon de logs. */
 const REQUIRED_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks];
+
+/** Texte affiché à la place d'un contenu venu d'un salon (ou fil) plus restreint que le salon de logs. */
+const PRIVATE_CONTENT = '🔒 *Contenu masqué : salon privé (certains lecteurs de ce salon de logs n\'y ont pas accès).*';
+/** Lecture d'un salon et de son historique. */
+const READ_PERMS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
+/** Au-delà, les lecteurs ne sont plus vérifiés un à un (repli : tout refus propre à la source masque). */
+const MAX_READER_CHECKS = 500;
+
+/**
+ * Le salon `source` (salon ou fil) est-il MOINS visible que le salon de logs `target` ? Vrai dès
+ * qu'un lecteur possible du salon de logs ne peut pas lire la source, et en cas de doute (salon
+ * inconnu, membre hors cache, erreur). Lecteurs comparés : chaque rôle (dont @everyone ; hors
+ * rôles gérés et « Administrateur ») qui voit le salon de logs, puis chaque membre en cache qui
+ * le voit (permission propre, combinaison de rôles). Un fil hérite de son salon parent ; un fil
+ * privé n'est lisible, hors membres du fil, qu'avec « Gérer les fils ». Pur (cache uniquement).
+ */
+function sourceLessVisible(source, target) {
+  if (!source || !target) return true;
+  if (source.id === target.id) return false;
+  const guild = target.guild ?? source.guild;
+  const parent = source.isThread?.() ? source.parent : source;
+  if (!guild?.roles?.cache || typeof parent?.permissionsFor !== 'function' || typeof target.permissionsFor !== 'function') return true;
+  const privateThread = source.type === ChannelType.PrivateThread;
+  const { Administrator, ViewChannel, ManageThreads } = PermissionFlagsBits;
+  try {
+    // 1) Rôles qui voient le salon de logs : chacun doit lire la source.
+    const readers = [];
+    for (const role of guild.roles.cache.values()) {
+      if (role.managed || role.permissions.has(Administrator)) continue;
+      if (!target.permissionsFor(role)?.has(ViewChannel)) continue;
+      const perms = parent.permissionsFor(role);
+      if (!perms?.has(READ_PERMS) || (privateThread && !perms.has(ManageThreads))) return true;
+      readers.push(role);
+    }
+    // 2) Membres qui voient le salon de logs : permission propre, ou porteurs d'un rôle lecteur.
+    const me = guild.members?.me?.id;
+    const members = new Map();
+    for (const ow of target.permissionOverwrites?.cache?.values() ?? []) {
+      if (ow.type !== OverwriteType.Member || ow.id === me || !ow.allow.has(ViewChannel)) continue;
+      const member = guild.members?.cache?.get(ow.id);
+      if (!member) return true;
+      members.set(member.id, member);
+    }
+    let exhaustive = true;
+    for (const role of readers) {
+      if (role.id === guild.id) {
+        exhaustive = false; // @everyone : tout le serveur
+        continue;
+      }
+      for (const member of role.members.values()) {
+        if (members.size >= MAX_READER_CHECKS) {
+          exhaustive = false;
+          break;
+        }
+        members.set(member.id, member);
+      }
+    }
+    for (const member of members.values()) {
+      if (member.user?.bot || member.permissions?.has(Administrator)) continue;
+      if (target.permissionsFor(member)?.has(ViewChannel) && !canReadCached(source, member)) return true;
+    }
+    // Lecteurs non vérifiés un à un : tout refus de lecture propre à la source (rôle, membre) masque.
+    if (!exhaustive && parent.permissionOverwrites?.cache?.some((ow) => ow.id !== guild.id && ow.deny.any(READ_PERMS))) return true;
+    return false;
+  } catch (err) {
+    logger.debug('Visibilité du salon source :', err?.message);
+    return true;
+  }
+}
 
 /**
  * Faut-il journaliser cet événement ? Pur (testé).
@@ -130,6 +200,17 @@ class LoggingService {
     return true;
   }
 
+  /**
+   * Faut-il masquer, dans le salon de logs de `category`, le contenu venu de `source` (texte,
+   * transcription, nom de fil) ? Jamais de contenu d'un salon ou d'un fil privé dans un salon de
+   * logs lu par des membres qui n'y ont pas accès (voir `sourceLessVisible`).
+   */
+  hidesContent(guildId, category, source) {
+    const channelId = this.config.get(guildId).logChannels?.[category];
+    const target = channelId ? this.client.guilds?.cache?.get(guildId)?.channels?.cache?.get(channelId) : null;
+    return sourceLessVisible(source, target);
+  }
+
   /** Ce log serait-il envoyé ? (évite un appel coûteux, ex : audit log, quand il est désactivé) */
   wouldLog(guildId, category, ctx = {}) {
     return shouldLog(this.config.get(guildId), category, ctx);
@@ -206,4 +287,4 @@ class LoggingService {
   }
 }
 
-module.exports = { LoggingService, LOG_SECTIONS, logSection, logCard, fitList, shouldLog, REQUIRED_PERMISSIONS };
+module.exports = { LoggingService, LOG_SECTIONS, logSection, logCard, fitList, shouldLog, sourceLessVisible, PRIVATE_CONTENT, REQUIRED_PERMISSIONS };

@@ -2,7 +2,7 @@
 
 const { truncate } = require('../utils/embeds');
 const { field, wide, ICONS, userLine, linkButton, buttonRows } = require('../utils/ui');
-const { logCard } = require('../services/LoggingService');
+const { logCard, PRIVATE_CONTENT } = require('../services/LoggingService');
 
 module.exports = {
   name: 'messageUpdate',
@@ -17,6 +17,17 @@ module.exports = {
 
     // Ancien message hors cache : contenu « avant » inconnu, rien d'utile à journaliser.
     if (oldMessage.partial) return;
+    const logging = client.services.logging;
+    const ctx = {
+      event: 'messageEdit',
+      channelId: newMessage.channelId,
+      parentId: newMessage.channel?.parentId,
+      categoryId: newMessage.channel?.parent?.parentId ?? null,
+      bot: Boolean(newMessage.author?.bot),
+    };
+    if (logging.wouldLog?.(newMessage.guild.id, 'messages', ctx) === false) return;
+    // Salon (ou fil) privé que certains lecteurs des logs ne voient pas : contenu masqué.
+    const hidden = logging.hidesContent?.(newMessage.guild.id, 'messages', newMessage.channel) ?? false;
     const author = newMessage.author;
     const embed = logCard({
       category: 'messages',
@@ -28,16 +39,14 @@ module.exports = {
       fields: [
         field(ICONS.user, 'Auteur', userLine(author)),
         field(ICONS.channel, 'Salon', `${newMessage.channel}`),
-        wide('⬅️', 'Avant', oldMessage.content ? truncate(oldMessage.content, 1024) : '*Vide*'),
-        wide('➡️', 'Après', newMessage.content ? truncate(newMessage.content, 1024) : '*Vide*'),
+        ...(hidden
+          ? [wide('📄', 'Contenu', PRIVATE_CONTENT)]
+          : [
+            wide('⬅️', 'Avant', oldMessage.content ? truncate(oldMessage.content, 1024) : '*Vide*'),
+            wide('➡️', 'Après', newMessage.content ? truncate(newMessage.content, 1024) : '*Vide*'),
+          ]),
       ],
     });
-    await client.services.logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)), {
-      event: 'messageEdit',
-      channelId: newMessage.channelId,
-      parentId: newMessage.channel?.parentId,
-      categoryId: newMessage.channel?.parent?.parentId ?? null,
-      bot: Boolean(newMessage.author?.bot),
-    });
+    await logging.send(newMessage.guild.id, 'messages', embed, buttonRows(linkButton('Aller au message', newMessage.url, ICONS.link)), ctx);
   },
 };
