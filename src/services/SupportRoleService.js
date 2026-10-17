@@ -150,7 +150,11 @@ class SupportRoleService {
     if (this.stopped || !d?.guild_id || !d.user?.id || d.user.bot) return false;
     if (!('primary_guild' in d.user)) return false;
     if (this.activeSource(d.guild_id) !== 'tag') return false;
-    return this.request(d.guild_id, d.user.id, wearsGuildTag(d.user, d.guild_id));
+    // Rôles du paquet (le cache n'est pas encore à jour quand `raw` est émis) : un retrait ou un
+    // ajout à la main est ainsi corrigé, le rôle étant géré par le bot seul.
+    const roleId = this.settings(d.guild_id).roleId;
+    const has = Array.isArray(d.roles) ? d.roles.includes(roleId) : undefined;
+    return this.request(d.guild_id, d.user.id, wearsGuildTag(d.user, d.guild_id), { has });
   }
 
   /** presenceUpdate (intent GuildPresences) : statut personnalisé. */
@@ -168,9 +172,10 @@ class SupportRoleService {
   /**
    * Décision pour un membre (la dernière l'emporte), appliquée au plus tôt 60 s après le
    * changement précédent du même membre. Rien n'est mis en file si le rôle est déjà à jour.
+   * @param {{ has?: boolean }} [state] rôle porté d'après l'événement (sinon : cache des membres)
    * @returns {boolean} décision en attente
    */
-  request(guildId, userId, desired) {
+  request(guildId, userId, desired, { has } = {}) {
     if (this.stopped) return false;
     const key = `${guildId}:${userId}`;
     const entry = this.pending.get(key);
@@ -181,7 +186,8 @@ class SupportRoleService {
     const member = this.client?.guilds?.cache?.get(guildId)?.members?.cache?.get(userId);
     if (member?.user?.bot) return false;
     const roleId = this.settings(guildId).roleId;
-    if (member && Boolean(member.roles?.cache?.has(roleId)) === desired) return false;
+    const holds = typeof has === 'boolean' ? has : member ? Boolean(member.roles?.cache?.has(roleId)) : null;
+    if (holds === desired) return false;
     if (this.pending.size >= QUEUE_MAX) {
       this.dropped.set(guildId, (this.dropped.get(guildId) ?? 0) + 1);
       logger.debug(`Rôle soutien : file pleine, décision ignorée (${guildId}).`);

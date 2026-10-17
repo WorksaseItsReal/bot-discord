@@ -157,6 +157,11 @@ test('tag : paquet GUILD_MEMBER_UPDATE → rôle ajouté, puis retiré (anti-reb
   assert.ok(Date.now() - t0 >= 25, 'anti-rebond respecté');
   // Paquet sans primary_guild : aucune information, rien ne change.
   assert.equal(svc.handleRawMember({ guild_id: GUILD, user: { id: m.id } }), false);
+  // Rôle ajouté à la main à un membre sans tag : les rôles du PAQUET comptent (cache pas encore à jour).
+  m.roles.cache.set(ROLE, { id: ROLE });
+  assert.equal(svc.handleRawMember({ guild_id: GUILD, user: { id: m.id, primary_guild: null }, roles: [ROLE] }), true);
+  assert.ok(await until(() => calls.length === 3));
+  assert.deepEqual(calls[2], ['remove', m.id, ROLE], 'rôle géré par le bot seul');
   // Bots exclus ; désactivé : inerte.
   const bot = addMember({ bot: true });
   assert.equal(svc.handleRawMember({ guild_id: GUILD, user: { ...tagUser(bot.id), bot: true } }), false);
