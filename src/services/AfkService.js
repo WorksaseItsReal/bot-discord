@@ -343,7 +343,7 @@ class AfkService {
     const perms = me && channel?.permissionsFor?.(me);
     const send = channel?.isThread?.() ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
     if (!channel?.send || (perms && !perms.has([PermissionFlagsBits.ViewChannel, send, PermissionFlagsBits.EmbedLinks]))) return null;
-    const payload = { embeds: fitEmbeds([embed]), allowedMentions: { parse: [], repliedUser: false } };
+    const payload = { embeds: fitEmbeds([embed], { guildId: message.guild?.id }), allowedMentions: { parse: [], repliedUser: false } };
     if (!perms || perms.has(PermissionFlagsBits.ReadMessageHistory)) payload.reply = { messageReference: message.id, failIfNotExists: false };
     const sent = await channel.send(payload).catch((err) => logger.debug(`Réponse d'absence non envoyée (${channel.id}) :`, err?.message));
     if (!sent) return null;

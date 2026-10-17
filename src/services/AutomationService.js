@@ -130,10 +130,10 @@ function renderBoostMessage(template, { id, server, boosts }) {
 }
 
 /** Carte publiée pour un boost. Pur. */
-function boostPayload(text, { userId, avatar = null } = {}) {
+function boostPayload(text, { userId, avatar = null, guildId = null } = {}) {
   return {
     content: userId ? `<@${userId}>` : undefined,
-    embeds: fitEmbeds([card({ tone: 'celebrate', icon: ICONS.boost, title: 'Merci pour le boost !', description: text, thumbnail: avatar })]),
+    embeds: fitEmbeds([card({ tone: 'celebrate', icon: ICONS.boost, title: 'Merci pour le boost !', description: text, thumbnail: avatar })], { guildId }),
     allowedMentions: { parse: [], users: userId ? [userId] : [] },
   };
 }
@@ -644,7 +644,7 @@ class AutomationService {
       return 'start';
     }
     const text = renderBoostMessage(cfg.message, { id: newMember.id, server: guild.name, boosts: guild.premiumSubscriptionCount ?? 0 });
-    await guild.channels.cache.get(cfg.channelId).send(boostPayload(text, { userId: newMember.id, avatar: newMember.displayAvatarURL?.() ?? null }))
+    await guild.channels.cache.get(cfg.channelId).send(boostPayload(text, { userId: newMember.id, avatar: newMember.displayAvatarURL?.() ?? null, guildId: guild.id }))
       .catch((err) => logger.warn(`Remerciement de boost non envoyé (serveur ${guild.id}) :`, err?.message ?? err));
     return 'start';
   }

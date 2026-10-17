@@ -62,7 +62,7 @@ const itemKeys = (item) => [item.id, linkKey(item.link)].filter(Boolean);
  * Message publié pour un article : carte (titre, extrait ≤ 300, lien http(s), image), bouton
  * lien, mention du rôle avec allowedMentions explicite (jamais @everyone). Pur.
  */
-function itemPayload(item, { feedTitle, youtube = false, roleId = null } = {}) {
+function itemPayload(item, { feedTitle, youtube = false, roleId = null, guildId = null } = {}) {
   const link = safeHttpUrl(item.link);
   const embed = card({
     tone: 'info',
@@ -76,7 +76,7 @@ function itemPayload(item, { feedTitle, youtube = false, roleId = null } = {}) {
   });
   return {
     ...(roleId ? { content: `<@&${roleId}>` } : {}),
-    embeds: fitEmbeds([embed]),
+    embeds: fitEmbeds([embed], { guildId }),
     components: link && link.length <= BUTTON_URL_MAX ? buttonRows(linkButton(youtube ? 'Regarder' : 'Lire', link, youtube ? '▶️' : ICONS.link)) : [],
     allowedMentions: roleId ? { parse: [], roles: [roleId] } : { parse: [] },
   };
@@ -342,7 +342,7 @@ class FeedService {
         await this.#warnMention(guild, row, issue);
       }
     }
-    await channel.send(itemPayload(item, { feedTitle: row.title || feed?.title, youtube: isYoutubeFeed(row.url), roleId }));
+    await channel.send(itemPayload(item, { feedTitle: row.title || feed?.title, youtube: isYoutubeFeed(row.url), roleId, guildId: row.guild_id }));
   }
 
   /** Mention retirée d'un flux : log du serveur une seule fois (par flux et par rôle). */

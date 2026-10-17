@@ -263,13 +263,15 @@ class StickyService {
       embeds: fitEmbeds([
         card({
           tone: 'info',
+          // Carte neutre : couleur du thème du serveur (/settings theme) s'il en a un.
+          themable: true,
           section: { emoji: '📌', label: 'Message épinglé' },
           title: row.title || undefined,
           description: row.content,
           footer: 'Message épinglé automatiquement',
           timestamp: false,
         }),
-      ]),
+      ], { guildId: row.guild_id }),
       allowedMentions: { parse: [] },
     };
   }

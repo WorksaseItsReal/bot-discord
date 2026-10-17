@@ -376,7 +376,7 @@ class StarboardService {
       timestamp: message.createdTimestamp || true,
     });
     return {
-      embeds: fitEmbeds([embed]),
+      embeds: fitEmbeds([embed], { guildId: message.guild?.id ?? message.guildId }),
       components: message.url ? [new ActionRowBuilder().addComponents(linkButton('Aller au message', message.url, ICONS.link))] : [],
       // Le contenu d'un membre ne notifie jamais personne une seconde fois.
       allowedMentions: { parse: [] },

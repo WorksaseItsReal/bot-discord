@@ -128,6 +128,9 @@ function logCard({ category, tone = 'info', icon, title, description, user, thum
   const footerId = id ?? user?.id;
   return card({
     tone,
+    // Log d'information (ton par défaut) : couleur du thème du serveur ; les tons sémantiques
+    // (sanction, alerte, succès…) gardent la leur.
+    themable: tone === 'info' || tone === 'brand',
     section: logSection(category),
     icon,
     title,
@@ -383,7 +386,8 @@ class LoggingService {
 
   async #deliver(channel, batch) {
     if (batch.length > 1) {
-      const ok = await channel.send({ embeds: fitEmbeds(batch.map((i) => i.embed)) }).then(() => true, (err) => {
+      // Une file par salon : toutes les cartes du lot viennent du même serveur (thème commun).
+      const ok = await channel.send({ embeds: fitEmbeds(batch.map((i) => i.embed), { guildId: batch[0].guildId }) }).then(() => true, (err) => {
         logger.debug(`Impossible d'envoyer ${batch.length} logs groupés :`, err?.message);
         return false;
       });
@@ -408,22 +412,25 @@ class LoggingService {
     }
   }
 
-  async #sendOne(channel, { embed, components, ctx }) {
-    const payload = { embeds: [embed] };
-    if (components?.length) payload.components = components;
+  async #sendOne(channel, { guildId, embed, components, ctx }) {
+    // Carte assainie (limites Discord) et thème du serveur appliqué aux cartes « marque ».
+    const build = () => {
+      const payload = { embeds: fitEmbeds([embed], { guildId }) };
+      if (components?.length) payload.components = components;
+      return payload;
+    };
     // Pièces jointes (transcription d'une purge) : sans « Joindre des fichiers », la carte part
     // quand même, sans le fichier et avec une explication (sinon 50013 : log entier perdu).
-    if (ctx.files?.length) {
-      if (canAttach(channel)) payload.files = ctx.files;
-      else withoutFilesNote(embed);
-    }
+    const attach = Boolean(ctx.files?.length) && canAttach(channel);
+    if (ctx.files?.length && !attach) withoutFilesNote(embed);
+    const payload = build();
+    if (attach) payload.files = ctx.files;
     try {
       return await channel.send(payload);
     } catch (err) {
       if (!payload.files || err?.code !== 50013) throw err;
-      delete payload.files;
       withoutFilesNote(embed);
-      return channel.send(payload);
+      return channel.send(build());
     }
   }
 

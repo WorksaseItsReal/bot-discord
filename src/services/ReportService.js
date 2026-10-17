@@ -237,7 +237,7 @@ class ReportService {
       deleted ? null : linkButton('Message', link, ICONS.link),
       historyButton(report.target_id),
     );
-    return { embeds: fit ? fitEmbeds([embed]) : [embed], components };
+    return { embeds: fit ? fitEmbeds([embed], { guildId: guild.id }) : [embed], components };
   }
 
   /** Signalement de ce serveur, ou UserError. */

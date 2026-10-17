@@ -948,6 +948,21 @@ const migrations = [
       ALTER TABLE stats_guilds ADD COLUMN gap_end INTEGER;
     `,
   },
+  {
+    id: 29,
+    name: 'bot_settings',
+    up: `
+      -- Réglages GLOBAUX du bot (console /bot des propriétaires) : présence imposée (clé
+      -- « presence »)… Une ligne par clé, valeur JSON. Sans guild_id par conception : rien à
+      -- purger quand le bot quitte un serveur.
+      CREATE TABLE IF NOT EXISTS bot_settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        updated_by TEXT
+      );
+    `,
+  },
 ];
 
 module.exports = { migrations };

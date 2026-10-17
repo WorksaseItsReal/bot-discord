@@ -1,7 +1,7 @@
 'use strict';
 
 const { EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-const { brand, brandFooter, truncate, LIMITS, sanitizeEmbeds } = require('./embeds');
+const { brand, brandFooter, truncate, LIMITS, sanitizeEmbeds, THEMABLE } = require('./embeds');
 const { categoryMeta } = require('./categories');
 
 /**
@@ -149,8 +149,11 @@ function alignInline(fields) {
  *   fields?: Array<{ name: string, value: string, inline?: boolean } | null | false>,
  *   thumbnail?: string | null, image?: string | null,
  *   footer?: string, timestamp?: number | Date | boolean,
- *   align?: boolean,
- * }} opts
+ *   align?: boolean, themable?: boolean,
+ * }} opts `themable` : la carte prend la couleur du thème du serveur (/settings theme) ; vrai
+ *   par défaut pour le ton « marque » (brand ou ton absent), faux pour une couleur numérique et
+ *   les tons sémantiques. Seules les cartes neutres d'information (logs, message épinglé) le
+ *   demandent explicitement.
  */
 function card(opts = {}) {
   const {
@@ -166,8 +169,13 @@ function card(opts = {}) {
     footer,
     timestamp = true,
     align = true,
+    themable = tone === 'brand',
   } = opts;
   const embed = new EmbedBuilder().setColor(typeof tone === 'number' ? tone : TONES[tone] ?? TONES.brand);
+  // Thème du serveur (/settings theme) : seules les cartes de ton « marque » sont marquées ;
+  // la couleur est remplacée à l'assainissement (réponses d'interaction, logs, fitEmbeds).
+  // Jamais une couleur numérique explicite (/couleur, couleur d'un rôle).
+  if (themable && typeof tone !== 'number') embed[THEMABLE] = true;
   const author = sectionAuthor(section);
   if (author) embed.setAuthor(author);
   if (title) embed.setTitle(truncate(icon ? `${icon}  ${title}` : title, LIMITS.title));
@@ -193,11 +201,13 @@ function card(opts = {}) {
  * HORS réponse d'interaction (`channel.send`, `message.edit`, webhook) : les réponses
  * d'interaction (reply, editReply, followUp, update) passent déjà par cet assainissement
  * (core/interactionSafety.js), pas les envois directs. Ne lève jamais.
+ * `guildId` : applique le thème de ce serveur aux cartes de ton « marque » (/settings theme).
  * @param {Array<import('discord.js').EmbedBuilder | object> | import('discord.js').EmbedBuilder | object} embeds
+ * @param {{ guildId?: string|null }} [opts]
  * @returns {object[]} données JSON des embeds (10 max)
  */
-function fitEmbeds(embeds) {
-  return sanitizeEmbeds(Array.isArray(embeds) ? embeds : [embeds]);
+function fitEmbeds(embeds, { guildId = null } = {}) {
+  return sanitizeEmbeds(Array.isArray(embeds) ? embeds : [embeds], { guildId });
 }
 
 /** Champ « icône + libellé ». Inline par défaut (grille de 3). */

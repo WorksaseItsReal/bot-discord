@@ -103,7 +103,7 @@ class TicketRatingService {
     const user = await this.client.users.fetch(ticket.user_id).catch(() => null);
     if (!user || user.bot) return;
     const payload = this.promptPayload(guild, this.ratings.get(ticket.id) ?? { ticket_id: ticket.id, claimed_by: ticket.claimed_by });
-    await user.send({ ...payload, embeds: fitEmbeds(payload.embeds) });
+    await user.send({ ...payload, embeds: fitEmbeds(payload.embeds, { guildId: guild.id }) });
   }
 
   /** Arrêt : plus de nouveaux MP, envois en cours attendus. */

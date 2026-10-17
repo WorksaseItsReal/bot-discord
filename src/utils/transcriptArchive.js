@@ -196,8 +196,10 @@ function appendix({ archived = [], skipped = [] }) {
  */
 async function sendTranscriptArchive(channel, { transcript, messages = [], archiveAttachments = false, card, continuation, fetchImpl, guild, signal = null }) {
   const txt = (content) => ({ attachment: Buffer.from(content, 'utf8'), name: transcript.name });
+  // Thème du serveur (/settings theme) appliqué aux cartes « marque » de l'archive.
+  const fit = (embeds) => fitEmbeds(embeds, { guildId: guild?.id ?? channel.guild?.id ?? channel.guildId ?? null });
   if (!archiveAttachments) {
-    await channel.send({ embeds: fitEmbeds([card(null)]), files: [txt(transcript.content)] });
+    await channel.send({ embeds: fit([card(null)]), files: [txt(transcript.content)] });
     return null;
   }
   const { files, skipped } = await collectAttachments(messages, { fetchImpl, signal });
@@ -209,26 +211,26 @@ async function sendTranscriptArchive(channel, { transcript, messages = [], archi
 
   let main;
   try {
-    main = await channel.send({ embeds: fitEmbeds([card(summary())]), files: [txt(content()), ...batches[0]] });
+    main = await channel.send({ embeds: fit([card(summary())]), files: [txt(content()), ...batches[0]] });
   } catch (err) {
     if (!batches[0].length) throw err;
     // Envoi refusé avec les fichiers (taille, type…) : le transcript passe seul.
     for (const f of batches[0]) skipped.push({ name: f.original, reason: 'envoi refusé par Discord' });
     archived = archived.filter((f) => !batches[0].includes(f));
-    main = await channel.send({ embeds: fitEmbeds([card(summary())]), files: [txt(content())] });
+    main = await channel.send({ embeds: fit([card(summary())]), files: [txt(content())] });
   }
   let changed = false;
   const rest = batches.slice(1);
   for (const [i, batch] of rest.entries()) {
     try {
-      await channel.send({ embeds: fitEmbeds([continuation ? continuation(i + 2, rest.length + 1) : card(summary())]), files: batch });
+      await channel.send({ embeds: fit([continuation ? continuation(i + 2, rest.length + 1) : card(summary())]), files: batch });
     } catch {
       for (const f of batch) skipped.push({ name: f.original, reason: 'envoi refusé par Discord' });
       archived = archived.filter((f) => !batch.includes(f));
       changed = true;
     }
   }
-  if (changed) await main?.edit?.({ embeds: fitEmbeds([card(summary())]) }).catch(() => {});
+  if (changed) await main?.edit?.({ embeds: fit([card(summary())]) }).catch(() => {});
   return summary();
 }
 
