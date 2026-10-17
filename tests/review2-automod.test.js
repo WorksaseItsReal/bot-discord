@@ -517,7 +517,7 @@ test('AutoMod natif : exemptions au-delà des limites Discord signalées dans la
   // Bouton « Synchroniser » : l'avertissement est affiché.
   const { db } = memoryDb();
   const config = new ConfigService(new GuildConfigRepository(db));
-  config.update(G, { automod: { ignoredRoles: roles, filters: { antiSpam: { enabled: true } } } });
+  config.update(G, { automod: { enabled: true, ignoredRoles: roles, filters: { antiSpam: { enabled: true } } } });
   const created = [];
   const guild = {
     id: G,

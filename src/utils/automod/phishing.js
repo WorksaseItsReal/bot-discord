@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractLinks } = require('./links');
+const { extractLinks, hostMatches } = require('./links');
 const { canonical, leet } = require('./normalize');
 
 /**
@@ -54,8 +54,10 @@ const SHORTENERS = ['bit.ly', 'tinyurl.com', 'cutt.ly', 'is.gd', 'rb.gy', 'short
 const BAIT = /\b(?:free\s*nitro|nitro\s*(?:free|gratuit|gift|for\s*free)|gratuit|free|gift|cadeau|giveaway|airdrop|claim|r[ée]clame[rz]?|gagn[ée]|won|steam\s*gift|crypto|nft|robux)\b|\d+\s*(?:usd|\$|€)(?!\w)/i;
 const URGENCY = /\b(?:first\s+\d+|premiers?\s+\d+|limited|limit[ée]e?|hurry|d[ée]p[êe]che[sz]?-?(?:toi|vous)|only\s*today|aujourd'?hui\s*seulement|expire[sd]?|before\s*it'?s\s*gone)\b/i;
 
+const OFFICIAL_AND_LEGIT = [...OFFICIAL, ...KNOWN_LEGIT];
+
 function isOfficial(host, extraAllowed = []) {
-  return [...OFFICIAL, ...KNOWN_LEGIT, ...extraAllowed].some((d) => host === d || host.endsWith(`.${d}`));
+  return hostMatches(host, OFFICIAL_AND_LEGIT) || hostMatches(host, extraAllowed);
 }
 
 /** Ramène une partie de domaine à sa forme « lue » : homoglyphes, leet, rn→m, cl→d, vv→w. */
@@ -190,6 +192,11 @@ function phishingScore(text, ctx = {}) {
       // « https://discord.com@evil.ru » : se fait passer pour un autre site → arnaque à lui seul.
       linkScore += l.disguised === 'domain' ? 3 : 2;
       reasons.push(`lien déguisé (« …@ » devant le vrai site ${l.host})`);
+    }
+    if (l.ip) {
+      // « http://45.13.227.9/nitro » : un vrai service n'envoie pas vers une adresse IP nue.
+      linkScore += 2;
+      reasons.push(`lien vers une adresse IP (${l.host})`);
     }
     if (l.host.split('.').some((p) => p.startsWith('xn--'))) {
       linkScore += 2;

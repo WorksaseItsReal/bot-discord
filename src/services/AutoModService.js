@@ -1,7 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
-const { PermissionFlagsBits, AuditLogEvent } = require('discord.js');
+const { PermissionFlagsBits, AuditLogEvent, ApplicationIntegrationType } = require('discord.js');
 const { parseDuration, formatDuration } = require('../utils/time');
 const { truncate } = require('../utils/embeds');
 const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, subtext, code } = require('../utils/ui');
@@ -69,8 +69,8 @@ const BUILTIN_ALLOWED_HOSTS = ['discord.gg', 'discord.com', 'discordapp.com', 'd
 
 /** Liens non autorisés (hors liste blanche du serveur et hôtes Discord/Tenor). Pur. */
 function blockedLinks(links, antiLink = {}) {
-  const allowed = [...BUILTIN_ALLOWED_HOSTS, ...(antiLink.allowedDomains ?? [])];
-  return links.filter((l) => !hostMatches(l.host, allowed));
+  // Deux listes distinctes (jamais recopiées) : celle du serveur reste en cache d'un message à l'autre.
+  return links.filter((l) => !hostMatches(l.host, BUILTIN_ALLOWED_HOSTS) && !hostMatches(l.host, antiLink.allowedDomains ?? []));
 }
 
 /** Invitations non autorisées (hors liste blanche et invitation personnalisée du serveur). Pur. */
@@ -135,9 +135,12 @@ function attachmentsFingerprint(attachments) {
   return createHash('sha1').update(keys.join('\n')).digest('base64url').slice(0, 16);
 }
 
-/** Texte analysé : contenu + messages transférés (sinon « Transférer » contourne tout). */
+/** Texte analysé : contenu, sondage et messages transférés (sinon « Transférer » ou un sondage contournent tout). */
 function messageText(message) {
   const parts = [message.content || ''];
+  const poll = message.poll;
+  if (poll?.question?.text) parts.push(poll.question.text);
+  for (const answer of poll?.answers?.values?.() ?? []) if (answer?.text) parts.push(answer.text);
   const snapshots = message.messageSnapshots;
   if (snapshots?.size) for (const snap of snapshots.values()) if (snap?.content) parts.push(snap.content);
   return parts.join('\n').slice(0, MAX_SCAN_LENGTH);
@@ -374,9 +377,15 @@ class AutoModService {
    * @param {{ edited?: boolean }} [opts] message édité : seuls les filtres de contenu s'appliquent.
    */
   async handleMessage(message, { edited = false } = {}) {
-    // Bots, webhooks et messages système (dont les alertes de l'AutoMod natif, attribuées
-    // au membre fautif) : jamais analysés, sinon on supprimerait la preuve.
-    if (!message.guild || message.author?.bot || message.webhookId || message.system) return;
+    // Messages système (dont les alertes de l'AutoMod natif, attribuées au membre fautif) :
+    // jamais analysés, sinon on supprimerait la preuve.
+    if (!message.guild || message.system) return;
+    // Bots et webhooks : ignorés, sauf un message publié par un membre via une application
+    // installée sur SON compte (« Utiliser des applications externes ») : analysé comme le sien.
+    if (message.author?.bot || message.webhookId) {
+      message = this.#userAppMessage(message);
+      if (!message) return;
+    }
     const cfg = this.config.get(message.guild.id).automod;
     if (!cfg?.enabled) return;
     // Message édité d'un membre hors cache : on le récupère au lieu d'abandonner.
@@ -390,6 +399,24 @@ class AutoModService {
     const violation = this.inspect(message, cfg.filters, { temporal: !edited, newMembers: cfg.newMembers });
     if (!violation) return;
     await this.#apply(message, violation, cfg);
+  }
+
+  /**
+   * Message publié via une application installée par un membre (et non par le serveur) :
+   * vue du message dont l'auteur est ce membre (sanction, exemptions, journal), ou null.
+   * Une application du serveur (y compris ce bot) parle en son nom : jamais attribuée au membre.
+   */
+  #userAppMessage(message) {
+    const meta = message.interactionMetadata;
+    const user = meta?.user;
+    const owners = meta?.authorizingIntegrationOwners;
+    if (!user || user.bot || !owners) return null;
+    if (owners[ApplicationIntegrationType.GuildInstall] != null || owners[ApplicationIntegrationType.UserInstall] == null) return null;
+    if (message.author?.id && message.author.id === this.logging?.client?.user?.id) return null;
+    return Object.create(message, {
+      author: { value: user, enumerable: true },
+      member: { value: message.guild.members?.resolve?.(user.id) ?? null, writable: true, configurable: true, enumerable: true },
+    });
   }
 
   /**
@@ -818,7 +845,7 @@ class AutoModService {
     return { count, channels: channelIds.length, channelIds };
   }
 
-  /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean, until?: number }} (until : fin du timeout posé) */
+  /** Applique la sanction. @returns {{ text: string, timedOut: boolean, kicked: boolean, until?: number }} (timedOut / until : timeout posé ICI) */
   async #sanction(message, { action, duration, reason }) {
     const guild = message.guild;
     const me = guild.members.me;
@@ -827,7 +854,8 @@ class AutoModService {
       // Ne jamais raccourcir un timeout plus long déjà en cours (ex. 1 j pour arnaque, puis 5 min pour spam).
       const until = message.member?.communicationDisabledUntilTimestamp ?? 0;
       if (until >= Date.now() + ms) {
-        return { timedOut: true, kicked: false, text: `${ACTION_LABELS.delete} · déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:t>` };
+        // Aucun timeout posé ici : pas de bouton « Retirer le timeout » (il lèverait celui d'un modérateur).
+        return { timedOut: false, kicked: false, until: 0, text: `${ACTION_LABELS.delete} · déjà en timeout jusqu'à <t:${Math.floor(until / 1000)}:t>` };
       }
       // Via ModerationService : garde-fous, sanction enregistrée (historique, scheduler), DM et log.
       const res = await this.moderation.timeout(guild, message.member, me, reason, ms).then((r) => r, () => null);

@@ -8,13 +8,20 @@
  * Tout est pur et testé (tests/automod.engine.test.js).
  */
 
-/** Caractères invisibles utilisés pour casser les mots (zero-width, tags, Braille vide…). */
-const INVISIBLE = /[­͏؜ᅟᅠ឴឵᠎​-‏‪-‮⁠-⁤⁪-⁯⠀ㅤ﻿ﾠ\u{E0000}-\u{E007F}]/gu;
+/**
+ * Caractères invisibles utilisés pour casser les mots (zero-width, tags, Braille vide…), y compris
+ * tous les caractères de format (\p{Cf}) et « ignorables par défaut » (U+1D173, U+2065, U+1BCA0…).
+ */
+const INVISIBLE = /[\p{Default_Ignorable_Code_Point}\p{Cf}­͏؜ᅟᅠ឴឵᠎​-‏‪-‮⁠-⁤⁪-⁯⠀ㅤ﻿ﾠ\u{E0000}-\u{E007F}]/gu;
 
-/** Homoglyphes MAJUSCULES (à traiter avant la mise en minuscules : Ν grec → N, pas v). */
+/**
+ * Homoglyphes MAJUSCULES (à traiter avant la mise en minuscules : Ν grec → N, pas v), et ceux
+ * que NFKD transformerait en une autre lettre (sigma lunaire « ϲ » → « ς »).
+ */
 const UPPER = {
   Α: 'A', Β: 'B', Ε: 'E', Ζ: 'Z', Η: 'H', Ι: 'I', Κ: 'K', Μ: 'M', Ν: 'N', Ο: 'O', Ρ: 'P', Τ: 'T', Υ: 'Y', Χ: 'X',
   А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', У: 'Y', Х: 'X', Ѕ: 'S', І: 'I', Ј: 'J',
+  Ϲ: 'C', ϲ: 'c',
 };
 
 /** Homoglyphes minuscules et petites capitales → lettre latine. */
@@ -23,7 +30,9 @@ const LOWER = {
   п: 'n', о: 'o', р: 'p', ԛ: 'q', г: 'r', ѕ: 's', т: 't', у: 'y', х: 'x', ү: 'y', ԝ: 'w', ɡ: 'g', ɩ: 'i',
   α: 'a', β: 'b', ε: 'e', η: 'n', ι: 'i', κ: 'k', μ: 'u', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x', ω: 'w',
   ℓ: 'l', '∂': 'd', ß: 'ss', æ: 'ae', œ: 'oe', ø: 'o', đ: 'd', ł: 'l', ı: 'i',
-  ʙ: 'b', ᴄ: 'c', ᴅ: 'd', ᴇ: 'e', ꜰ: 'f', ɢ: 'g', ʜ: 'h', ɪ: 'i', ᴊ: 'j', ᴋ: 'k', ʟ: 'l', ᴍ: 'm', ɴ: 'n', ᴏ: 'o',
+  // Homoglyphes courants hors cyrillique/grec de base (UTS #39) : arménien, malayalam, latin.
+  ϳ: 'j', ɑ: 'a', ǀ: 'l', օ: 'o', ഠ: 'o', հ: 'h', ո: 'n', ս: 'u', զ: 'q', ց: 'g',
+  ᴀ: 'a', ꞯ: 'q', ʙ: 'b', ᴄ: 'c', ᴅ: 'd', ᴇ: 'e', ꜰ: 'f', ɢ: 'g', ʜ: 'h', ɪ: 'i', ᴊ: 'j', ᴋ: 'k', ʟ: 'l', ᴍ: 'm', ɴ: 'n', ᴏ: 'o',
   ᴘ: 'p', ǫ: 'q', ʀ: 'r', ꜱ: 's', ᴛ: 't', ᴜ: 'u', ᴠ: 'v', ᴡ: 'w', ʏ: 'y', ᴢ: 'z',
 };
 

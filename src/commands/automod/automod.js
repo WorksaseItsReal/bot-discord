@@ -646,7 +646,7 @@ async function nativeView(client, guild, notice) {
         ],
         fields: [
           wide('📜', 'Règles en place', rules == null ? '⚠️ Lecture impossible : il me faut **Gérer le serveur**.' : rules.length ? rules.map((r) => `${r.enabled ? '🟢' : '🔴'} ${r.name}`).join('\n') : '*Aucune*'),
-          wide('🎯', 'Après synchronisation', desired.length ? desired.map((r) => `› ${r.name}`).join('\n') : '*Aucune : activez les mots interdits, l\'anti-spam ou les mentions de masse.*'),
+          wide('🎯', 'Après synchronisation', desired.length ? desired.map((r) => `› ${r.name}`).join('\n') : cfgOf(client, guild.id).enabled === false ? '*Aucune : l\'AutoMod est désactivé.*' : '*Aucune : activez les mots interdits, l\'anti-spam ou les mentions de masse.*'),
         ],
         footer: 'Discord exempte d\'office « Gérer le serveur » et les administrateurs',
       }),
@@ -824,9 +824,9 @@ function filterModal(cfg, key) {
 }
 
 const LIST_META = {
-  words: { title: 'Mots interdits', example: 'con, arnaque*, insulte' },
-  domains: { title: 'Domaines autorisés', example: 'youtube.com, twitch.tv' },
-  invites: { title: 'Invitations autorisées', example: 'discord.gg/partenaire' },
+  words: { title: 'Mots interdits', example: 'con, arnaque*, insulte', max: 1000, unit: 'mots' },
+  domains: { title: 'Domaines autorisés', example: 'youtube.com, twitch.tv', max: 500, unit: 'domaines' },
+  invites: { title: 'Invitations autorisées', example: 'discord.gg/partenaire', max: 500, unit: 'invitations' },
 };
 
 function listModal(kind) {
@@ -1056,6 +1056,31 @@ async function liftTimeout(interaction, client, userId, reason, { expectedUntil 
 const roleList = (ids) => fitList(ids.map((id) => `<@&${id}>`), 900);
 
 /**
+ * Rôles retirés par une quarantaine qui ne doivent plus être rendus : rôle temporaire terminé
+ * depuis (échu ou retiré pendant la quarantaine), rôle muet d'un mute qui n'est plus en vigueur.
+ * Rendus, ils deviendraient permanents : plus aucune ligne active ne les retirerait.
+ * @returns {{ keep: string[], lines: string[] }}
+ */
+function expiredQuarantineRoles(client, guildId, userId, roleIds, since) {
+  const repos = client.repositories ?? {};
+  const mutedRoleId = client.services.config.get(guildId).moderation?.mutedRoleId ?? null;
+  let closed = new Set();
+  try {
+    closed = new Set((repos.tempRoles?.closedSince?.(guildId, userId, since) ?? []).filter((id) => !repos.tempRoles.activeFor(guildId, userId, id)));
+  } catch {
+    // base indisponible : rien n'est écarté
+  }
+  const temp = roleIds.filter((id) => closed.has(id));
+  const muted = Boolean(mutedRoleId) && roleIds.includes(mutedRoleId) && !repos.sanctions?.activeMute?.(guildId, userId);
+  const skip = new Set([...temp, ...(muted ? [mutedRoleId] : [])]);
+  const lines = [
+    temp.length ? `Rôle(s) temporaire(s) arrivé(s) à échéance pendant la quarantaine, non rendu(s) : ${roleList(temp)}` : null,
+    muted && !closed.has(mutedRoleId) ? 'Rôle muet non rendu : le mute est arrivé à échéance (ou a été levé) pendant la quarantaine.' : null,
+  ].filter(Boolean);
+  return { keep: roleIds.filter((id) => !skip.has(id)), lines };
+}
+
+/**
  * Rend les rôles retirés par une quarantaine (rôles existants, sous le cliqueur et le bot).
  * @returns {Promise<{ ok: boolean, lines: string[] }>} ok : tous les rôles ont été rendus
  */
@@ -1095,6 +1120,67 @@ async function restoreRoles(interaction, userId, roleIds, reason) {
     gone ? `${gone} rôle(s) supprimé(s) entre-temps, ignoré(s).` : null,
   ].filter(Boolean);
   return { ok: !aboveMod.length && !aboveBot.length && !refused.length, lines: lines.length ? lines : ['Aucun rôle à rendre.'] };
+}
+
+/**
+ * Levée d'une quarantaine (bouton qlift) : timeout posé retiré, rôles retirés rendus (relus en
+ * base ; anciens logs : relus dans le champ du log), infraction retirée du compteur de récidive.
+ */
+async function liftQuarantine(interaction, client, userId, rawQuarantineId) {
+  if (rawQuarantineId != null && !/^\d{1,15}$/.test(rawQuarantineId)) throw new UserError('Bouton invalide (quarantaine).');
+  const repo = client.repositories?.automodQuarantines;
+  const row = rawQuarantineId != null ? repo?.get(interaction.guildId, Number(rawQuarantineId)) ?? null : null;
+  if (row && row.user_id !== userId) throw new UserError('Ce bouton ne correspond pas à cette quarantaine.');
+  if (row?.lifted_at) throw new UserError('Cette quarantaine a déjà été levée.');
+  await interaction.deferUpdate();
+  const reason = `Quarantaine AutoMod levée par ${who(interaction)}`;
+  // Avec l'enregistrement : seul le timeout posé par la quarantaine est levé.
+  const timeout = await liftTimeout(interaction, client, userId, reason, row ? { expectedUntil: row.timeout_until ?? 0 } : {});
+  // Rôles relus en base ; repli (quarantaine antérieure) : CE log, s'il concerne bien ce membre.
+  const roleIds = row ? row.roles : footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
+  const since = row?.created_at ?? interaction.message?.createdTimestamp ?? 0;
+  const expired = roleIds.length ? expiredQuarantineRoles(client, interaction.guildId, userId, roleIds, since) : { keep: [], lines: [] };
+  const roles = expired.keep.length ? await restoreRoles(interaction, userId, expired.keep, reason) : { ok: true, lines: [] };
+  const done = [timeout.text, ...roles.lines, ...expired.lines];
+  if (row?.event_id) {
+    try {
+      if (client.repositories?.automodEvents?.remove(interaction.guildId, row.event_id)) done.push('Infraction retirée du compteur de récidive.');
+    } catch {
+      // journal indisponible : sans conséquence pour la levée
+    }
+  }
+  client.services.automod?.forget?.(interaction.guildId, userId);
+  const complete = timeout.ok && roles.ok;
+  if (complete) {
+    if (row) repo.lift(interaction.guildId, row.id, interaction.user.id);
+    await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
+  }
+  await interaction.followUp({
+    embeds: [
+      card({
+        tone: complete ? 'success' : 'warning',
+        section: 'automod',
+        icon: ICONS.unlock,
+        title: complete ? 'Quarantaine levée' : 'Quarantaine levée en partie',
+        description: [...done.map((d) => `› ${d}`), complete ? null : subtext('Le bouton reste actif : corrigez le problème puis cliquez à nouveau.')],
+        fields: [field(ICONS.user, 'Membre', `<@${userId}>`)],
+      }),
+    ],
+    components: buttonRows(historyButton(userId)),
+    ephemeral: true,
+  });
+}
+
+/** Actions de bouton en cours (`action:serveur:membre`) : un double clic (ou deux modérateurs) n'agit qu'une fois. */
+const pending = new Set();
+async function exclusiveAction(key, fn) {
+  if (pending.has(key)) throw new UserError('Cette action est déjà en cours.');
+  pending.add(key);
+  try {
+    return await fn();
+  } finally {
+    pending.delete(key);
+  }
 }
 
 // ---------------------------------------------------------------- commande
@@ -1147,7 +1233,15 @@ module.exports = {
       guard(interaction);
       const enabled = state === 'on';
       client.services.config.update(interaction.guildId, { automod: { enabled } });
-      await interaction.update(await render(client, interaction.guild, 'home', `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`));
+      let notice = `AutoMod **${enabled ? 'activé' : 'désactivé'}**.`;
+      // Désactivé : les règles natives du bot bloqueraient encore les messages, elles sont retirées.
+      if (!enabled && interaction.guild.members.me?.permissions?.has(PermissionFlagsBits.ManageGuild)) {
+        await interaction.deferUpdate();
+        const n = await native.remove(interaction.guild).catch(() => 0);
+        if (n) notice += `\n${n} règle(s) native(s) de Discord retirée(s) : resynchronisez-les après réactivation (vue « AutoMod de Discord »).`;
+      }
+      const payload = await render(client, interaction.guild, 'home', notice);
+      await (interaction.deferred ? interaction.editReply(payload) : interaction.update(payload));
     },
     /** cmd:automod:fpick:<groupe> — menu « Régler un filtre ». */
     async fpick(interaction, client) {
@@ -1255,7 +1349,10 @@ module.exports = {
       for (const v of remove.map(clean).filter(Boolean)) {
         if (set.delete(v)) removed += 1;
       }
-      if (kind === 'words' && set.size > 1000) throw new UserError('La liste est limitée à 1000 mots.');
+      // Plafond (taille de la configuration, coût de l'analyse) ; une liste déjà plus longue
+      // (ancienne configuration) peut toujours être réduite.
+      const { max, unit } = LIST_META[kind];
+      if (set.size > max && set.size > (current?.length ?? 0)) throw new UserError(`La liste est limitée à ${max} ${unit}.`);
       const list = [...set];
       const patch = kind === 'words'
         ? { badWords: added ? { words: list, enabled: true } : { words: list } } // un ajout active le filtre
@@ -1429,8 +1526,9 @@ module.exports = {
       // Le log et l'infraction doivent concerner le même membre (pied de page « ID : … »).
       if (footerUserId(interaction.message) !== row.user_id) throw new UserError('Ce bouton ne correspond pas à ce log.');
       const content = logMessageContent(interaction.message);
+      // Consommée AVANT tout appel à Discord : un double clic ne lève pas deux fois (ni deux logs).
+      if (!repo.remove(interaction.guildId, row.id)) throw new UserError('Ce faux positif est déjà en cours de traitement.');
       await interaction.deferUpdate();
-      repo.remove(interaction.guildId, row.id);
       client.services.automod?.forget?.(interaction.guildId, row.user_id);
       const done = ['Infraction retirée du compteur de récidive.'];
       if (row.action === 'timeout') {
@@ -1458,6 +1556,7 @@ module.exports = {
         if (!extractLinks(logMessageContent(interaction.message) ?? '').some((l) => l.host === domain)) throw new UserError('Ce domaine ne figure pas dans le message.');
         const list = cfg.filters?.antiLink?.allowedDomains ?? [];
         if (list.includes(domain)) throw new UserError(`${code(domain)} est déjà autorisé.`);
+        if (list.length >= LIST_META.domains.max) throw new UserError(`La liste est limitée à ${LIST_META.domains.max} domaines : retirez-en un (section Listes).`);
         client.services.config.update(interaction.guildId, { automod: { filters: { antiLink: { allowedDomains: [...list, domain] } } } });
         label = `Autorisé : ${domain}`;
       } else {
@@ -1491,46 +1590,8 @@ module.exports = {
     async qlift(interaction, client, [rawUserId, rawQuarantineId]) {
       requirePermission(interaction, 'ModerateMembers');
       const userId = snowflake(rawUserId, 'membre');
-      if (rawQuarantineId != null && !/^\d{1,15}$/.test(rawQuarantineId)) throw new UserError('Bouton invalide (quarantaine).');
-      const repo = client.repositories?.automodQuarantines;
-      const row = rawQuarantineId != null ? repo?.get(interaction.guildId, Number(rawQuarantineId)) ?? null : null;
-      if (row && row.user_id !== userId) throw new UserError('Ce bouton ne correspond pas à cette quarantaine.');
-      if (row?.lifted_at) throw new UserError('Cette quarantaine a déjà été levée.');
-      await interaction.deferUpdate();
-      const reason = `Quarantaine AutoMod levée par ${who(interaction)}`;
-      // Avec l'enregistrement : seul le timeout posé par la quarantaine est levé.
-      const timeout = await liftTimeout(interaction, client, userId, reason, row ? { expectedUntil: row.timeout_until ?? 0 } : {});
-      // Rôles relus en base ; repli (quarantaine antérieure) : CE log, s'il concerne bien ce membre.
-      const roleIds = row ? row.roles : footerUserId(interaction.message) === userId ? quarantineRoles(interaction.message) : [];
-      const roles = roleIds.length ? await restoreRoles(interaction, userId, roleIds, reason) : { ok: true, lines: [] };
-      const done = [timeout.text, ...roles.lines];
-      if (row?.event_id) {
-        try {
-          if (client.repositories?.automodEvents?.remove(interaction.guildId, row.event_id)) done.push('Infraction retirée du compteur de récidive.');
-        } catch {
-          // journal indisponible : sans conséquence pour la levée
-        }
-      }
-      client.services.automod?.forget?.(interaction.guildId, userId);
-      const complete = timeout.ok && roles.ok;
-      if (complete) {
-        if (row) repo.lift(interaction.guildId, row.id, interaction.user.id);
-        await interaction.editReply({ components: settleComponents(interaction.message, interaction.customId, `Levée par ${interaction.user.username}`) });
-      }
-      await interaction.followUp({
-        embeds: [
-          card({
-            tone: complete ? 'success' : 'warning',
-            section: 'automod',
-            icon: ICONS.unlock,
-            title: complete ? 'Quarantaine levée' : 'Quarantaine levée en partie',
-            description: [...done.map((d) => `› ${d}`), complete ? null : subtext('Le bouton reste actif : corrigez le problème puis cliquez à nouveau.')],
-            fields: [field(ICONS.user, 'Membre', `<@${userId}>`)],
-          }),
-        ],
-        components: buttonRows(historyButton(userId)),
-        ephemeral: true,
-      });
+      // Deux clics simultanés : une seule levée (timeout, rôles, logs).
+      return exclusiveAction(`qlift:${interaction.guildId}:${userId}`, () => liftQuarantine(interaction, client, userId, rawQuarantineId));
     },
     /** cmd:automod:qban:<userId> — demande de confirmation (éphémère) avant de bannir. */
     async qban(interaction, client, [rawUserId]) {
@@ -1557,24 +1618,35 @@ module.exports = {
     async qbanok(interaction, client, [rawUserId, rawLogId]) {
       requirePermission(interaction, 'BanMembers');
       const userId = snowflake(rawUserId, 'membre');
-      await interaction.deferUpdate();
-      const user = await client.users.fetch(userId).catch(() => null);
-      if (!user) throw new UserError('Utilisateur introuvable.');
-      // Absent du serveur seulement sur « Unknown Member » : une erreur passagère ne doit pas
-      // faire sauter la vérification de hiérarchie.
-      const member = await interaction.guild.members.fetch(userId).catch((err) => {
-        if (err?.code === UNKNOWN_MEMBER) return null;
-        throw new UserError('Impossible de vérifier ce membre pour le moment (erreur Discord) : réessayez dans un instant.');
-      });
-      const res = await client.services.moderation.ban(interaction.guild, user, interaction.member, 'Compte piraté (quarantaine AutoMod)', { deleteMessageSeconds: 3600, targetMember: member ?? undefined });
-      await interaction.editReply({ embeds: [status.ok(`${userLine(user)} est banni${res?.id ? ` · sanction #${res.id}` : ''}.`, 'Membre banni')], components: [] });
-      // Fige le bouton « Bannir » du log d'origine (best-effort).
-      if (/^\d{17,20}$/.test(rawLogId ?? '')) {
-        const log = await interaction.channel?.messages?.fetch(rawLogId).catch(() => null);
-        if (log && log.author?.id === client.user?.id) {
-          await log.edit({ components: settleComponents(log, `cmd:automod:qban:${userId}`, `Banni par ${interaction.user.username}`) }).catch(() => {});
+      // Double clic : un second ban compterait double pour l'AntiRaid (seuil « bans en masse »).
+      return exclusiveAction(`qban:${interaction.guildId}:${userId}`, async () => {
+        await interaction.deferUpdate();
+        const user = await client.users.fetch(userId).catch(() => null);
+        if (!user) throw new UserError('Utilisateur introuvable.');
+        // Fige le bouton « Bannir » du log d'origine (best-effort).
+        const settleLog = async () => {
+          if (!/^\d{17,20}$/.test(rawLogId ?? '')) return;
+          const log = await interaction.channel?.messages?.fetch(rawLogId).catch(() => null);
+          if (log && log.author?.id === client.user?.id) {
+            await log.edit({ components: settleComponents(log, `cmd:automod:qban:${userId}`, `Banni par ${interaction.user.username}`) }).catch(() => {});
+          }
+        };
+        // Déjà banni (confirmation restée ouverte, autre modérateur) : rien de plus (ni sanction ni compteur).
+        const existing = await Promise.resolve(interaction.guild.bans?.fetch({ user: userId, force: true })).catch(() => null);
+        if (existing?.user?.id === userId) {
+          await interaction.editReply({ embeds: [status.warn(`${userLine(user)} est déjà banni. Rien n'a été modifié.`)], components: [] });
+          return settleLog();
         }
-      }
+        // Absent du serveur seulement sur « Unknown Member » : une erreur passagère ne doit pas
+        // faire sauter la vérification de hiérarchie.
+        const member = await interaction.guild.members.fetch(userId).catch((err) => {
+          if (err?.code === UNKNOWN_MEMBER) return null;
+          throw new UserError('Impossible de vérifier ce membre pour le moment (erreur Discord) : réessayez dans un instant.');
+        });
+        const res = await client.services.moderation.ban(interaction.guild, user, interaction.member, 'Compte piraté (quarantaine AutoMod)', { deleteMessageSeconds: 3600, targetMember: member ?? undefined });
+        await interaction.editReply({ embeds: [status.ok(`${userLine(user)} est banni${res?.id ? ` · sanction #${res.id}` : ''}.`, 'Membre banni')], components: [] });
+        return settleLog();
+      });
     },
     /** cmd:automod:qcancel — annule le bannissement. */
     async qcancel(interaction) {

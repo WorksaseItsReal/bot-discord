@@ -46,6 +46,8 @@ const MAX_EXEMPT_CHANNELS = 50;
  *   exemptions dépassent les limites de Discord (le surplus n'est pas appliqué nativement).
  */
 function desiredRules(cfg, logChannelId, guild = null, truncated = null) {
+  // AutoMod désactivé : aucune règle native (elles bloqueraient encore les messages).
+  if (cfg?.enabled === false) return [];
   const f = cfg.filters ?? {};
   // Un rôle ou salon supprimé dans les exemptions ferait refuser TOUTES les règles par Discord.
   const exists = (cache) => (id) => !cache || cache.has(id);
@@ -83,6 +85,21 @@ function assertCanManage(guild) {
   }
 }
 
+/**
+ * Une seule opération à la fois par serveur (double clic, deux administrateurs) : sinon deux
+ * synchronisations simultanées créent chacune la même règle, et la copie n'est plus jamais mise à jour.
+ */
+const locks = new Map();
+function exclusive(guildId, fn) {
+  const run = (locks.get(guildId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.then(() => {}, () => {});
+  locks.set(guildId, tail);
+  tail.then(() => {
+    if (locks.get(guildId) === tail) locks.delete(guildId);
+  });
+  return run;
+}
+
 /** Règles natives créées par le bot. */
 async function ownRules(guild) {
   const rules = await guild.autoModerationRules.fetch();
@@ -95,7 +112,11 @@ async function ownRules(guild) {
  * Exemptions au-delà des limites de Discord : signalées dans `truncated` (jamais en silence).
  * @returns {Promise<{ created: string[], updated: string[], removed: string[], failed: Array<{ name: string, reason: string }>, truncated: Array<{ name: string, detail: string }> }>}
  */
-async function sync(guild, cfg, logChannelId) {
+function sync(guild, cfg, logChannelId) {
+  return exclusive(guild.id, () => syncNow(guild, cfg, logChannelId));
+}
+
+async function syncNow(guild, cfg, logChannelId) {
   assertCanManage(guild);
   // Le salon d'alerte doit être un salon textuel visible par le bot, sinon toutes les règles échouent.
   const logChannel = logChannelId ? guild.channels?.cache?.get(logChannelId) : null;
@@ -105,7 +126,12 @@ async function sync(guild, cfg, logChannelId) {
   const existing = await ownRules(guild);
   const result = { created: [], updated: [], removed: [], failed: [], truncated };
   for (const rule of desired) {
-    const current = existing.find((r) => r.name === rule.name);
+    const [current, ...copies] = existing.filter((r) => r.name === rule.name);
+    // Copies du même nom (anciennes synchronisations simultanées) : supprimées, sinon elles
+    // continueraient d'appliquer une ancienne liste.
+    for (const copy of copies) {
+      if (await copy.delete().then(() => true, () => false)) result.removed.push(`${copy.name} (doublon)`);
+    }
     try {
       if (current) {
         const { triggerType, ...editable } = rule; // le type d'une règle ne peut pas changer
@@ -131,11 +157,13 @@ async function sync(guild, cfg, logChannelId) {
 }
 
 /** Supprime les règles natives créées par le bot. @returns {Promise<number>} */
-async function remove(guild) {
-  assertCanManage(guild);
-  let n = 0;
-  for (const r of await ownRules(guild)) n += await r.delete().then(() => 1, () => 0);
-  return n;
+function remove(guild) {
+  return exclusive(guild.id, async () => {
+    assertCanManage(guild);
+    let n = 0;
+    for (const r of await ownRules(guild)) n += await r.delete().then(() => 1, () => 0);
+    return n;
+  });
 }
 
 module.exports = { sync, remove, ownRules, desiredRules, toKeywords, NAMES, PREFIX, MAX_EXEMPT_ROLES, MAX_EXEMPT_CHANNELS };
