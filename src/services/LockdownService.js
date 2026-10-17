@@ -393,7 +393,9 @@ class LockdownService {
     const perms = lockPermsFor(channel);
     let saved = this.locks.get(channel.guild.id, channel.id);
     if (saved && !stillLocked(channel)) {
-      // Rouvert à la main depuis : l'état d'origine mémorisé est périmé, on repart de l'état réel.
+      // Rouvert à la main depuis : l'état d'origine mémorisé est périmé, on repart de l'état réel
+      // (surcharges de rôle neutralisées et garde du bot d'abord restaurées, si toujours en place).
+      await restoreOthers(channel, normalizeLock(saved.data).others, reason).catch(() => {});
       this.locks.delete(channel.guild.id, channel.id);
       saved = undefined;
     }

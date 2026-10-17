@@ -516,3 +516,26 @@ test('R107 /rolemenu refuse le rôle de mute et le rôle de vérification ; un m
     await h.close();
   }
 });
+
+test('R11/R32 salon rouvert à la main pendant un lockdown puis reverrouillé : la surcharge de rôle neutralisée est rendue', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ moderation: { confirmDangerous: false } });
+  try {
+    const G = h.guild.id;
+    const general = IDS.channels.general;
+    await setOverwrites(h, general, [{ id: IDS.roles.member, allow: String(P.SendMessages), deny: '0' }]);
+    await h.slash('lockall', [], { as: 'admin' });
+    // Un administrateur retire le refus posé à @everyone (déverrouillage manuel).
+    const ch = h.fake.channels.get(general);
+    ch.permission_overwrites = ch.permission_overwrites.filter((o) => o.id !== G);
+    h.fake.dispatchNow('CHANNEL_UPDATE', { ...ch }, 'déverrouillage manuel');
+    await h.settle();
+    await h.slash('lock', [opt('salon', 7, general)], { as: 'admin' });
+    await h.slash('unlock', [opt('salon', 7, general)], { as: 'admin' });
+    assert.deepEqual(overwritesOf(h, general), [{ id: IDS.roles.member, type: 0, allow: String(P.SendMessages), deny: '0' }]);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
