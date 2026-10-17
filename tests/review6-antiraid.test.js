@@ -310,3 +310,55 @@ test('R33 : retrait complet → sanction réussie, sans note', async () => {
   assert.match(fieldOf(alert, /Sanction/), /Rôles retirés/);
   assert.equal(fieldOf(alert, /Attention/), null);
 });
+
+// ---------------------------------------------------------------- R34
+
+const whitelistCmd = require('../src/commands/security/whitelist');
+
+/** Cartes « réglages AntiRaid » reçues par les logs sécurité. */
+const configLogs = (w) => w.logged.filter(([, cat, e]) => cat === 'security' && /AntiRaid (désactivé|activé)|Réglages AntiRaid|Whitelist/.test(json(e).title)).map(([, , e]) => json(e));
+
+test('R34 : désactiver l\'AntiRaid depuis le tableau de bord est journalisé (logs sécurité + MP au propriétaire)', async () => {
+  const w = dashboardWorld();
+  const dms = [];
+  w.client.users = { fetch: async (id) => ({ id, send: async (p) => dms.push([id, p]) }) };
+  w.config.update(G, { antiraid: { enabled: true } });
+  await antiraidCmd.buttons.toggle(w.interaction([], { user: 'admin' }), w.client, ['off']);
+  assert.equal(w.config.get(G).antiraid.enabled, false);
+  const logs = configLogs(w);
+  assert.equal(logs.length, 1, 'désactivation sans trace');
+  assert.match(logs[0].title, /désactivé/);
+  assert.match(JSON.stringify(logs[0].fields), /<@admin>/);
+  assert.equal(dms.length, 1, 'propriétaire non prévenu');
+  assert.equal(dms[0][0], 'owner');
+  assert.deepEqual(dms[0][1].allowedMentions, { parse: [] });
+  // Le propriétaire qui désactive lui-même : journalisé, sans MP.
+  w.config.update(G, { antiraid: { enabled: true } });
+  await antiraidCmd.buttons.toggle(w.interaction([], { user: 'owner' }), w.client, ['off']);
+  assert.equal(configLogs(w).length, 2);
+  assert.equal(dms.length, 1);
+});
+
+test('R34 : préréglage, seuils, sanction et whitelist (tableau de bord et /whitelist) journalisés avec l\'auteur', async () => {
+  const w = dashboardWorld();
+  const i = () => w.interaction([], { user: 'admin' });
+  await antiraidCmd.buttons.preset(i(), w.client, ['faible']);
+  const submit = { ...i(), fields: { getTextInputValue: (id) => ({ channelDeleteThreshold: '50', roleDeleteThreshold: '' }[id] ?? '') } };
+  await antiraidCmd.buttons.setsubmit(submit, w.client, ['destructive']);
+  await antiraidCmd.buttons.executor({ ...i(), values: ['none'] }, w.client);
+  await antiraidCmd.buttons.wlusers({ ...i(), values: ['500000000000000077'] }, w.client);
+  await antiraidCmd.buttons.wlroles({ ...i(), values: [TRUSTED] }, w.client);
+  const logs = configLogs(w);
+  const text = JSON.stringify(logs);
+  assert.equal(logs.length, 5, `réglages modifiés sans trace : ${logs.length}`);
+  assert.match(text, /Faible/);
+  assert.match(text, /Salons supprimés : 5 → 50/);
+  assert.match(text, /Aucune/);
+  assert.match(text, /500000000000000077/);
+  assert.match(text, new RegExp(TRUSTED));
+  // /whitelist add : même journal.
+  const options = { getSubcommand: () => 'add', getUser: () => ({ id: '500000000000000088', toString: () => '<@500000000000000088>' }), getRole: () => null };
+  await whitelistCmd.execute({ ...i(), options, guild: w.guild, memberPermissions: new PermissionsBitField(PermissionsBitField.All) }, w.client);
+  assert.equal(configLogs(w).length, 6, '/whitelist add sans trace');
+  assert.match(JSON.stringify(configLogs(w)[5]), /500000000000000088/);
+});

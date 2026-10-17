@@ -666,6 +666,39 @@ class AntiRaidService {
     return delivered;
   }
 
+  /**
+   * Journalise un changement de réglage de l'AntiRaid ou de la whitelist (logs sécurité) : un
+   * administrateur compromis ne désarme pas la protection sans trace. Désactivation par un autre
+   * que le propriétaire : MP au propriétaire en plus.
+   * @param {import('discord.js').Guild} guild
+   * @param {import('discord.js').User} user auteur du changement
+   * @param {string|string[]} changes lignes « Réglage : avant → après »
+   * @param {{ disabled?: boolean }} [opts]
+   */
+  async logConfigChange(guild, user, changes, { disabled = false } = {}) {
+    const list = (Array.isArray(changes) ? changes : [changes]).filter(Boolean);
+    if (!list.length || !guild?.id) return false;
+    const embed = card({
+      tone: disabled ? 'danger' : 'caution',
+      section: 'security',
+      icon: disabled ? '🔴' : ICONS.settings,
+      title: disabled ? 'AntiRaid désactivé' : 'Réglages AntiRaid modifiés',
+      description: list.map((l) => `• ${l}`).join('\n').slice(0, 3_900),
+      fields: [field(ICONS.moderator, 'Par', user ? userLine(user) : '*Inconnu*')],
+      footer: user?.id ? `ID : ${user.id}` : undefined,
+    });
+    const logged = await this.logging.send(guild.id, 'security', embed, undefined, { event: 'antiraid' });
+    if (disabled && user?.id !== guild.ownerId && guild.ownerId) {
+      const owner = await this.client.users?.fetch?.(guild.ownerId).catch(() => null);
+      await owner?.send?.({
+        content: `${ICONS.warning} L'AntiRaid de **${escapeMarkdown(String(guild.name ?? guild.id)).slice(0, 100)}** vient d'être **désactivé** par ${user ? `\`${escapeMarkdown(String(user.tag ?? user.username ?? user.id))}\`` : 'un administrateur'}. Si ce n'était pas prévu, réactivez-le avec /antiraid.`,
+        embeds: fitEmbeds([embed]),
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+    }
+    return logged === true;
+  }
+
   /** Repli d'une alerte critique perdue : MP au propriétaire, sinon salon système (sans boutons). */
   async #fallback(guild, embed) {
     const payload = {

@@ -230,3 +230,26 @@ test('R101 : /role delete sans confirmation acquitte avant la suppression (limit
     await h.close();
   }
 });
+
+test('R34 : désactivation et whitelist depuis /antiraid et /whitelist journalisées (logs sécurité, MP au propriétaire)', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const mark = h.fake.messageLog.length;
+    const dash = await h.slash('antiraid', [], { as: 'admin' });
+    await h.click(h.messagesOf(dash)[0], 'cmd:antiraid:toggle:off', { as: 'admin' });
+    assert.equal(h.client.services.config.get(h.guild.id).antiraid.enabled, false);
+    await h.slash('whitelist', sub('add', [opt('utilisateur', 6, IDS.users.member)]), { as: 'admin' });
+    await h.settle();
+    const logs = botMessages(h, mark, (m) => m.channel_id === IDS.channels.logs && titled(/AntiRaid désactivé|Réglages AntiRaid/)(m));
+    assert.equal(logs.length, 2, 'désarmement sans trace');
+    assert.match(JSON.stringify(logs[0].embeds[0]), new RegExp(IDS.users.admin));
+    assert.match(JSON.stringify(logs[1].embeds[0]), new RegExp(IDS.users.member));
+    const dms = dmsTo(h, mark, IDS.users.owner);
+    assert.equal(dms.length, 1, 'propriétaire non prévenu de la désactivation');
+    assert.match(dms[0].content, /désactivé/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
