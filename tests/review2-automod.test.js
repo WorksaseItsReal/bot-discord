@@ -475,7 +475,8 @@ test('préréglage Strict : seuil anti-arnaques remonté à 3', () => {
 
 function bulkWorld() {
   const sent = [];
-  const cfg = { logs: {}, logChannels: { messages: '700000000000000001' } };
+  // Logs AutoMod branchés : la carte AutoMod contient la purge (sinon elle est journalisée ici, R57).
+  const cfg = { logs: {}, logChannels: { messages: '700000000000000001', automod: '700000000000000002' } };
   const logging = new LoggingService({ guilds: { cache: new Map() } }, { get: () => cfg });
   logging.send = async (...a) => sent.push(a);
   const client = { services: { logging } };
