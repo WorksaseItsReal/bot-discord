@@ -399,7 +399,15 @@ class SchedulerService {
       // est close et le staff prévenu (seul /secur blacklist retirer peut le débannir).
       if (this.client.services?.blacklist?.has?.(s.guild_id, s.user_id, 'ban')) {
         this.sanctions.deactivateActive(s.guild_id, s.user_id, 'tempban', { by: null, reason: 'Liste noire : bannissement maintenu' });
-        await this.#logBlacklistedTempban(guild, s).catch(() => {});
+        await this.client.services?.logging?.send(guild.id, 'moderation', card({
+          tone: 'warning',
+          section: 'moderation',
+          icon: ICONS.ban,
+          title: 'Bannissement temporaire maintenu',
+          description: `Le bannissement temporaire de <@${s.user_id}> est arrivé à échéance, mais il est sur la **liste noire** de sécurité : il reste banni. Un owner peut le retirer de la liste avec \`/secur blacklist retirer\`.`,
+          fields: [field(ICONS.user, 'Membre', `<@${s.user_id}>`), field(ICONS.date, 'Échéance', discordTimestamp(s.expires_at, 'R'))],
+          footer: `Sanction #${s.id}`,
+        }), undefined, { event: 'revocation' }).catch(() => {});
         continue;
       }
       // Sans « Bannir des membres », aucun appel voué au 403 (limite des requêtes invalides).
@@ -497,22 +505,6 @@ class SchedulerService {
   #stillDue(s, now = Date.now()) {
     const fresh = this.sanctions.get ? this.sanctions.get(s.guild_id, s.id) : s;
     return Boolean(fresh?.active && fresh.expires_at && fresh.expires_at <= now);
-  }
-
-  /** Tempban échu d'un blacklisté : maintenu, staff prévenu (logs Modération). */
-  async #logBlacklistedTempban(guild, s) {
-    const logging = this.client.services?.logging;
-    if (!logging) return;
-    const embed = card({
-      tone: 'warning',
-      section: 'moderation',
-      icon: ICONS.ban,
-      title: 'Bannissement temporaire maintenu',
-      description: `Le bannissement temporaire de <@${s.user_id}> est arrivé à échéance, mais il est sur la **liste noire** de sécurité : il reste banni. Un owner peut le retirer de la liste avec \`/secur blacklist retirer\`.`,
-      fields: [field(ICONS.user, 'Membre', `<@${s.user_id}>`), field(ICONS.date, 'Échéance', discordTimestamp(s.expires_at, 'R'))],
-      footer: `Sanction #${s.id}`,
-    });
-    await logging.send(guild.id, 'moderation', embed, undefined, { event: 'revocation' });
   }
 
   /** Log de modération d'une levée automatique (même carte que les levées manuelles). */

@@ -85,6 +85,15 @@ test('liste noire : ajout par le propriétaire (ban, casier, log) ; doublon sans
     assert.match(h.messagesOf(info)[0].embeds[0].title, /Liste noire · fiche/);
     await explore(h, info, { as: 'admin', budget: 6 });
     assert.ok(h.client.repositories.securityBlacklist.has(h.guild.id, target, 'ban'), 'retiré par un administrateur non-owner');
+    // Propriétaire : « Retirer » depuis la fiche → confirmation, puis « Annuler » → rien ne change.
+    const ownerInfo = await h.slash('secur', bl('info', [opt('utilisateur', 3, target)]), { as: 'owner' });
+    const card = h.messagesOf(ownerInfo)[0];
+    const ask = await h.click(card, `cmd:secur:blask:${target}`, { as: 'owner' });
+    assert.ok(!h.isError(ask), h.replyText(ask));
+    assert.match(h.message(card.id).embeds[0].title, /Retirer de la liste noire/);
+    await h.click(h.message(card.id), 'cmd:secur:blcancel', { as: 'owner' });
+    assert.ok(h.client.repositories.securityBlacklist.has(h.guild.id, target, 'ban'));
+    assert.ok(h.fake.bans.has(target));
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
