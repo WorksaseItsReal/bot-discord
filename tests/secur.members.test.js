@@ -371,10 +371,10 @@ test('voiceKick : delta des entrées regroupées (26/27) — nouvelle entrée fr
   assert.equal(securVoice.countDelta(G, old, now), 0, 'actions anciennes (bot redémarré) attribuées');
   assert.equal(securVoice.countDelta(G, { ...old, extra: { count: 31 } }, now), 1);
   securVoice.forgetGuild(G);
-  assert.equal([...securVoice.seen.keys()].filter((k) => k.startsWith(`${G}:`)).length, 0);
+  assert.equal(securVoice.seenSize(G), 0);
 });
 
-test('voiceKick : lecture du journal (types 26 et 27, limit 10), entrée 27 avec count 6 → sanction (limite 5) ; bot et module coupé ignorés', async () => {
+test('voiceKick : lecture du journal (type 27, limit 10), entrée 27 avec count 6 → sanction (limite 5) ; bot et module coupé ignorés', async () => {
   securVoice.forgetGuild(G);
   const w = world();
   w.addMember(MOD, { roleIds: [R_MOD] });
@@ -384,7 +384,7 @@ test('voiceKick : lecture du journal (types 26 et 27, limit 10), entrée 27 avec
   w.setModule('voiceKick');
   assert.equal(S.effectiveLimit(w.config.get(G), 'voiceKick'), 5);
   assert.equal(await securVoice.readVoiceAudit(w.client, w.guild), 1);
-  assert.deepEqual(ops(w, 'fetchAuditLogs').map((r) => [r.type, r.limit]), [[26, 10], [27, 10]]);
+  assert.deepEqual(ops(w, 'fetchAuditLogs').map((r) => [r.type, r.limit]), [[27, 10]], 'déconnexions seulement (revue 7, S8)');
   await w.drain();
   const [incident] = w.incidents.recent(G, 5);
   assert.ok(incident, 'déconnexion de 6 membres sans sanction');

@@ -154,7 +154,7 @@ test('voiceKick : entrée 27 regroupée (count 6) lue après une déconnexion �
     await h.asHuman('mod').perform('PATCH', `/guilds/${h.guild.id}/members/${IDS.users.member}`, { channel_id: null });
     const done = await h.waitFor(() => h.client.repositories.securityIncidents.recent(h.guild.id, 5).length > 0, { timeout: 2_000 });
     assert.ok(done, 'déconnexions regroupées non sanctionnées');
-    assert.ok(reads() >= 2, 'types 26 et 27 lus');
+    assert.ok(reads() >= 1, 'type 27 lu');
     const [incident] = h.client.repositories.securityIncidents.recent(h.guild.id, 5);
     assert.equal(incident.actions, 6);
     assert.deepEqual(incident.modules, ['voiceKick']);

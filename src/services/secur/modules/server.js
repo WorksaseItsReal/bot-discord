@@ -49,6 +49,9 @@ const serverUpdate = {
   auditTypes: [1],
   priority: 5,
   classify(entry) {
+    // Transfert de propriété : seul le propriétaire peut le faire. GUILD_UPDATE a souvent déjà mis
+    // guild.ownerId à jour, et le moteur verrait l'ancien propriétaire comme un simple membre.
+    if ((entry.changes ?? []).some((c) => c?.key === 'owner_id' && c.old != null && c.old === entry.executorId)) return null;
     const plan = St.planServerRestore(entry.changes);
     if (!plan.restore.length && !plan.images.length && !plan.alertOnly.length) return null;
     return { weight: 1, record: { plan } };

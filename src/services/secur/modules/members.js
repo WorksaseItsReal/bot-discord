@@ -259,9 +259,10 @@ const bot = {
 
 const voiceKick = {
   key: 'voiceKick',
-  // Discord REGROUPE les déconnexions et déplacements (26/27 : options.count incrémenté sur la
-  // même entrée) : aucune entrée n'est classée par le pipeline. src/events/securVoice.js relit le
-  // journal (lecture différée et bornée) et signale le delta de count à secur.signal.
+  // Discord REGROUPE les déconnexions (27 : options.count incrémenté sur la même entrée) : aucune
+  // entrée n'est classée par le pipeline. src/events/securVoice.js relit le journal (lecture
+  // différée et bornée) et signale le delta de count à secur.signal. Les déplacements (26) ne sont
+  // pas comptés : le membre reste connecté.
   auditTypes: [],
   priority: 5,
   classify: () => null,
