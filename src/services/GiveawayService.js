@@ -4,7 +4,7 @@ const { truncate, listOrMore } = require('../utils/embeds');
 const { button, row, ButtonStyle } = require('../utils/components');
 const { card, field, wide, ICONS, subtext, actionButton, linkButton, buttonRows } = require('../utils/ui');
 const { discordTimestamp } = require('../utils/time');
-const { pickWinners } = require('../utils/random');
+const { lazyShuffle } = require('../utils/random');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
 
@@ -241,7 +241,9 @@ class GiveawayService {
    * les conditions (rôles requis / interdit, niveau, invitations, ancienneté).
    */
   async #drawWinners(g, entries, count) {
-    const shuffled = pickWinners(entries, entries.length);
+    // Tirage paresseux (Fisher-Yates) : O(n) même pour 300 000 participants, jamais un
+    // mélange complet par splice() qui gelait la boucle d'événements.
+    const shuffled = lazyShuffle(entries);
     const guild = this.client.guilds?.cache?.get?.(g.guild_id) ?? null;
     const winners = [];
     for (const userId of shuffled) {

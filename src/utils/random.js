@@ -1,8 +1,28 @@
 'use strict';
 
 /**
+ * Mélange de Fisher-Yates paresseux : chaque élément est tiré à la demande, sans remise,
+ * en O(1) (copie initiale O(n)). Le pool n'est pas modifié. On s'arrête dès qu'on a ce
+ * qu'il faut : tirer 3 gagnants parmi 300 000 ne mélange pas toute la liste.
+ * @template T
+ * @param {T[]} pool
+ * @param {() => number} [rng]
+ * @returns {Generator<T>}
+ */
+function* lazyShuffle(pool, rng = Math.random) {
+  const items = [...pool];
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const j = Math.min(i, Math.floor(rng() * (i + 1)));
+    const picked = items[j];
+    items[j] = items[i];
+    yield picked;
+  }
+}
+
+/**
  * Tire `count` gagnants uniques au hasard dans `pool`. Pur (injection de rng
  * possible pour les tests). Renvoie moins d'éléments si le pool est trop petit.
+ * O(n + count) (Fisher-Yates partiel), jamais O(n²).
  * @template T
  * @param {T[]} pool
  * @param {number} count
@@ -10,12 +30,11 @@
  * @returns {T[]}
  */
 function pickWinners(pool, count, rng = Math.random) {
-  const items = [...pool];
-  const n = Math.min(count, items.length);
   const winners = [];
-  for (let i = 0; i < n; i += 1) {
-    const idx = Math.floor(rng() * items.length);
-    winners.push(items.splice(idx, 1)[0]);
+  if (!(count > 0)) return winners;
+  for (const item of lazyShuffle(pool, rng)) {
+    winners.push(item);
+    if (winners.length >= count) break;
   }
   return winners;
 }
@@ -28,7 +47,7 @@ function shortId(length = 8) {
   return out;
 }
 
-module.exports = { pickWinners, shortId };
+module.exports = { pickWinners, lazyShuffle, shortId };
 
 /** Élément aléatoire d'un tableau. */
 function pick(items, rng = Math.random) {
