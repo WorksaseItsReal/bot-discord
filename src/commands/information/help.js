@@ -9,7 +9,7 @@ const { card, field, wide, ICONS, subtext, buttonRows } = require('../../utils/u
 const { UserError } = require('../../core/errors');
 const { inviteButton } = require('../utility/invite');
 const { DEFAULT_COOLDOWN_MS } = require('../../events/interactionCreate');
-const { isContextMenu, commandLabel, contextMenuWhere } = require('../../core/CommandHandler');
+const { isContextMenu, commandLabel, contextMenuWhere, scopeOf } = require('../../core/CommandHandler');
 
 /** Icône des menus contextuels (clic droit → Applications). */
 const CONTEXT_ICON = '🖱️';
@@ -18,6 +18,16 @@ const CONTEXT_ICON = '🖱️';
 function describe(cmd) {
   if (!isContextMenu(cmd)) return cmd.data.description ?? '';
   return cmd.description ?? contextMenuWhere(cmd);
+}
+
+/**
+ * Commandes que cet utilisateur peut voir dans l'aide : les commandes de portée « owner »
+ * (console /bot) sont masquées à quiconque n'est pas propriétaire du bot (OWNER_IDS).
+ * @returns {import('discord.js').Collection<string, object>}
+ */
+function visibleCommands(client, userId) {
+  const owner = client.config?.ownerIds?.includes(userId);
+  return owner ? client.commands : client.commands.filter((c) => scopeOf(c) !== 'owner');
 }
 
 /** Commande par nom saisi (« ban », « /ban », « signaler le message »), sans tenir compte de la casse. */
@@ -41,14 +51,15 @@ module.exports = {
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
+    const commands = visibleCommands(client, interaction.user.id);
     const specific = interaction.options.getString('commande');
     if (specific) {
-      const cmd = findCommand(client.commands, specific);
+      const cmd = findCommand(commands, specific);
       if (!cmd) throw new UserError(`Commande inconnue : \`${truncate(specific, 32)}\`. Tapez \`/help\` pour la liste.`);
       return interaction.reply({ embeds: [commandDetailEmbed(cmd)], ephemeral: true });
     }
 
-    const grouped = groupByCategory(client.commands);
+    const grouped = groupByCategory(commands);
     const menuId = `help:${interaction.id}`;
     const menu = (selected) =>
       selectMenu({
@@ -69,7 +80,7 @@ module.exports = {
     const components = (selected) => [row(menu(selected)), ...links];
 
     const message = await interaction.reply({
-      embeds: [homeEmbed(client, grouped)],
+      embeds: [homeEmbed(client, grouped, commands)],
       components: components('__home'),
       ephemeral: true,
       fetchReply: true,
@@ -81,7 +92,7 @@ module.exports = {
     });
     collector.on('collect', async (i) => {
       const key = i.values[0];
-      const embed = key === '__home' || !grouped.has(key) ? homeEmbed(client, grouped) : categoryEmbed(key, grouped.get(key));
+      const embed = key === '__home' || !grouped.has(key) ? homeEmbed(client, grouped, commands) : categoryEmbed(key, grouped.get(key));
       await i.update({ embeds: [embed], components: components(key) }).catch(() => {});
     });
     // Fin de navigation : le menu disparaît, les liens restent utiles.
@@ -91,7 +102,7 @@ module.exports = {
   /** @param {import('discord.js').AutocompleteInteraction} interaction */
   async autocomplete(interaction, client) {
     const focused = interaction.options.getFocused().toLowerCase().replace(/^\//, '');
-    const choices = [...client.commands.values()]
+    const choices = [...visibleCommands(client, interaction.user.id).values()]
       .filter((c) => c.data.name.toLowerCase().includes(focused) || describe(c).toLowerCase().includes(focused))
       .sort((a, b) => a.data.name.localeCompare(b.data.name))
       .slice(0, 25)
@@ -126,14 +137,14 @@ function countEntries(commands) {
 
 const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
 
-function homeEmbed(client, grouped) {
+function homeEmbed(client, grouped, commands = client.commands) {
   return card({
     tone: 'brand',
     section: 'information',
     icon: ICONS.help,
     title: `Aide de ${client.user.username}`,
     description: [
-      `Bienvenue ! **${client.commands.size}** commandes et **${countEntries(client.commands)}** actions sont à votre disposition.`,
+      `Bienvenue ! **${commands.size}** commandes et **${countEntries(commands)}** actions sont à votre disposition.`,
       '',
       `${ICONS.next} Choisissez une **catégorie** dans le menu ci-dessous.`,
       `${ICONS.search} Tapez \`/help commande:<nom>\` pour la fiche d'une commande.`,
@@ -235,3 +246,4 @@ module.exports.homeEmbed = homeEmbed;
 module.exports.categoryEmbed = categoryEmbed;
 module.exports.groupByCategory = groupByCategory;
 module.exports.findCommand = findCommand;
+module.exports.visibleCommands = visibleCommands;
