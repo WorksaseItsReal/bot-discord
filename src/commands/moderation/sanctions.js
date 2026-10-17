@@ -60,7 +60,7 @@ function enforcedRefusal(sanctions) {
   const lines = sanctions.map((s) => {
     const label = TYPE_LABELS[s.type] ?? s.type;
     const until = awaitingLift(s)
-      ? ` échue, **levée en attente**`
+      ? ' échue, **levée en attente**'
       : s.expires_at ? ` jusqu'au ${discordTimestamp(s.expires_at, 'f')}` : '';
     const lift = LIFT_COMMANDS[s.type] ? `levez-la d'abord avec ${LIFT_COMMANDS[s.type]}` : 'levez-la d\'abord';
     return `• ${code(`#${s.id}`)} **${label}**${until} → ${lift}`;
