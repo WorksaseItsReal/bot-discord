@@ -156,6 +156,46 @@ async function syncNow(guild, cfg, logChannelId) {
   return result;
 }
 
+/**
+ * Salon renouvelé (/channel renouveler) : les règles natives du bot, figées à leur dernière
+ * synchronisation, visent encore l'ancien identifiant (salon exempté, salon d'alerte). Seul cet
+ * identifiant est remplacé par celui de la copie : rien d'autre de la configuration n'est poussé
+ * (une synchronisation complète appliquerait aussi des changements pas encore synchronisés).
+ * @returns {Promise<{ updated: number, failed: number }>}
+ */
+function remapChannel(guild, oldId, newId) {
+  return exclusive(guild.id, async () => {
+    assertCanManage(guild);
+    const result = { updated: 0, failed: 0 };
+    for (const rule of await ownRules(guild)) {
+      const exempt = [...(rule.exemptChannels?.keys?.() ?? [])];
+      const ruleActions = rule.actions ?? [];
+      const exemptHit = exempt.includes(oldId);
+      const alertHit = ruleActions.some((a) => a.metadata?.channelId === oldId);
+      if (!exemptHit && !alertHit) continue;
+      const edit = {};
+      if (exemptHit) edit.exemptChannels = [...new Set(exempt.map((id) => (id === oldId ? newId : id)))];
+      if (alertHit) {
+        edit.actions = ruleActions.map((a) => ({
+          type: a.type,
+          metadata: {
+            durationSeconds: a.metadata?.durationSeconds ?? undefined,
+            channel: a.metadata?.channelId === oldId ? newId : a.metadata?.channelId ?? undefined,
+            customMessage: a.metadata?.customMessage ?? undefined,
+          },
+        }));
+      }
+      try {
+        await rule.edit(edit);
+        result.updated += 1;
+      } catch {
+        result.failed += 1;
+      }
+    }
+    return result;
+  });
+}
+
 /** Supprime les règles natives créées par le bot. @returns {Promise<number>} */
 function remove(guild) {
   return exclusive(guild.id, async () => {
@@ -166,4 +206,4 @@ function remove(guild) {
   });
 }
 
-module.exports = { sync, remove, ownRules, desiredRules, toKeywords, NAMES, PREFIX, MAX_EXEMPT_ROLES, MAX_EXEMPT_CHANNELS };
+module.exports = { sync, remove, remapChannel, ownRules, desiredRules, toKeywords, NAMES, PREFIX, MAX_EXEMPT_ROLES, MAX_EXEMPT_CHANNELS };

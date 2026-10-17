@@ -2,6 +2,7 @@
 
 const { ChannelType, PermissionFlagsBits, PermissionsBitField, ChannelFlags } = require('discord.js');
 const channelRemap = require('../utils/channelRemap');
+const nativeAutoMod = require('./NativeAutoMod');
 const { permissionLabel } = require('../utils/permissionNames');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
@@ -386,6 +387,17 @@ class ChannelRenewService {
           notes.push('Message épinglé (sticky) non republié : relancez /sticky.');
           logger.debug('Sticky non republié :', e?.message);
         }
+      }
+
+      // Règles AutoMod natives de Discord : figées à la dernière synchronisation, elles visent
+      // encore l'ancien identifiant (salon exempté, salon d'alerte) alors que le bilan annonce
+      // l'AutoMod reporté → rebranchées sur la copie (seul l'identifiant change).
+      if (report?.configPaths?.some((p) => p.startsWith('automod.') || p === 'logChannels.automod')) {
+        const remapped = await nativeAutoMod.remapChannel(guild, source.id, created.id).catch((e) => {
+          logger.debug('Règles AutoMod natives non rebranchées :', e?.message);
+          return null;
+        });
+        if (!remapped || remapped.failed) notes.push('Règles AutoMod natives de Discord non rebranchées sur la copie : /automod → AutoMod de Discord → Synchroniser.');
       }
 
       // 6. Salon système / AFK du serveur.

@@ -261,3 +261,76 @@ test('S12 /annonce @everyone : auteur whitelisté → publiée à l\'échéance 
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- S38 : /channel renouveler et AutoMod natif
+
+const ALERT = 2; // AutoModerationActionType.SendAlertMessage
+const nativeRules = (h) => [...h.fake.autoModRules.values()].map((r) => ({
+  name: r.name,
+  exempt: r.exempt_channels ?? [],
+  alert: (r.actions ?? []).find((a) => a.type === ALERT)?.metadata?.channel_id ?? null,
+  block: (r.actions ?? []).find((a) => a.type === 1)?.metadata?.custom_message ?? null,
+}));
+
+async function renewChannel(h, channelId) {
+  const rec = await h.slash('channel', [{ name: 'renouveler', type: 1, options: [{ name: 'salon', type: 7, value: channelId }] }], { as: 'admin', channel: 'staff' });
+  const [plan] = h.messagesOf(rec);
+  const button = buttonsOf(plan).find((b) => b.custom_id?.startsWith('cmd:channel:renewform:'));
+  assert.ok(button, h.replyText(rec));
+  const click = await h.click(plan, button.custom_id, { as: 'admin' });
+  const done = await h.submitModal(click, { confirmation: 'RENOUVELER' });
+  await h.settle();
+  assert.ok(!h.isError(done), h.replyText(done));
+  return h.messagesOf(done).flatMap((m) => (m.embeds ?? []).flatMap((e) => [e.title, e.description, ...(e.fields ?? []).map((f) => `${f.name}: ${f.value}`)])).filter(Boolean).join(' | ');
+}
+
+test('S38 /channel renouveler : salon exempté par les règles AutoMod natives → exemption reportée sur la copie (rien d\'autre poussé)', async () => {
+  const native = require('../../src/services/NativeAutoMod');
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const old = IDS.channels.general;
+    h.configure({ automod: { ignoredChannels: [old] } });
+    const cfg0 = h.client.services.config.get(h.guild.id);
+    assert.equal((await native.sync(h.guild, cfg0.automod, cfg0.logChannels?.automod)).failed.length, 0);
+    const before = nativeRules(h);
+    assert.ok(before.length && before.every((x) => x.exempt.includes(old)), 'précondition : salon exempté nativement');
+    // Changement de config NON synchronisé : il ne doit pas être poussé par le renouvellement.
+    h.configure({ automod: { ignoredRoles: [IDS.roles.gamer] } });
+
+    const reply = await renewChannel(h, old);
+    const newId = h.client.services.config.get(h.guild.id).automod.ignoredChannels[0];
+    assert.notEqual(newId, old);
+    const after = nativeRules(h);
+    assert.ok(after.every((x) => x.exempt.includes(newId) && !x.exempt.includes(old)), `copie non exemptée nativement : ${JSON.stringify(after.map((x) => x.exempt))}`);
+    assert.ok(after.every((x) => x.alert === before.find((b) => b.name === x.name).alert), 'salon d\'alerte modifié à tort');
+    assert.ok(after.every((x) => x.block === before.find((b) => b.name === x.name).block), 'message de blocage perdu');
+    assert.ok([...h.fake.autoModRules.values()].every((r) => !(r.exempt_roles ?? []).includes(IDS.roles.gamer)), 'réglage non synchronisé poussé par le renouvellement');
+    assert.doesNotMatch(reply, /non rebranchées/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S38 /channel renouveler : salon des logs AutoMod → alertes natives rebranchées sur la copie', async () => {
+  const native = require('../../src/services/NativeAutoMod');
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const old = IDS.channels.logs;
+    const cfg0 = h.client.services.config.get(h.guild.id);
+    assert.equal(cfg0.logChannels.automod, old);
+    assert.equal((await native.sync(h.guild, cfg0.automod, cfg0.logChannels.automod)).failed.length, 0);
+    assert.ok(nativeRules(h).every((x) => x.alert === old));
+
+    await renewChannel(h, old);
+    const newId = h.client.services.config.get(h.guild.id).logChannels.automod;
+    assert.notEqual(newId, old);
+    assert.ok(!h.fake.channels.has(old));
+    assert.ok(nativeRules(h).every((x) => x.alert === newId), `alertes vers un salon supprimé : ${JSON.stringify(nativeRules(h).map((x) => x.alert))}`);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
