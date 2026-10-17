@@ -31,6 +31,7 @@ class LockRepository {
     this.deleteStmt = db.prepare('DELETE FROM lock_state WHERE guild_id = ? AND channel_id = ?');
     this.deleteChannelStmt = db.prepare("DELETE FROM lock_state WHERE guild_id = ? AND (channel_id = ? OR channel_id LIKE ? || ':%')");
     this.listStmt = db.prepare('SELECT * FROM lock_state WHERE guild_id = ?');
+    this.deleteGuildStmt = db.prepare('DELETE FROM lock_state WHERE guild_id = ?');
   }
 
   save(guildId, channelId, data, kind = DEFAULT_KIND) {
@@ -49,6 +50,14 @@ class LockRepository {
   /** Oublie tous les états d'un salon (salon supprimé). */
   deleteChannel(guildId, channelId) {
     this.deleteChannelStmt.run(guildId, channelId, channelId);
+  }
+
+  /**
+   * Oublie tous les états d'un serveur (bot retiré du serveur : pendant son absence, les salons
+   * peuvent changer ; restaurer ces états à son retour rouvrirait des salons fermés entre-temps).
+   */
+  deleteGuild(guildId) {
+    this.deleteGuildStmt.run(guildId);
   }
 
   /** États d'une sorte donnée pour un serveur (par défaut : verrouillages d'écriture). */

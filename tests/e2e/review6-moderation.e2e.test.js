@@ -343,3 +343,58 @@ test('R16 rôle Muted : conférences et salons média couverts, création de fil
     await h.close();
   }
 });
+
+test('R32 bot retiré pendant un lockdown puis réinvité : plus de lockdown fantôme, /lockdown disable ne rouvre pas un salon passé en lecture seule', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const G = h.guild.id;
+    const lockdown = h.client.services.lockdown;
+    await lockdown.enable(h.guild, h.guild.members.me, 'AntiRaid automatique', { log: false, wait: true });
+    assert.ok(lockdown.status(h.guild) > 0);
+    require('../../src/events/guildDelete').execute(h.client, { id: G, name: 'x', available: true });
+    assert.equal(h.client.repositories.locks.list(G).length, 0, 'états de verrouillage conservés après le départ');
+    // Pendant l'absence : refus retirés à la main, #annonces passé en lecture seule.
+    for (const ch of h.fake.channels.values()) {
+      if (ch.guild_id !== G || !Array.isArray(ch.permission_overwrites)) continue;
+      ch.permission_overwrites = ch.permission_overwrites.filter((o) => o.id !== G);
+      if (ch.id === IDS.channels.announcements) ch.permission_overwrites.push({ id: G, type: 0, allow: '0', deny: P.SendMessages.toString() });
+      h.fake.dispatchNow('CHANNEL_UPDATE', { ...ch }, `état manuel ${ch.name}`);
+    }
+    await h.settle();
+    const st = await h.slash('lockdown', sub('status'), { as: 'admin' });
+    assert.match(h.replyText(st), /Aucun salon/);
+    await h.slash('lockdown', sub('disable'), { as: 'admin' });
+    assert.equal(can(h, IDS.users.target, IDS.channels.announcements), false, '#annonces rouvert par un état périmé');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R32 salon déverrouillé à la main pendant un lockdown : statut recalculé, état oublié, nouveau verrouillage sur l\'état réel', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ moderation: { confirmDangerous: false } });
+  try {
+    const G = h.guild.id;
+    const lockdown = h.client.services.lockdown;
+    await h.slash('lockall', [], { as: 'admin' });
+    const locked = lockdown.status(h.guild);
+    assert.ok(locked > 1);
+    // Un administrateur rouvre #annonces à la main (refus retirés) puis y autorise explicitement l'écriture.
+    const ann = h.fake.channels.get(IDS.channels.announcements);
+    ann.permission_overwrites = [{ id: G, type: 0, allow: String(P.SendMessages), deny: '0' }];
+    h.fake.dispatchNow('CHANNEL_UPDATE', { ...ann }, 'déverrouillage manuel');
+    await h.settle();
+    assert.equal(lockdown.status(h.guild), locked - 1, 'salon rouvert à la main encore compté comme verrouillé');
+    // /lock sur ce salon : l'état d'origine mémorisé est l'état réel (écriture autorisée), pas l'ancien.
+    await h.slash('lock', [opt('salon', 7, IDS.channels.announcements)], { as: 'admin' });
+    await h.slash('unlock', [opt('salon', 7, IDS.channels.announcements)], { as: 'admin' });
+    const ow = h.fake.channels.get(IDS.channels.announcements).permission_overwrites.find((o) => o.id === G);
+    assert.equal(ow?.allow, String(P.SendMessages), 'état d\'origine périmé restauré');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

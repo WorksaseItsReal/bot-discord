@@ -193,6 +193,7 @@ function lockableChannel(id, guild, latency = 0) {
       if (v === false) ow.deny.bitfield |= bit;
     }
   };
+  const cache = new Map([[guild.id, ow]]);
   return {
     id,
     type: ChannelType.GuildText,
@@ -200,8 +201,12 @@ function lockableChannel(id, guild, latency = 0) {
     guild,
     isThread: () => false,
     permissionOverwrites: {
-      cache: new Map([[guild.id, ow]]),
-      edit: async (_t, perms) => apply(perms),
+      cache,
+      // Comme discord.js : une surcharge supprimée puis recréée revient dans le cache.
+      edit: async (_t, perms) => {
+        await apply(perms);
+        cache.set(guild.id, ow);
+      },
       delete: async () => apply({ SendMessages: null, SendMessagesInThreads: null, CreatePublicThreads: null, CreatePrivateThreads: null }),
     },
     sendDenied: () => Boolean(ow.deny.bitfield & F.SendMessages),

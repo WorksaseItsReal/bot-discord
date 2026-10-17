@@ -280,6 +280,15 @@ async function restoreOthers(channel, others, reason) {
   }
 }
 
+/**
+ * Le refus d'écrire posé à @everyone est-il toujours en place ? Faux : le salon a été rouvert hors
+ * du bot (à la main) et l'état mémorisé est périmé.
+ */
+function stillLocked(channel) {
+  const everyone = channel?.guild?.roles?.everyone;
+  return overwriteState(channel?.permissionOverwrites?.cache?.get?.(everyone?.id), 'SendMessages') === false;
+}
+
 /** Ligne prise en compte par lockdown status / unlockall / lockdown disable. */
 function isLockdownLock(row) {
   return (normalizeLock(row.data).scope ?? SCOPES.lockdown) === SCOPES.lockdown;
@@ -382,7 +391,12 @@ class LockdownService {
   async #lock(channel, reason, { scope, timer }) {
     const everyone = channel.guild.roles.everyone;
     const perms = lockPermsFor(channel);
-    const saved = this.locks.get(channel.guild.id, channel.id);
+    let saved = this.locks.get(channel.guild.id, channel.id);
+    if (saved && !stillLocked(channel)) {
+      // Rouvert à la main depuis : l'état d'origine mémorisé est périmé, on repart de l'état réel.
+      this.locks.delete(channel.guild.id, channel.id);
+      saved = undefined;
+    }
     const state = saved ? normalizeLock(saved.data) : { scope, perms: {}, others: {} };
     const current = channel.permissionOverwrites.cache.get(everyone.id);
     const missing = perms.filter((p) => !(p in state.perms));
@@ -436,7 +450,11 @@ class LockdownService {
       const saved = this.locks.get(channel.guild.id, channel.id);
       if (saved) {
         const state = normalizeLock(saved.data);
-        await restoreEveryone(channel, state.perms, reason);
+        // Seules les permissions qui portent ENCORE le refus du bot sont restaurées : un réglage
+        // changé à la main pendant le verrouillage est respecté.
+        const current = channel.permissionOverwrites.cache.get(channel.guild.roles.everyone.id);
+        const back = Object.fromEntries(Object.entries(state.perms).filter(([flag]) => overwriteState(current, flag) === false));
+        if (Object.keys(back).length) await restoreEveryone(channel, back, reason);
         await restoreOthers(channel, state.others, reason);
         this.locks.delete(channel.guild.id, channel.id);
       } else {
@@ -567,9 +585,12 @@ class LockdownService {
     });
   }
 
-  /** Nombre de salons verrouillés par un lockdown en cours. */
+  /**
+   * Nombre de salons verrouillés par un lockdown en cours, d'après Discord : un salon supprimé ou
+   * rouvert à la main ne compte plus (pas de lockdown fantôme).
+   */
   status(guild) {
-    return this.locks.list(guild.id).filter(isLockdownLock).length;
+    return this.locks.list(guild.id).filter((row) => isLockdownLock(row) && stillLocked(guild.channels?.cache?.get(row.channel_id))).length;
   }
 }
 
