@@ -17,9 +17,9 @@ const { OVERRIDES } = require('./lib/overrides');
 
 const key = (name, leaf) => [name, ...leaf.path].join(' ');
 const opt = (name, type, value) => ({ name, type, value });
-const DASHBOARDS = ['automod', 'logs', 'antiraid', 'tickets', 'bienvenue', 'niveaux', 'settings', 'tempvoice', 'compteurs', 'signalements', 'communaute', 'alertes', 'economie', 'statistiques', 'activite', 'candidatures', 'automatisations', 'secur'];
+const DASHBOARDS = ['automod', 'logs', 'antiraid', 'tickets', 'bienvenue', 'niveaux', 'settings', 'tempvoice', 'compteurs', 'signalements', 'communaute', 'alertes', 'economie', 'statistiques', 'activite', 'candidatures', 'automatisations', 'secur', 'permissions'];
 // Tableaux de bord ouverts par une sous-commande.
-const DASHBOARD_SUB = { alertes: 'config', secur: 'panneau' };
+const DASHBOARD_SUB = { alertes: 'config', secur: 'panneau', permissions: 'panneau' };
 const dashboardOptions = (name) => (DASHBOARD_SUB[name] ? [{ name: DASHBOARD_SUB[name], type: 1, options: [] }] : []);
 
 test('chaque commande slash, en administrateur, avec exploration des composants', async (t) => {
