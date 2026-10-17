@@ -10,8 +10,12 @@ const { nextId } = require('../ids');
  *    salon cible, entrée d'audit 50 (changes type 2) ;
  *  - autocollants : GET / POST / DELETE /guilds/:g/stickers (audits 90 et 92, GUILD_STICKERS_UPDATE),
  *    et `fake.seedStickers(list)` pour en placer au départ ;
- *  - PATCH /guilds/:g/members/:id : l'entrée d'audit 25 reçoit, comme sur Discord, les changes
- *    $add / $remove (le cœur ne les pose que pour PUT / DELETE …/roles/:role) ;
+ *  - PATCH /guilds/:g/members/:id fait par un HUMAIN (fake.perform) : l'entrée d'audit 25 reçoit,
+ *    comme sur Discord, les changes $add / $remove (le cœur ne les pose que pour PUT / DELETE
+ *    …/roles/:role). Les PATCH du bot gardent le comportement du cœur : sur Discord, ils porteraient
+ *    aussi ces changes, ce qui ferait voir à auditLogs.js le retrait du rôle Muted par la quarantaine
+ *    AutoMod comme une levée du mute (constat signalé, hors périmètre de SEC4 ; R42 de
+ *    review6-automod dépend du comportement actuel) ;
  *  - PATCH /guilds/:g : icône, bannière et image d'invitation stockées en HASH (comme Discord), et
  *    changes icon_hash / banner_hash / splash_hash dans l'entrée d'audit 1.
  * Les permissions de l'acteur (humain via fake.perform, sinon le bot) sont vérifiées sur ces routes.
@@ -118,6 +122,7 @@ module.exports = (fake, route, { error, audit }) => {
   const baseMemberPatch = fake.routes.find((r) => r.method === 'PATCH' && r.re.test('/guilds/1/members/2'));
   if (baseMemberPatch) {
     route('PATCH', '/guilds/:guild/members/:user', function (p, call) {
+      if (!this.actorId) return baseMemberPatch.handler(p, call);
       const userId = p.user === '@me' ? this.botUser.id : p.user;
       const before = [...(this.members.get(userId)?.roles ?? [])];
       const mark = this.auditLog.length;
