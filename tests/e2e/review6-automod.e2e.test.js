@@ -183,3 +183,40 @@ test('R42 : levée de quarantaine — rôle temporaire et mute toujours en cours
     await h.close();
   }
 });
+
+test('R44 : message publié via une application installée par le membre — analysé et attribué au membre', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    onlyFilters(h, ['badWords'], { notify: 'none' });
+    h.configure({ automod: { filters: { badWords: { enabled: true, words: ['connard'], action: 'warn' } } } });
+    const app = h.addUser('AppExterne', { bot: true });
+    const member = h.fake.users.get(IDS.users.member);
+    const viaApp = async (content, owners) => {
+      const mark = h.fake.calls.length;
+      const logMark = h.fake.messageLog.length;
+      const msg = await h.userMessage({ as: app.id, content, extra: {
+        webhook_id: app.id, application_id: app.id,
+        interaction_metadata: { id: String(BigInt(app.id) + 1n), type: 2, user: member, authorizing_integration_owners: owners },
+      } });
+      await h.settle();
+      const deleted = h.fake.calls.slice(mark).some((c) => c.method === 'DELETE' && c.route.endsWith(`/messages/${msg.id}`));
+      const logs = h.fake.messageLog.slice(logMark).map((id) => h.message(id)).filter((m) => m?.channel_id === IDS.channels.logs);
+      return { deleted, logs };
+    };
+    // Application installée sur le compte du membre (pas sur le serveur) : le texte est le sien.
+    const r = await viaApp('sale connard', { 1: IDS.users.member });
+    assert.equal(r.deleted, true, 'message via une application externe non analysé');
+    const log = r.logs.find((m) => /Message filtré/.test(m.embeds?.[0]?.title ?? ''));
+    assert.ok(log, 'pas de log AutoMod');
+    assert.match(JSON.stringify(log.embeds), new RegExp(IDS.users.member), 'infraction non attribuée au membre');
+    const warns = h.client.repositories.sanctions.listByUser(h.guild.id, IDS.users.member).filter((s) => s.type === 'warn');
+    assert.equal(warns.length, 1, 'avertissement non attribué au membre');
+    assert.equal(h.client.repositories.sanctions.listByUser(h.guild.id, app.id).length, 0);
+    // Application installée par le serveur (son propre contenu) : jamais analysée.
+    assert.equal((await viaApp('sale connard', { 0: h.guild.id, 1: IDS.users.member })).deleted, false);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -1,7 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
-const { PermissionFlagsBits, AuditLogEvent } = require('discord.js');
+const { PermissionFlagsBits, AuditLogEvent, ApplicationIntegrationType } = require('discord.js');
 const { parseDuration, formatDuration } = require('../utils/time');
 const { truncate } = require('../utils/embeds');
 const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, subtext, code } = require('../utils/ui');
@@ -374,9 +374,15 @@ class AutoModService {
    * @param {{ edited?: boolean }} [opts] message édité : seuls les filtres de contenu s'appliquent.
    */
   async handleMessage(message, { edited = false } = {}) {
-    // Bots, webhooks et messages système (dont les alertes de l'AutoMod natif, attribuées
-    // au membre fautif) : jamais analysés, sinon on supprimerait la preuve.
-    if (!message.guild || message.author?.bot || message.webhookId || message.system) return;
+    // Messages système (dont les alertes de l'AutoMod natif, attribuées au membre fautif) :
+    // jamais analysés, sinon on supprimerait la preuve.
+    if (!message.guild || message.system) return;
+    // Bots et webhooks : ignorés, sauf un message publié par un membre via une application
+    // installée sur SON compte (« Utiliser des applications externes ») : analysé comme le sien.
+    if (message.author?.bot || message.webhookId) {
+      message = this.#userAppMessage(message);
+      if (!message) return;
+    }
     const cfg = this.config.get(message.guild.id).automod;
     if (!cfg?.enabled) return;
     // Message édité d'un membre hors cache : on le récupère au lieu d'abandonner.
@@ -390,6 +396,24 @@ class AutoModService {
     const violation = this.inspect(message, cfg.filters, { temporal: !edited, newMembers: cfg.newMembers });
     if (!violation) return;
     await this.#apply(message, violation, cfg);
+  }
+
+  /**
+   * Message publié via une application installée par un membre (et non par le serveur) :
+   * vue du message dont l'auteur est ce membre (sanction, exemptions, journal), ou null.
+   * Une application du serveur (y compris ce bot) parle en son nom : jamais attribuée au membre.
+   */
+  #userAppMessage(message) {
+    const meta = message.interactionMetadata;
+    const user = meta?.user;
+    const owners = meta?.authorizingIntegrationOwners;
+    if (!user || user.bot || !owners) return null;
+    if (owners[ApplicationIntegrationType.GuildInstall] != null || owners[ApplicationIntegrationType.UserInstall] == null) return null;
+    if (message.author?.id && message.author.id === this.logging?.client?.user?.id) return null;
+    return Object.create(message, {
+      author: { value: user, enumerable: true },
+      member: { value: message.guild.members?.resolve?.(user.id) ?? null, writable: true, configurable: true, enumerable: true },
+    });
   }
 
   /**
