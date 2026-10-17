@@ -362,3 +362,47 @@ test('R34 : préréglage, seuils, sanction et whitelist (tableau de bord et /whi
   assert.equal(configLogs(w).length, 6, '/whitelist add sans trace');
   assert.match(JSON.stringify(configLogs(w)[5]), /500000000000000088/);
 });
+
+// ---------------------------------------------------------------- R35
+
+function goneWorld(punishExecutor, { banFails = false } = {}) {
+  const alerts = [];
+  const bans = [];
+  const marks = [];
+  const cfg = { antiraid: { enabled: true, channelDeleteThreshold: 2, roleDeleteThreshold: 2, banThreshold: 3, kickThreshold: 5, destructiveWindowSeconds: 15, punishExecutor }, whitelist: { users: [], roles: [] } };
+  const client = {
+    user: { id: 'bot' },
+    services: { moderation: { markBotAction: (...a) => marks.push(['mark', ...a]), unmarkBotAction: (...a) => marks.push(['unmark', ...a]) } },
+    channels: { fetch: async () => null },
+  };
+  const service = new AntiRaidService({ client, config: { get: () => cfg }, logging: { send: async (_g, _c, e) => { alerts.push(json(e)); return true; } } });
+  const guild = {
+    id: G,
+    ownerId: 'owner',
+    members: { fetch: async () => Promise.reject(Object.assign(new Error('Unknown Member'), { code: 10007 })), cache: new Map() },
+    bans: { create: async (id, opts) => (banFails ? Promise.reject(new Error('Missing Permissions')) : bans.push([id, opts?.reason])) },
+    roles: { cache: new Map() },
+  };
+  const run = async () => {
+    for (let i = 0; i < 2; i += 1) await service.handleDestructive(guild, 'nukeur-parti', 'channelDelete');
+  };
+  return { run, alerts, bans, marks };
+}
+
+test('R35 : auteur parti avec la sanction « ban » → banni par identifiant (marqué), dit dans l\'alerte', async () => {
+  const w = goneWorld('ban');
+  await w.run();
+  assert.deepEqual(w.bans, [['nukeur-parti', 'AntiRaid: channelDelete massif']], 'auteur parti jamais banni');
+  assert.deepEqual(w.marks, [['mark', 'ban', G, 'nukeur-parti']]);
+  assert.equal(w.alerts.length, 1);
+  assert.match(fieldOf(w.alerts[0], /Sanction/), /Banni/);
+  assert.match(fieldOf(w.alerts[0], /Attention/) ?? '', /quitté le serveur/);
+});
+
+test('R35 : auteur parti, bannissement par identifiant en échec → marque retirée, échec affiché', async () => {
+  const w = goneWorld('ban', { banFails: true });
+  await w.run();
+  assert.deepEqual(w.marks.map((m) => m[0]), ['mark', 'unmark']);
+  assert.match(fieldOf(w.alerts[0], /Sanction/), /Aucune/);
+  assert.match(fieldOf(w.alerts[0], /Attention/) ?? '', /quitté le serveur/);
+});

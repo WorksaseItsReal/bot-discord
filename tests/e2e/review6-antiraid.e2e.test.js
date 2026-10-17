@@ -253,3 +253,21 @@ test('R34 : désactivation et whitelist depuis /antiraid et /whitelist journalis
     await h.close();
   }
 });
+
+test('R35 : auteur d\'un nuke qui a quitté le serveur → banni par identifiant', async () => {
+  const { nextId } = require('./lib/ids');
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { channelDeleteThreshold: 2, destructiveWindowSeconds: 15, punishExecutor: 'ban' } });
+    const nuker = h.addUser('Nukeur');
+    for (let i = 0; i < 2; i += 1) await h.auditEntry({ action_type: 12, target_id: nextId(), user_id: nuker.id });
+    await h.settle();
+    assert.ok(h.fake.bans.has(nuker.id), 'auteur parti jamais banni');
+    const alert = botMessages(h, 0, titled(/Activité destructrice/))[0];
+    assert.match(JSON.stringify(alert.embeds[0].fields), /banni par identifiant/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

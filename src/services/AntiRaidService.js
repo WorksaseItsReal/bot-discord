@@ -559,8 +559,21 @@ class AntiRaidService {
    */
   async #punishExecutor(guild, executorId, cfg, type) {
     const member = await guild.members.fetch(executorId).catch(() => null);
-    if (!member) return { ok: false };
     const reason = `AntiRaid: ${type} massif`;
+    if (!member) {
+      // Auteur parti (script « supprime puis quitte », bot retiré) : banni par identifiant,
+      // sinon il revient avec n'importe quelle invitation.
+      if (cfg.punishExecutor !== 'ban') return { ok: false };
+      try {
+        this.#markBan(guild.id, executorId);
+        await guild.bans.create(executorId, { reason });
+        return { ok: true, note: 'L\'auteur avait quitté le serveur : il a été banni par identifiant et ne pourra pas revenir.' };
+      } catch (e) {
+        this.client.services?.moderation?.unmarkBotAction?.('ban', guild.id, executorId);
+        logger.debug('punishExecutor (auteur parti)', e?.message);
+        return { ok: false, note: 'L\'auteur a quitté le serveur et son bannissement par identifiant a échoué : il peut revenir.' };
+      }
+    }
     if (cfg.punishExecutor === 'ban') {
       try {
         this.#markBan(guild.id, member.id);
