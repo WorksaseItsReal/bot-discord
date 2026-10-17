@@ -298,3 +298,111 @@ test('S24 : catégorie supprimée d\'abord, file occupée plus de 30 s → vocal
   assert.ok(cat && voice, 'catégorie ou vocal non recréé');
   assert.equal(voice.parent_id, cat.id, 'vocal recréé hors de sa catégorie');
 });
+
+/* -------------------------------------------------------------------- */
+/* S11 : deux modifications successives du même objet                     */
+/* -------------------------------------------------------------------- */
+
+const { PermissionFlagsBits: P } = require('discord.js');
+
+const lastIncident = (h) => incidents(h)[0];
+const settleUndo = async (h, n = 4) => {
+  for (let i = 0; i < n; i += 1) {
+    await h.settle({ timeout: 5_000 });
+    await sleep(60);
+  }
+};
+
+test('S11 : roleUpdate (limite 2) 0 → Gérer les rôles → + Administrateur → permissions d\'origine rétablies', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { roleUpdate: { mode: 'on', limit: 2 } } } });
+    const role = IDS.roles.gamer;
+    const p0 = BigInt(h.fake.roles.get(role).permissions);
+    await h.asHuman('admin').editRole(role, { permissions: String(p0 | P.ManageRoles) });
+    await h.asHuman('admin').editRole(role, { permissions: String(p0 | P.ManageRoles | P.Administrator) });
+    await settleUndo(h);
+    assert.equal(BigInt(h.fake.roles.get(role).permissions), p0, 'état intermédiaire (Gérer les rôles) restauré');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('S11 : configuration par défaut, rafale (file occupée) : @everyone + Administrateur puis + un bit anodin → Administrateur retiré', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { roleUpdate: { mode: 'on' }, roleDelete: { mode: 'on' } } } });
+    // L'événement emporte l'état AU MOMENT de la requête, comme la vraie passerelle.
+    const origDispatch = h.fake.dispatch.bind(h.fake);
+    h.fake.dispatch = (t, d) => origDispatch(t, JSON.parse(JSON.stringify(d)));
+    const ev = IDS.roles.everyone;
+    const p0 = BigInt(h.fake.roles.get(ev).permissions);
+    const p1 = p0 | P.Administrator;
+    const benign = [P.SendTTSMessages, P.UseExternalStickers, P.PrioritySpeaker].find((b) => (p1 & b) === 0n);
+    h.fake.latency = 30;
+    const g = h.guild.id;
+    const reqs = [h.fake.perform('DELETE', `/guilds/${g}/roles/${IDS.roles.gamer}`, undefined, { actorId: IDS.users.admin }).catch(() => null)];
+    await sleep(5);
+    reqs.push(h.fake.perform('PATCH', `/guilds/${g}/roles/${ev}`, { permissions: String(p1) }, { actorId: IDS.users.admin }).catch(() => null));
+    await sleep(15);
+    reqs.push(h.fake.perform('PATCH', `/guilds/${g}/roles/${ev}`, { permissions: String(p1 | benign) }, { actorId: IDS.users.admin }).catch(() => null));
+    await Promise.all(reqs);
+    await settleUndo(h, 8);
+    assert.equal(BigInt(h.fake.roles.get(ev).permissions) & P.Administrator, 0n, '@everyone reste Administrateur');
+  } finally {
+    await h.close();
+  }
+});
+
+test('S11 : serverUpdate (limite 2) niveau de vérification 1 → 4 → 0 → niveau d\'origine rétabli', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { serverUpdate: { mode: 'on', limit: 2 } } } });
+    const v0 = h.fake.guild.verification_level;
+    await h.asHuman('admin').editGuild({ verification_level: 4 });
+    await h.asHuman('admin').editGuild({ verification_level: 0 });
+    await settleUndo(h, 3);
+    assert.equal(h.fake.guild.verification_level, v0);
+  } finally {
+    await h.close();
+  }
+});
+
+test('S11 : channelUpdate (limite 2) nom A → B → C → nom d\'origine rétabli, aucune annulation comptée à tort', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { channelUpdate: { mode: 'on', limit: 2 } } } });
+    const n0 = h.fake.channels.get(IDS.channels.general).name;
+    await h.asHuman('admin').editChannel(IDS.channels.general, { name: 'raid-1' });
+    await h.asHuman('admin').editChannel(IDS.channels.general, { name: 'nuked-by-x' });
+    await settleUndo(h, 3);
+    assert.equal(h.fake.channels.get(IDS.channels.general).name, n0);
+    assert.equal(lastIncident(h).undo_failed, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test('S11 : #staff ouvert à @everyone puis surcharge retouchée aussitôt → refus « Voir le salon » rétabli', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { channelUpdate: { mode: 'on' } } } });
+    const route = `/channels/${IDS.channels.staff}/permissions/${IDS.roles.everyone}`;
+    const before = h.fake.channels.get(IDS.channels.staff).permission_overwrites.find((o) => o.id === IDS.roles.everyone);
+    assert.ok(BigInt(before.deny) & P.ViewChannel, 'fixture : #staff privé');
+    await h.fake.perform('PUT', route, { type: 0, allow: '0', deny: '0' }, { actorId: IDS.users.admin });
+    await h.fake.perform('PUT', route, { type: 0, allow: '0', deny: String(P.AddReactions) }, { actorId: IDS.users.admin });
+    await settleUndo(h, 3);
+    const ow = h.fake.channels.get(IDS.channels.staff).permission_overwrites.find((o) => o.id === IDS.roles.everyone);
+    assert.notEqual(BigInt(ow.deny) & P.ViewChannel, 0n, '#staff reste visible par @everyone');
+    assert.equal(lastIncident(h).undo_failed, 0);
+  } finally {
+    await h.close();
+  }
+});

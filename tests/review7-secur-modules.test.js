@@ -80,3 +80,23 @@ test('S19 : clé du disjoncteur des suppressions = identifiant d\'origine (suivi
   // Objet recréé puis supprimé de nouveau : même clé que l'original.
   assert.equal(channelDelete.targetKey({ channelId: 'C', originId: 'A' }), channelDelete.targetKey({ channelId: 'A', originId: 'A' }));
 });
+
+// ---------------------------------------------------------------- S11
+
+test('S11 : chaîne de modifications d\'un champ par un même auteur — origine commune, dernière valeur reconnue ; autre auteur → nouvelle chaîne', () => {
+  const St = require('../src/services/secur/structure');
+  const store = new St.StructureStore();
+  const G = '300000000000000030';
+  const [c1] = St.chainChanges(store, G, 'channel:1', 'attaquant', [{ key: 'name', old: 'général', new: 'raid-1' }]);
+  const [c2] = St.chainChanges(store, G, 'channel:1', 'attaquant', [{ key: 'name', old: 'raid-1', new: 'nuked' }]);
+  assert.equal(c1.old, 'général');
+  assert.equal(c2.old, 'général', 'origine de la chaîne');
+  assert.equal(c1.chain, c2.chain);
+  // La 1re modification reconnaît la valeur actuelle laissée par la 2e : l'origine peut être rétablie.
+  assert.equal(St.chainMatches(store, G, 'channel:1', c1, 'nuked'), true);
+  assert.equal(St.chainMatches(store, G, 'channel:1', c1, 'renommé-par-un-admin'), false);
+  // Un autre auteur ne prolonge pas la chaîne.
+  const [c3] = St.chainChanges(store, G, 'channel:1', 'admin', [{ key: 'name', old: 'nuked', new: 'propre' }]);
+  assert.equal(c3.old, 'nuked');
+  assert.equal(St.chainMatches(store, G, 'channel:1', c1, 'propre'), false, 'valeur d\'un autre auteur prise pour celle de la chaîne');
+});

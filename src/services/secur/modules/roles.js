@@ -54,6 +54,12 @@ function roleApiValue(role, key) {
   }
 }
 
+/** Rôle relu chez Discord (le PATCH précédent du bot n'est pas encore dans le cache), ou celui du cache. */
+async function freshRole(guild, role) {
+  if (typeof guild.roles?.fetch !== 'function') return role;
+  return (await guild.roles.fetch(role.id, { force: true }).catch(() => null)) ?? role;
+}
+
 /** Le rôle est-il modifiable par le bot (sous son rôle le plus haut, non géré) ? */
 function editable(guild, role) {
   if (!role || role.managed) return false;
@@ -227,8 +233,10 @@ const roleUpdate = {
       }
       return null; // permissions DONNÉES à ce bot (réglage par un admin) : jamais comptées
     }
-    const changes = St.filterRoleChanges(entry.changes, { lenient: St.isLenient(ctx, 'roleUpdate', 'dangerousOnly') });
-    if (!changes.length) return null;
+    const filtered = St.filterRoleChanges(entry.changes, { lenient: St.isLenient(ctx, 'roleUpdate', 'dangerousOnly') });
+    if (!filtered.length) return null;
+    // Modifications successives du même champ par le même auteur : old ← valeur d'origine.
+    const changes = St.chainChanges(St.storeFor(ctx.client), guild.id, `role:${id}`, entry.executorId, filtered);
     const noUndo = Boolean(role && (role.managed || !editable(guild, role)));
     return { weight: 1, record: { roleId: id, name: role?.name ?? null, changes, noUndo } };
   },
@@ -240,20 +248,31 @@ const roleUpdate = {
     if (record.noUndo || !editable(guild, role)) {
       return { ok: false, note: record.botRole ? `Permissions retirées à mon rôle ${label} : non annulable (je ne peux pas modifier mon propre rôle). Rendez-les à la main.` : `Rôle ${label} : non annulable (rôle géré, ou au niveau du mien ou au-dessus).` };
     }
+    const store = St.storeFor(ctx.client);
+    const current = (record.changes ?? []).some((c) => St.ROLE_RESTORABLE.includes(c.key)) ? await freshRole(guild, role) : role;
     const body = {};
     const skipped = [];
+    const changed = [];
     for (const c of record.changes ?? []) {
       if (!St.ROLE_RESTORABLE.includes(c.key)) {
         skipped.push(c.key === 'icon_hash' || c.key === 'icon' ? 'icône' : c.key);
         continue;
       }
-      const now = roleApiValue(role, c.key);
-      if (St.sameValue(now, c.old)) continue; // déjà rétabli
-      if (!St.sameValue(now, c.new)) {
-        skipped.push(`${c.key} modifié depuis`);
+      if (c.key === 'permissions') {
+        // En bits, sur l'état relu : les bits gagnés par cette modification sont retirés, ceux
+        // qu'elle a retirés sont rendus, le reste est laissé (deux PATCH successifs, file occupée).
+        const now = St.toBig(current.permissions);
+        const next = (now & ~St.gainedBits(c.old, c.new)) | St.gainedBits(c.new, c.old);
+        if (next !== now) body.permissions = next.toString();
         continue;
       }
-      body[c.key] = c.key === 'permissions' ? String(c.old ?? '0') : c.old ?? null;
+      const now = roleApiValue(current, c.key);
+      if (St.sameValue(now, c.old)) continue; // déjà rétabli
+      if (!St.chainMatches(store, guild.id, `role:${role.id}`, c, now)) {
+        changed.push(c.key);
+        continue;
+      }
+      body[c.key] = c.old ?? null;
     }
     if (Object.keys(body).length) {
       try {
@@ -263,6 +282,8 @@ const roleUpdate = {
       }
     }
     if (skipped.length) St.noteSummary(ctx, `role:${role.id}`, () => {}, () => `Rôle ${label} : non rétabli automatiquement (${[...new Set(skipped)].join(', ')}).`);
+    // Modifié depuis par quelqu'un d'autre : laissé tel quel, compté comme non annulé.
+    if (changed.length) return { ok: false, note: `Rôle ${label} : ${[...new Set(changed)].join(', ')} modifié depuis par quelqu'un d'autre, laissé tel quel.` };
     return { ok: true };
   },
   describe: (record) => `Rôle modifié${record?.name ? ` : @${record.name}` : ''}`,

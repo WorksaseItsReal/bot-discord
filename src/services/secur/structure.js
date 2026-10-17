@@ -290,8 +290,9 @@ class StructureStore {
     this.maxBuffered = maxBuffered;
     this.bufferTtlMs = bufferTtlMs;
     this.maxGuilds = maxGuilds;
-    /** @type {Map<string, { snaps: Map, orphans: Map, overwrites: Map, remap: Map, deleted: Map, prunedAt: number }>} */
+    /** @type {Map<string, { snaps: Map, orphans: Map, overwrites: Map, remap: Map, origin: Map, deleted: Map, chains: Map, prunedAt: number }>} */
     this.guilds = new Map();
+    this.chainSeq = 0;
   }
 
   static #put(map, key, value, max) {
@@ -304,7 +305,7 @@ class StructureStore {
     if (!guildId) return null;
     let st = this.guilds.get(guildId);
     if (!st && create) {
-      st = { snaps: new Map(), orphans: new Map(), overwrites: new Map(), remap: new Map(), origin: new Map(), deleted: new Map(), prunedAt: this.now() };
+      st = { snaps: new Map(), orphans: new Map(), overwrites: new Map(), remap: new Map(), origin: new Map(), deleted: new Map(), chains: new Map(), prunedAt: this.now() };
       StructureStore.#put(this.guilds, guildId, st, this.maxGuilds);
     }
     if (st && this.now() - st.prunedAt > PRUNE_EVERY_MS) this.#prune(st);
@@ -313,7 +314,7 @@ class StructureStore {
 
   #prune(st, now = this.now()) {
     st.prunedAt = now;
-    for (const [map, ttl] of [[st.snaps, this.snapshotTtlMs], [st.remap, this.snapshotTtlMs], [st.origin, this.snapshotTtlMs], [st.deleted, this.snapshotTtlMs], [st.orphans, this.bufferTtlMs], [st.overwrites, this.bufferTtlMs]]) {
+    for (const [map, ttl] of [[st.snaps, this.snapshotTtlMs], [st.remap, this.snapshotTtlMs], [st.origin, this.snapshotTtlMs], [st.deleted, this.snapshotTtlMs], [st.chains, this.snapshotTtlMs], [st.orphans, this.bufferTtlMs], [st.overwrites, this.bufferTtlMs]]) {
       for (const [k, v] of map) if (now - v.at >= ttl) map.delete(k);
     }
   }
@@ -400,6 +401,27 @@ class StructureStore {
   remapOf(guildId, oldId) {
     const st = this.#state(guildId, false);
     return st ? this.#fresh(st.remap, oldId, this.snapshotTtlMs)?.id ?? null : null;
+  }
+
+  /**
+   * Modifications successives d'un même champ par un même auteur (A → B puis B → C) : une chaîne,
+   * dont l'origine (A) et la dernière valeur (C) servent à toutes ses annulations, quel que soit
+   * leur ordre dans la file. @returns {{ id: number, origin: unknown }}
+   */
+  chainChange(guildId, key, executorId, oldValue, newValue) {
+    const st = this.#state(guildId);
+    if (!st || !key || !executorId) return { id: 0, origin: oldValue };
+    const prev = this.#fresh(st.chains, key, this.snapshotTtlMs);
+    const linked = prev && prev.executorId === executorId && sameValue(prev.last, oldValue);
+    const link = linked ? { ...prev, last: newValue, at: this.now() } : { id: (this.chainSeq += 1), executorId, origin: oldValue, last: newValue, at: this.now() };
+    StructureStore.#put(st.chains, key, link, this.maxSnapshots);
+    return { id: link.id, origin: link.origin };
+  }
+
+  /** Chaîne de modifications d'un champ (voir chainChange), ou null. */
+  chainOf(guildId, key) {
+    const st = this.#state(guildId, false);
+    return st ? this.#fresh(st.chains, key, this.snapshotTtlMs) : null;
   }
 
   /** Suppression classée (auteur) : une catégorie supprimée dans le même incident est recréée d'abord. */
@@ -723,6 +745,30 @@ function noteSummary(ctx, key, mutate, render) {
   data.line = line;
 }
 
+/**
+ * Changements d'une entrée rattachés à la chaîne de leur champ (classify, dans l'ordre du journal) :
+ * old ← origine de la chaîne (valeur d'avant la 1re modification de cet auteur), chain ← identifiant.
+ * Sans magasin, serveur ou auteur : inchangés.
+ */
+function chainChanges(store, guildId, prefix, executorId, changes) {
+  if (!store || !guildId || !executorId) return changes;
+  return changes.map((c) => {
+    const { id, origin } = store.chainChange(guildId, `${prefix}:${c.key}`, executorId, c.old, c.new);
+    return { ...c, old: origin, chain: id };
+  });
+}
+
+/**
+ * La valeur actuelle vient-elle encore de cette modification (sa nouvelle valeur, ou celle d'une
+ * modification suivante du même auteur sur le même champ) ? Sinon, quelqu'un d'autre l'a changée.
+ */
+function chainMatches(store, guildId, prefix, c, now) {
+  if (sameValue(now, c.new)) return true;
+  if (!c.chain || !store) return false;
+  const chain = store.chainOf(guildId, `${prefix}:${c.key}`);
+  return Boolean(chain && chain.id === c.chain && sameValue(now, chain.last));
+}
+
 /** Identifiant actuel d'un salon (recréé : idMap, puis report entre incidents). */
 function resolveChannelId(guild, ctx, store, id) {
   if (!id) return null;
@@ -830,6 +876,8 @@ module.exports = {
   takeBudget,
   incidentOf,
   noteSummary,
+  chainChanges,
+  chainMatches,
   resolveChannelId,
   resolveRoleId,
   botMask,

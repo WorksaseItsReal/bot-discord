@@ -48,12 +48,16 @@ const serverUpdate = {
   key: 'serverUpdate',
   auditTypes: [1],
   priority: 5,
-  classify(entry) {
+  classify(entry, guild, ctx) {
     // Transfert de propriété : seul le propriétaire peut le faire. GUILD_UPDATE a souvent déjà mis
     // guild.ownerId à jour, et le moteur verrait l'ancien propriétaire comme un simple membre.
     if ((entry.changes ?? []).some((c) => c?.key === 'owner_id' && c.old != null && c.old === entry.executorId)) return null;
     const plan = St.planServerRestore(entry.changes);
     if (!plan.restore.length && !plan.images.length && !plan.alertOnly.length) return null;
+    // Modifications successives du même paramètre par le même auteur : old ← valeur d'origine.
+    const store = ctx?.client ? St.storeFor(ctx.client) : null;
+    plan.restore = St.chainChanges(store, guild?.id, 'server', entry.executorId, plan.restore);
+    plan.images = St.chainChanges(store, guild?.id, 'server', entry.executorId, plan.images);
     return { weight: 1, record: { plan } };
   },
   async undo(guild, record, ctx) {
@@ -69,7 +73,7 @@ const serverUpdate = {
     for (const c of plan.restore) {
       const now = guildApiValue(guild, c.key);
       if (St.sameValue(now, c.old)) continue; // déjà rétabli
-      if (!St.sameValue(now, c.new)) {
+      if (!St.chainMatches(store, guild.id, 'server', c, now)) {
         notes.push(`${label(c.key)} modifié depuis : laissé tel quel`);
         continue;
       }
@@ -86,7 +90,7 @@ const serverUpdate = {
     for (const img of plan.images) {
       const now = guildApiValue(guild, img.field);
       if (St.sameValue(now, img.old)) continue;
-      if (!St.sameValue(now, img.new)) {
+      if (!St.chainMatches(store, guild.id, 'server', img, now)) {
         notes.push(`${label(img.field)} modifiée depuis : laissée telle quelle`);
         continue;
       }
