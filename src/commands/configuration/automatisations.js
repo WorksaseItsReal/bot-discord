@@ -112,6 +112,22 @@ function picked(interaction, types) {
   return [...new Set(interaction.values ?? [])].filter((id) => SNOWFLAKE.test(id) && types.includes(cache.get(id)?.type)).slice(0, MAX_CHANNELS);
 }
 
+/**
+ * Salons NOUVELLEMENT choisis (absents de `before`) : l'auteur doit lui-même y avoir `flags`
+ * (Voir le salon + la permission de l'action) ; un salon déjà configuré par un autre reste.
+ */
+function assertAuthorCan(interaction, ids, before, flags, label) {
+  const previous = new Set(before ?? []);
+  const denied = ids.filter((id) => {
+    if (previous.has(id)) return false;
+    const perms = interaction.member ? interaction.guild.channels.cache.get(id)?.permissionsFor?.(interaction.member) : null;
+    return perms ? !perms.has([PermissionFlagsBits.ViewChannel, ...flags]) : false;
+  });
+  if (denied.length) {
+    throw new UserError(`Vous ne pouvez pas choisir ${denied.map((id) => `<#${id}>`).join(', ')} : il vous faut **Voir le salon** et **${label}** dans ce salon.`);
+  }
+}
+
 /** Avertissements de permissions du bot dans des salons (null si tout va bien). */
 function permissionWarnings(guild, ids, flags, label) {
   const me = guild.members?.me;
@@ -582,6 +598,8 @@ module.exports = {
     async cpchannels(interaction, client) {
       guard(interaction);
       const channels = picked(interaction, [ChannelType.GuildAnnouncement]);
+      // Publier les messages des autres exige « Gérer les messages » dans Discord.
+      assertAuthorCan(interaction, channels, settings(client, interaction.guildId).crosspost?.channels, [PermissionFlagsBits.ManageMessages], 'Gérer les messages');
       save(client, interaction.guildId, { crosspost: { channels } });
       // Salons retirés : leurs messages en attente ne sont plus publiés.
       client.services.automations?.refreshCrosspost(interaction.guildId);
@@ -593,6 +611,7 @@ module.exports = {
     async thchannels(interaction, client) {
       guard(interaction);
       const channels = picked(interaction, TEXT_TYPES);
+      assertAuthorCan(interaction, channels, settings(client, interaction.guildId).autoThreads?.channels, [PermissionFlagsBits.CreatePublicThreads], 'Créer des fils publics');
       save(client, interaction.guildId, { autoThreads: { channels } });
       await interaction.update(threadsView(client, interaction.guild, `${ICONS.success} ${channels.length} salon(s) avec fils automatiques.`));
     },

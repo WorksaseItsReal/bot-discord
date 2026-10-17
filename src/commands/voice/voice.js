@@ -16,6 +16,17 @@ function assertCanMoveTo(interaction, channel) {
   }
 }
 
+/**
+ * L'auteur doit voir le vocal CONCERNÉ (celui du membre, ou le salon vidé) et y avoir la permission
+ * (surcharges du salon comprises) : jamais d'action dans un vocal qui lui est fermé.
+ */
+function assertCanActIn(interaction, channel, flag, label) {
+  if (typeof channel?.permissionsFor !== 'function') return; // salon partiel : Discord tranchera
+  if (!channel.permissionsFor(interaction.member)?.has([PermissionFlagsBits.ViewChannel, flag])) {
+    throw new UserError(`Vous ne pouvez pas ${label} dans ${channel} : il vous faut **Voir le salon** et cette permission dans ce salon.`);
+  }
+}
+
 /** Même contrôle de hiérarchie que kick/mute (sauf sur soi-même). */
 function assertCanActOn(interaction, member, action) {
   if (member.id !== interaction.user.id) assertCanModerate(interaction.member, member, interaction.guild.members.me, { action });
@@ -122,6 +133,7 @@ module.exports = {
 
     if (sub === 'cleanup') {
       const channel = interaction.options.getChannel('salon');
+      assertCanActIn(interaction, interaction.guild.channels?.cache?.get(channel.id) ?? channel, PermissionFlagsBits.MoveMembers, 'déconnecter des membres');
       await interaction.deferReply({ ephemeral: true });
       let n = 0;
       let failed = 0;
@@ -164,6 +176,7 @@ module.exports = {
       const from = member.voice.channel;
       if (from?.id === channel.id) throw new UserError(`${user} est déjà dans ${channel}.`);
       assertCanActOn(interaction, member, 'déplacer');
+      assertCanActIn(interaction, from, PermissionFlagsBits.MoveMembers, 'déplacer des membres');
       assertCanMoveTo(interaction, channel);
       await member.voice.setChannel(channel, `Par ${interaction.user.tag}`);
       return interaction.reply(moveView({ member, from, to: channel, moderator: interaction.user, ownerId }));
@@ -171,6 +184,7 @@ module.exports = {
     if (sub === 'kick' || sub === 'disconnect') {
       assertCanActOn(interaction, member, 'déconnecter');
       const from = member.voice.channel;
+      assertCanActIn(interaction, from, PermissionFlagsBits.MoveMembers, 'déconnecter des membres');
       await member.voice.disconnect(`Par ${interaction.user.tag}`);
       return interaction.reply({
         embeds: [
@@ -188,6 +202,7 @@ module.exports = {
     if (sub === 'mute' || sub === 'unmute') {
       requirePermission(interaction, PermissionFlagsBits.MuteMembers, 'Couper le micro des membres');
       if (member.id !== interaction.user.id) assertCanModerate(interaction.member, member, me, { action: sub === 'mute' ? 'rendre muet' : 'réactiver le micro de' });
+      assertCanActIn(interaction, member.voice.channel, PermissionFlagsBits.MuteMembers, 'couper ou réactiver le micro');
       const muted = sub === 'mute';
       if (member.voice.serverMute === muted) throw new UserError(muted ? `Le micro de ${user} est déjà coupé.` : `Le micro de ${user} n'est pas coupé.`);
       await member.voice.setMute(muted, `Par ${interaction.user.tag}`);
@@ -214,6 +229,7 @@ module.exports = {
       assertCanMoveTo(interaction, target);
       const from = member.voice.channel;
       if (from?.id === target.id) throw new UserError(`${member} est déjà dans ${target}.`);
+      assertCanActIn(interaction, from, PermissionFlagsBits.MoveMembers, 'déplacer des membres');
       await member.voice.setChannel(target, `Par ${interaction.user.tag}`);
       await interaction.update(moveView({ member, from, to: target, moderator: interaction.user, ownerId, back: true }));
     },
@@ -226,6 +242,7 @@ async function toggleMute(interaction, memberId, ownerId, muted) {
   if (member.id !== interaction.user.id) {
     assertCanModerate(interaction.member, member, interaction.guild.members.me, { action: muted ? 'rendre muet' : 'réactiver le micro de' });
   }
+  assertCanActIn(interaction, member.voice.channel, PermissionFlagsBits.MuteMembers, 'couper ou réactiver le micro');
   if (member.voice.serverMute === muted) throw new UserError(muted ? `Le micro de ${member} est déjà coupé.` : `Le micro de ${member} n'est pas coupé.`);
   await member.voice.setMute(muted, `Par ${interaction.user.tag}`);
   await interaction.update(muteView(muted, { member, moderator: interaction.user, ownerId }));

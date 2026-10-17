@@ -233,7 +233,15 @@ class TempRoleService {
       }
       return;
     }
-    if (!this.repo.close(row.id, 'expired')) return;
+    // Clôture conditionnelle : prolongé ou renouvelé PENDANT le retrait (appel réseau), le
+    // renouvellement confirmé au modérateur l'emporte et le rôle est rendu.
+    if (!this.repo.closeIfDue(row.id, 'expired')) {
+      if (this.repo.byId(row.id)?.active && !member.roles.cache.has(role.id)) {
+        const { failed: lost } = await applyRoles(member, { add: [role.id] }, 'Rôle temporaire prolongé pendant son expiration', (_id, e) => { error = e; });
+        if (lost.length) logger.warn(`Rôle temporaire #${row.id} prolongé pendant son retrait : rôle non rendu :`, error?.message);
+      }
+      return;
+    }
     logger.info(`Rôle temporaire #${row.id} expiré : guild=${row.guild_id} user=${row.user_id} role=${row.role_id}`);
     await this.#log(guild, {
       tone: 'neutral',

@@ -16,7 +16,7 @@ const QUOTA_TEXT = `${MAX_MANUAL_BACKUPS} manuelles + ${MAX_AUTO_BACKUPS} automa
 const PER_PAGE = 5;
 
 const RESTORE_WARNING = [
-  'Recrée uniquement les rôles et salons **manquants** (comparaison par nom), puis remet les rôles dans l\'ordre de la sauvegarde (sous mon rôle le plus haut).',
+  'Recrée uniquement les rôles et salons **manquants** (comparaison par identifiant, puis par nom s\'il est unique), puis remet les rôles dans l\'ordre de la sauvegarde (sous mon rôle le plus haut).',
   'Ne supprime rien ; les salons existants gardent leurs permissions.',
   'Messages, membres, emojis et attribution des rôles ne sont **pas** restaurés (limite Discord).',
 ];
@@ -124,8 +124,9 @@ function restoreResultCard(b, res) {
   const reordered = res.reordered ?? 0;
   const failed = res.failed ?? [];
   const skipped = res.skippedOverwrites ?? [];
+  const ambiguous = res.ambiguous ?? [];
   const changed = created + synced;
-  const tone = failed.length ? (changed ? 'warning' : 'danger') : changed ? 'success' : 'info';
+  const tone = failed.length ? (changed ? 'warning' : 'danger') : ambiguous.length ? 'warning' : changed ? 'success' : 'info';
   const failedText = failed.length ? ` **${failed.length}** opération${failed.length > 1 ? 's ont' : ' a'} échoué.` : '';
   let description;
   if (failed.length && !changed) description = `Rien n'a pu être restauré : Discord a refusé **${failed.length}** opération${failed.length > 1 ? 's' : ''}.`;
@@ -149,6 +150,9 @@ function restoreResultCard(b, res) {
         : null,
       skipped.length
         ? wide(ICONS.lock, 'Permissions ignorées', `${truncate(skipped.slice(0, 10).map((s) => code(truncate(s, 40))).join(' '), 900)}${skipped.length > 10 ? ` ${subtext(`+${skipped.length - 10}`)}` : ''}\n${subtext('Rôles ou membres introuvables : ces surcharges de salon n\'ont pas été recréées.')}`)
+        : null,
+      ambiguous.length
+        ? wide(ICONS.warning, 'Homonymes à vérifier', `${truncate(ambiguous.slice(0, 10).map((s) => code(truncate(s, 40))).join(' '), 900)}${ambiguous.length > 10 ? ` ${subtext(`+${ambiguous.length - 10}`)}` : ''}\n${subtext('Plusieurs salons ou rôles portent ce nom : je n\'en ai choisi aucun au hasard (ni recréé, ni modifié). Vérifiez-les à la main.')}`)
         : null,
       created
         ? wide(ICONS.warning, 'À vérifier', bullets([

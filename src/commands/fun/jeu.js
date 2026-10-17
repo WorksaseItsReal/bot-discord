@@ -56,7 +56,8 @@ const EXPIRED = '⌛ Partie expirée : aucune action depuis 10 minutes.';
 
 const pts = (n) => `${n} pt${n > 1 ? 's' : ''}`;
 const mention = (id) => `<@${id}>`;
-const lockKey = (type, scope, id) => `${type}:${scope}:${id}`;
+/** Verrou d'une partie, propre au serveur : une partie ailleurs ne bloque (ni ne révèle) rien ici. */
+const lockKey = (guildId, type, scope, id) => `${type}:${guildId}:${scope}:${id}`;
 const games = (client) => client.services.games;
 const row = (component) => new ActionRowBuilder().addComponents(component);
 const isOver = (game) => game.status !== 'playing' && game.status !== 'pending';
@@ -293,7 +294,7 @@ async function startDuel(interaction, client, type) {
   await launch(interaction, client, {
     type,
     players: [interaction.user.id, opponentId],
-    locks: humans.map((id) => lockKey(type, 'u', id)),
+    locks: humans.map((id) => lockKey(interaction.guildId, type, 'u', id)),
     status: vsBot ? 'playing' : 'pending',
     state: { vsBot, botId },
     setup(game) {
@@ -381,7 +382,7 @@ async function startPendu(interaction, client) {
   assertFree(client, interaction, 'pendu', scope, [holderId], salon ? 'Pendu (salon)' : null);
   await launch(interaction, client, {
     type: 'pendu',
-    locks: [lockKey('pendu', scope, holderId)],
+    locks: [lockKey(interaction.guildId, 'pendu', scope, holderId)],
     state: { mode: salon ? 'salon' : 'solo', word: H.randomWord(), guessed: new Set(), notice: null },
   });
 }
@@ -512,7 +513,7 @@ async function startQuiz(interaction, client) {
   assertFree(client, interaction, 'quiz', 'c', [interaction.channelId]);
   await launch(interaction, client, {
     type: 'quiz',
-    locks: [lockKey('quiz', 'c', interaction.channelId)],
+    locks: [lockKey(interaction.guildId, 'quiz', 'c', interaction.channelId)],
     state: { theme, questions: Q.drawQuestions(theme, rounds), index: 0, scores: new Map(), answered: new Set(), history: [], notice: null, deadline: 0 },
     setup: (game) => askQuestion(client, game),
   });
@@ -571,7 +572,7 @@ async function startDevine(interaction, client) {
   assertFree(client, interaction, 'devine', 'u', [interaction.user.id]);
   await launch(interaction, client, {
     type: 'devine',
-    locks: [lockKey('devine', 'u', interaction.user.id)],
+    locks: [lockKey(interaction.guildId, 'devine', 'u', interaction.user.id)],
     state: { secret: D.secretNumber(), guesses: [], notice: null },
   });
 }
@@ -585,7 +586,7 @@ async function startDevine(interaction, client) {
 function assertFree(client, interaction, type, scope, ids, label = null) {
   const name = label ?? GAMES[type].label;
   for (const id of ids) {
-    const holder = games(client).holder(lockKey(type, scope, id));
+    const holder = games(client).holder(lockKey(interaction.guildId, type, scope, id));
     if (!holder) continue;
     const link = messageLink(holder);
     const where = link ? ` : [voir la partie](${link})` : '';

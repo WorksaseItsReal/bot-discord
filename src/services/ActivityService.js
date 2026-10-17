@@ -1,7 +1,9 @@
 'use strict';
 
+const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { DAY_MS, dayKey, dayStart, addDays } = require('../utils/activity');
+const { PRESENCE_CHANNEL, PRIVATE_HOUR } = require('../database/repositories/ActivityRepository');
 
 const logger = createLogger('activity');
 
@@ -21,6 +23,8 @@ const DM_KEEP_MS = 30 * DAY_MS;
 const VIEW_CACHE_TTL_MS = 60_000;
 const VIEW_CACHE_MAX = 500;
 const VIEW_COOLDOWN_MS = 5_000;
+/** Suppressions massives (purge, effacement) : lignes par lot, la boucle d'événements reprend la main entre deux. */
+const DELETE_CHUNK = 5_000;
 /** Battement de la collecte (dernier vidage) : écrit au plus toutes les 5 minutes. */
 const HEARTBEAT_MS = 5 * 60_000;
 /** Au-delà de cet écart entre deux battements, la collecte est considérée interrompue (trou). */
@@ -42,6 +46,19 @@ function isIgnoredChannel(channel, ignored = []) {
   if (!channel || !ignored?.length) return false;
   const set = new Set(ignored);
   return [channel.id, channel.parentId, channel.parent?.parentId].some((id) => id && set.has(id));
+}
+
+/**
+ * Salon visible par @everyone ? (fil privé : jamais ; fil public : selon son salon ; inconnu : oui).
+ * Sert aux heures de pointe de la vue publique, qui n'ont pas de dimension « salon ». Pur.
+ */
+function isPublicChannel(guild, channel) {
+  if (!channel) return true;
+  if (channel.type === ChannelType.PrivateThread) return false;
+  const base = channel.isThread?.() ? channel.parent : channel;
+  const everyone = guild?.roles?.everyone ?? guild?.roles?.cache?.get?.(guild?.id);
+  const perms = everyone && base?.permissionsFor?.(everyone);
+  return perms?.has ? perms.has(PermissionFlagsBits.ViewChannel) : true;
 }
 
 /** Tampon → lot pour ActivityRepository#applyBatch. Pur. */
@@ -103,6 +120,26 @@ class ActivityService {
     this.viewCache = new Map();
     /** Fin du délai entre deux clics de /statistiques : `${guildId}:${userId}` → ms. */
     this.viewCooldowns = new Map();
+    /** Lignes supprimées par lot (purge, effacement). */
+    this.deleteChunk = DELETE_CHUNK;
+    /** Effacements en cours : serveur → promesse (un double clic n'en lance pas un second). */
+    this.wiping = new Map();
+  }
+
+  /**
+   * Supprime par lots les compteurs quotidiens antérieurs à `before` (null : tous), en rendant la
+   * main à la boucle d'événements entre deux lots. S'interrompt à l'arrêt du bot.
+   * @returns {Promise<number>} lignes supprimées
+   */
+  async #deleteDaily(guildId, before, isStopping = () => false) {
+    let n = 0;
+    for (;;) {
+      if (this.stopped || isStopping()) return n;
+      const removed = this.repo.purgeDailyChunk(guildId, before, this.deleteChunk);
+      n += removed;
+      if (removed < this.deleteChunk) return n;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
 
   /**
@@ -253,16 +290,33 @@ class ActivityService {
     const guildId = message.guild.id;
     if (!this.collecting(guildId)) return false;
     const channel = message.channel;
-    if (this.ignored(guildId, channel ?? { id: message.channelId })) return false;
-    // Un fil (ou un post de forum) compte pour son salon.
-    const channelId = channel?.isThread?.() ? channel.parentId ?? message.channelId : message.channelId;
+    if (this.ignored(guildId, channel ?? { id: message.channelId })) {
+      // Hors statistiques, mais le membre n'est pas inactif pour autant (/activite).
+      this.#markPresence(guildId, message.author.id, message.createdTimestamp || this.clock());
+      return false;
+    }
+    // Un fil (ou un post de forum) compte pour son salon, SAUF un fil privé : compté sous son
+    // propre identifiant (jamais crédité à un salon parent public, ni visible de la vue publique).
+    const privateThread = channel?.type === ChannelType.PrivateThread;
+    const channelId = channel?.isThread?.() && !privateThread ? channel.parentId ?? message.channelId : message.channelId;
     const at = message.createdTimestamp || this.clock();
     const day = dayKey(at);
     this.#ensure(guildId);
     inc(this.buffer.messages, `${guildId}|${day}|${channelId}|${message.author.id}`, 1);
-    inc(this.buffer.hours, `${guildId}|${day}|${new Date(at).getUTCHours()}`, 1);
+    const hour = new Date(at).getUTCHours() + (isPublicChannel(message.guild, channel) ? 0 : PRIVATE_HOUR);
+    inc(this.buffer.hours, `${guildId}|${day}|${hour}`, 1);
     if (bufferSize(this.buffer) > MAX_BUFFER_KEYS) this.flush();
     return true;
+  }
+
+  /**
+   * Trace de présence (salon ignoré des logs) : 0 message, jamais affichée, mais retenue comme
+   * dernière activité du membre par /activite.
+   */
+  #markPresence(guildId, userId, at) {
+    this.#ensure(guildId);
+    inc(this.buffer.messages, `${guildId}|${dayKey(at)}|${PRESENCE_CHANNEL}|${userId}`, 0);
+    if (bufferSize(this.buffer) > MAX_BUFFER_KEYS) this.flush();
   }
 
   /** Arrivée ou départ d'un humain. @param {'join'|'leave'} kind */
@@ -307,6 +361,8 @@ class ActivityService {
     if (next && this.#voiceCounts(guild, newState.channel, next)) {
       this.#ensure(guild.id);
       this.sessions.set(key, { guildId: guild.id, userId: member.id, channelId: next, since: now });
+    } else if (next && next !== guild.afkChannelId && this.collecting(guild.id)) {
+      this.#markPresence(guild.id, member.id, now); // vocal ignoré des logs : présence seulement
     }
   }
 
@@ -373,8 +429,12 @@ class ActivityService {
     let removed = 0;
     for (const guildId of this.repo.guilds()) {
       if (isStopping()) return removed;
-      // Rétention relue à chaque serveur : un réglage changé entre-temps s'applique.
-      removed += this.repo.purgeBefore(guildId, addDays(today, -(this.retention(guildId) - 1)));
+      // Rétention relue à chaque serveur : un réglage changé entre-temps s'applique. Par lots :
+      // réduire la conservation d'un gros serveur ne fige jamais le bot.
+      const before = addDays(today, -(this.retention(guildId) - 1));
+      removed += await this.#deleteDaily(guildId, before, isStopping);
+      if (this.stopped || isStopping()) return removed;
+      removed += this.repo.purgeRestBefore(guildId, before);
     }
     removed += this.repo.purgeDmsBefore(now - DM_KEEP_MS);
     if (removed) logger.info(`Statistiques : ${removed} ligne(s) expirée(s) supprimée(s).`);
@@ -443,15 +503,26 @@ class ActivityService {
     }
   }
 
-  /** Efface toutes les statistiques du serveur ; la collecte (si active) repart de zéro. */
+  /**
+   * Efface toutes les statistiques du serveur, par lots (la boucle d'événements n'est jamais
+   * figée) ; la collecte (si active) repart de zéro.
+   * @returns {Promise<number>} lignes supprimées
+   */
   wipe(guildId) {
-    this.flush();
-    const n = this.repo.wipe(guildId);
-    this.forgetViews(guildId);
-    this.ensured.delete(guildId);
-    for (const s of this.sessions.values()) if (s.guildId === guildId) s.since = this.clock();
-    if (this.collecting(guildId)) this.#ensure(guildId);
-    return n;
+    const running = this.wiping.get(guildId);
+    if (running) return running;
+    const job = (async () => {
+      this.flush();
+      let n = await this.#deleteDaily(guildId, null);
+      n += this.repo.wipeRest(guildId);
+      this.forgetViews(guildId);
+      this.ensured.delete(guildId);
+      for (const s of this.sessions.values()) if (s.guildId === guildId) s.since = this.clock();
+      if (this.collecting(guildId)) this.#ensure(guildId);
+      return n;
+    })().finally(() => this.wiping.delete(guildId));
+    this.wiping.set(guildId, job);
+    return job;
   }
 
   /**
@@ -507,4 +578,4 @@ class ActivityService {
   }
 }
 
-module.exports = { ActivityService, retentionDays, isIgnoredChannel, toBatch, RETENTION, DM_GAP_MS, FLUSH_INTERVAL_MS, GAP_MS, HEARTBEAT_MS, VIEW_CACHE_TTL_MS, VIEW_COOLDOWN_MS };
+module.exports = { ActivityService, retentionDays, isIgnoredChannel, isPublicChannel, toBatch, RETENTION, DM_GAP_MS, FLUSH_INTERVAL_MS, GAP_MS, HEARTBEAT_MS, VIEW_CACHE_TTL_MS, VIEW_COOLDOWN_MS };

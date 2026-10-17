@@ -1,5 +1,18 @@
 'use strict';
 
+/**
+ * « Salon » fictif des traces de présence : activité dans un salon ignoré des logs, jamais
+ * affichée dans les statistiques (0 message, 0 s de vocal) mais comptée comme dernière activité
+ * par /activite (un membre qui n'écrit que là n'est pas inactif).
+ */
+const PRESENCE_CHANNEL = '0';
+
+/**
+ * Heures de pointe : un message d'un salon NON visible par @everyone est compté à l'heure
+ * `PRIVATE_HOUR + h` (sans migration) ; la vue publique ne lit que 0 à 23, la gestion tout (h % 100).
+ */
+const PRIVATE_HOUR = 100;
+
 /** Liste de salons retenus → paramètre JSON (null : tous les salons). Pur. */
 function allowOf(channels) {
   return Array.isArray(channels) ? JSON.stringify(channels.map(String)) : null;
@@ -67,6 +80,19 @@ class ActivityRepository {
     this.purgeHourlyStmt = db.prepare('DELETE FROM activity_hourly WHERE guild_id = ? AND day < ?');
     this.purgeFlowStmt = db.prepare('DELETE FROM member_flow_daily WHERE guild_id = ? AND day < ?');
     this.purgeDmsStmt = db.prepare('DELETE FROM inactivity_dms WHERE sent_at < ?');
+    // Purge PAR LOTS de la plus grosse table (clés primaires) : jamais tout un serveur d'un bloc
+    // synchrone, qui figerait la boucle d'événements du bot (revue n° 6, R111).
+    this.purgeDailyChunkStmt = db.prepare(
+      `DELETE FROM activity_daily WHERE (guild_id, day, channel_id, user_id) IN (
+         SELECT guild_id, day, channel_id, user_id FROM activity_daily WHERE guild_id = @guildId AND day < @before LIMIT @limit)`,
+    );
+    this.wipeRestTx = db.transaction((guildId) => {
+      let n = 0;
+      for (const table of ['activity_hourly', 'member_flow_daily', 'inactivity_dms', 'stats_guilds']) {
+        n += db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(guildId).changes;
+      }
+      return n;
+    });
     this.wipeTx = db.transaction((guildId) => {
       let n = 0;
       for (const table of ['activity_daily', 'activity_hourly', 'member_flow_daily', 'inactivity_dms', 'stats_guilds']) {
@@ -77,7 +103,8 @@ class ActivityRepository {
 
     // Lectures « serveur » et « membre ». @allow : salons retenus (JSON), NULL = tous. Un lecteur
     // sans « Gérer le serveur » ne voit que les salons visibles par @everyone (confidentialité).
-    const ALLOW = '(@allow IS NULL OR channel_id IN (SELECT value FROM json_each(@allow)))';
+    // Les traces de présence (PRESENCE_CHANNEL) ne sont jamais affichées.
+    const ALLOW = `channel_id <> '${PRESENCE_CHANNEL}' AND (@allow IS NULL OR channel_id IN (SELECT value FROM json_each(@allow)))`;
     this.dailyStmt = db.prepare(
       `SELECT day, SUM(messages) AS messages, SUM(voice_seconds) AS voice FROM activity_daily
        WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY day ORDER BY day`,
@@ -109,7 +136,8 @@ class ActivityRepository {
        WHERE guild_id = @guildId AND day >= @fromDay AND ${ALLOW} GROUP BY user_id HAVING SUM(voice_seconds) > 0 ORDER BY voice DESC, user_id LIMIT @limit`,
     );
     this.hourlyStmt = db.prepare(
-      'SELECT hour, SUM(messages) AS messages FROM activity_hourly WHERE guild_id = ? AND day >= ? GROUP BY hour ORDER BY hour',
+      `SELECT hour % ${PRIVATE_HOUR} AS hour, SUM(messages) AS messages FROM activity_hourly
+       WHERE guild_id = @guildId AND day >= @fromDay AND (@all = 1 OR hour < ${PRIVATE_HOUR}) GROUP BY hour % ${PRIVATE_HOUR} ORDER BY 1`,
     );
     this.flowsStmt = db.prepare('SELECT day, joins, leaves FROM member_flow_daily WHERE guild_id = ? AND day >= ? ORDER BY day');
 
@@ -194,6 +222,24 @@ class ActivityRepository {
     return this.purgeDailyStmt.run(guildId, day).changes + this.purgeHourlyStmt.run(guildId, day).changes + this.purgeFlowStmt.run(guildId, day).changes;
   }
 
+  /**
+   * Supprime au plus `limit` compteurs quotidiens antérieurs à `before` (exclu ; null : tous).
+   * @returns {number} lignes supprimées (moins que `limit` : plus rien à supprimer)
+   */
+  purgeDailyChunk(guildId, before, limit) {
+    return this.purgeDailyChunkStmt.run({ guildId, before: before ?? '9999-12-31', limit }).changes;
+  }
+
+  /** Compteurs horaires et arrivées/départs antérieurs à `day` (tables courtes : d'un bloc). */
+  purgeRestBefore(guildId, day) {
+    return this.purgeHourlyStmt.run(guildId, day).changes + this.purgeFlowStmt.run(guildId, day).changes;
+  }
+
+  /** Efface tout SAUF les compteurs quotidiens (supprimés par lots) : heures, flux, MP, début de collecte. */
+  wipeRest(guildId) {
+    return this.wipeRestTx(guildId);
+  }
+
   purgeDmsBefore(ts) {
     return this.purgeDmsStmt.run(ts).changes;
   }
@@ -237,8 +283,9 @@ class ActivityRepository {
     return this.topVoiceMembersStmt.all({ guildId, fromDay, limit, allow: allowOf(channels) });
   }
 
-  hourly(guildId, fromDay) {
-    return this.hourlyStmt.all(guildId, fromDay);
+  /** @param {{ publicOnly?: boolean }} [opts] publicOnly : salons visibles par @everyone seulement */
+  hourly(guildId, fromDay, { publicOnly = false } = {}) {
+    return this.hourlyStmt.all({ guildId, fromDay, all: publicOnly ? 0 : 1 });
   }
 
   flows(guildId, fromDay) {
@@ -263,7 +310,7 @@ class ActivityRepository {
     return this.rankStmt.get({ guildId, fromDay, messages, allow: allowOf(channels) }).n + 1;
   }
 
-  /** @returns {Map<string, string>} membre → dernier jour d'activité (messages ou vocal) */
+  /** @returns {Map<string, string>} membre → dernier jour d'activité (messages ou vocal, salons ignorés des logs compris) */
   lastActive(guildId) {
     return new Map(this.lastActiveStmt.all(guildId).map((r) => [r.user_id, r.day]));
   }
@@ -282,4 +329,4 @@ class ActivityRepository {
   }
 }
 
-module.exports = { ActivityRepository };
+module.exports = { ActivityRepository, PRESENCE_CHANNEL, PRIVATE_HOUR };

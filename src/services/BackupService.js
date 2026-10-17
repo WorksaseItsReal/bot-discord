@@ -18,8 +18,8 @@ const MAX_BACKUPS_PER_GUILD = MAX_MANUAL_BACKUPS;
 const THREAD_TYPES = new Set([ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread]);
 
 /**
- * Sérialise les permissions d'un salon. Les rôles sont référencés par NOM
- * (les IDs changent après recréation) ; @everyone a un marqueur dédié.
+ * Sérialise les permissions d'un salon. Les rôles sont référencés par identifiant ET par
+ * nom (repli si le rôle a été recréé) ; @everyone a un marqueur dédié.
  * Les surcharges de membres sont conservées par ID.
  */
 function serializeOverwrites(channel, guild) {
@@ -31,8 +31,56 @@ function serializeOverwrites(channel, guild) {
     if (ow.id === guild.id) out.push({ ...entry, everyone: true });
     else if (ow.type === OverwriteType.Role) {
       const role = guild.roles.cache.get(ow.id);
-      if (role && !role.managed) out.push({ ...entry, role: role.name });
+      if (role && !role.managed) out.push({ ...entry, role: role.name, roleId: role.id });
     } else if (ow.type === OverwriteType.Member) out.push({ ...entry, member: ow.id });
+  }
+  return out;
+}
+
+/** Plusieurs homonymes possibles : la restauration ne choisit jamais au hasard. */
+const AMBIGUOUS = Symbol('homonymes');
+
+/**
+ * Rôle actuel d'une entrée de la sauvegarde : par identifiant d'abord, sinon par nom s'il est
+ * UNIQUE parmi les rôles qu'aucune autre entrée ne revendique par identifiant (`claimed`).
+ * @param {{ id?: string, name: string }} entry
+ * @param {{ managed?: boolean }} [opts] managed : accepter un rôle géré (intégration)
+ * @returns {import('discord.js').Role|null|typeof AMBIGUOUS}
+ */
+function findExistingRole(guild, entry, claimed = new Set(), { managed = true } = {}) {
+  const byId = entry.id ? guild.roles.cache.get(entry.id) : null;
+  if (byId && (managed || !byId.managed)) return byId;
+  const same = guild.roles.cache.filter((r) => r.name === entry.name && r.id !== guild.id && !claimed.has(r.id) && (managed || !r.managed));
+  if (same.size === 1) return same.first();
+  return same.size > 1 ? AMBIGUOUS : null;
+}
+
+/**
+ * Salon actuel d'une entrée de la sauvegarde : par identifiant d'abord (même type), sinon par
+ * nom + type + catégorie s'il est UNIQUE parmi les salons qu'aucune autre entrée ne revendique
+ * par identifiant (`claimed`) et hors `exclude`.
+ * @returns {import('discord.js').GuildChannel|null|typeof AMBIGUOUS}
+ */
+function findExistingChannel(guild, entry, claimed = new Set(), exclude = new Set()) {
+  const byId = entry.id ? guild.channels.cache.get(entry.id) : null;
+  if (byId && byId.type === entry.type) return exclude.has(byId.id) ? null : byId;
+  const parentById = entry.parentId ? guild.channels.cache.get(entry.parentId) : null;
+  const sameParent = (c) => {
+    if (entry.type === ChannelType.GuildCategory) return true;
+    if (parentById?.type === ChannelType.GuildCategory) return c.parentId === parentById.id;
+    return (c.parent?.name ?? null) === (entry.parentName ?? null);
+  };
+  const same = guild.channels.cache.filter((c) => c.name === entry.name && c.type === entry.type && !claimed.has(c.id) && !exclude.has(c.id) && sameParent(c));
+  if (same.size === 1) return same.first();
+  return same.size > 1 ? AMBIGUOUS : null;
+}
+
+/** Identifiants des éléments actuels revendiqués par identifiant par une entrée de la sauvegarde. */
+function claimedIds(cache, entries, sameKind = () => true) {
+  const out = new Set();
+  for (const e of entries) {
+    const found = e?.id ? cache.get(e.id) : null;
+    if (found && sameKind(found, e)) out.add(found.id);
   }
   return out;
 }
@@ -40,18 +88,29 @@ function serializeOverwrites(channel, guild) {
 /**
  * Re-mappe les permissions sérialisées vers les IDs actuels du serveur.
  * @param {string[]} [skipped] reçoit les surcharges ignorées (rôle ou membre introuvable)
+ * @param {{ claimedRoles?: Set<string>, ambiguous?: string[], members?: { present: Set<string>, unknown: Set<string> } }} [ctx]
+ *   claimedRoles : rôles revendiqués par identifiant (exclus du repli par nom) ; ambiguous : reçoit
+ *   les rôles homonymes non choisis ; members : membres relus (présents / état inconnu, erreur passagère)
  */
-function resolveOverwrites(overwrites, guild, skipped) {
+function resolveOverwrites(overwrites, guild, skipped, ctx = {}) {
   if (!Array.isArray(overwrites)) return undefined;
   const out = [];
   for (const ow of overwrites) {
     let id = null;
     let type = OverwriteType.Role;
     if (ow.everyone) id = guild.roles.everyone.id;
-    else if (ow.role) id = guild.roles.cache.find((r) => r.name === ow.role && !r.managed)?.id ?? null;
-    else if (ow.member && guild.members.cache.has(ow.member)) {
+    else if (ow.role) {
+      const role = findExistingRole(guild, { id: ow.roleId, name: ow.role }, ctx.claimedRoles, { managed: false });
+      if (role === AMBIGUOUS) {
+        ctx.ambiguous?.push(`@${ow.role}`);
+        continue;
+      }
+      id = role?.id ?? null;
+    } else if (ow.member && (guild.members.cache.has(ow.member) || ctx.members?.present.has(ow.member))) {
       id = ow.member;
       type = OverwriteType.Member;
+    } else if (ow.member && ctx.members?.unknown.has(ow.member)) {
+      continue; // état inconnu (erreur passagère) : ni recréée, ni signalée absente
     }
     if (!id) {
       skipped?.push(ow.role ? `@${ow.role}` : ow.member ? `membre ${ow.member}` : '?');
@@ -187,7 +246,7 @@ class BackupService {
     const roles = [...guild.roles.cache.values()]
       .filter((r) => r.id !== guild.id && !r.managed)
       .toSorted((a, b) => b.position - a.position)
-      .map((r) => ({ name: r.name, color: r.colors?.primaryColor ?? r.color ?? 0, hoist: r.hoist, mentionable: r.mentionable, permissions: r.permissions.bitfield.toString() }));
+      .map((r) => ({ id: r.id, name: r.name, color: r.colors?.primaryColor ?? r.color ?? 0, hoist: r.hoist, mentionable: r.mentionable, permissions: r.permissions.bitfield.toString() }));
 
     // Les fils (threads) ne font pas partie de la structure : jamais sauvegardés. Les salons
     // générés par le bot (compteurs, vocaux temporaires) non plus.
@@ -196,8 +255,10 @@ class BackupService {
       .filter((c) => !c.isThread?.() && !generated.has(c.id))
       .toSorted((a, b) => a.rawPosition - b.rawPosition)
       .map((c) => ({
+        id: c.id,
         name: c.name,
         type: c.type,
+        parentId: c.parentId ?? null,
         parentName: c.parent?.name ?? null,
         topic: c.topic ?? null,
         nsfw: c.nsfw ?? false,
@@ -268,7 +329,7 @@ class BackupService {
 
   /**
    * @typedef {{ roles: number, channels: number, failed: Array<{ kind: 'role'|'channel'|'order'|'permissions', name: string, code: string|number }>,
-   *   skippedOverwrites: string[], reparented: number, reordered: number, permissionsSynced: number, syncPermissions: boolean }} RestoreResult
+   *   skippedOverwrites: string[], ambiguous: string[], reparented: number, reordered: number, permissionsSynced: number, syncPermissions: boolean }} RestoreResult
    */
   async #restore(guild, backup, id, { syncPermissions = false } = {}) {
     assertRestorePermissions(guild);
@@ -279,17 +340,25 @@ class BackupService {
     const failed = [];
     /** Surcharges de permissions ignorées (rôle ou membre introuvable). */
     const skippedOverwrites = [];
+    /** Salons ou rôles homonymes non départagés : laissés tels quels, « à vérifier ». */
+    const ambiguous = [];
     const fail = (kind, name) => (err) => {
       failed.push({ kind, name, code: err?.code ?? err?.status ?? err?.message ?? 'inconnu' });
       return null;
     };
+    const channels = (data.channels ?? []).filter((c) => !THREAD_TYPES.has(c.type));
+    // Association par IDENTIFIANT d'abord ; le nom ne sert qu'en repli, s'il est unique parmi
+    // les éléments qu'aucune autre entrée ne revendique (jamais un homonyme choisi au hasard).
+    const claimedRoles = claimedIds(guild.roles.cache, data.roles ?? []);
+    const claimedChannels = claimedIds(guild.channels.cache, channels, (c, e) => c.type === e.type);
+    const members = await this.#fetchMembers(guild, channels);
+    const ctx = { claimedRoles, ambiguous, members };
 
     // Du plus haut au plus bas : Discord place chaque nouveau rôle juste
     // au-dessus de @everyone, donc le premier créé finit au sommet du lot.
     // (L'ordre inverse renversait la hiérarchie restaurée.) `serialize` les range déjà ainsi.
     for (const role of data.roles ?? []) {
-      const exists = guild.roles.cache.find((r) => r.name === role.name);
-      if (exists) continue;
+      if (findExistingRole(guild, role, claimedRoles)) continue; // homonymes : rien n'est recréé
       await guild.roles
         .create({ name: role.name, colors: { primaryColor: role.color ?? 0 }, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions), reason: `Restauration backup ${id}` })
         .then(() => (createdRoles += 1), fail('role', role.name));
@@ -300,15 +369,21 @@ class BackupService {
     const reordered = createdRoles > 0 ? await this.#reorderRoles(guild, data.roles ?? [], failed) : 0;
 
     // Catégories d'abord
-    const channels = (data.channels ?? []).filter((c) => !THREAD_TYPES.has(c.type));
     const categories = channels.filter((c) => c.type === ChannelType.GuildCategory);
-    const findCategory = (name) => guild.channels.cache.find((c) => c.name === name && c.type === ChannelType.GuildCategory);
+    /** Catégorie d'un salon de la sauvegarde : par identifiant, sinon par nom unique (hors catégories revendiquées). */
+    const findCategory = (ch) => {
+      if (!ch.parentName && !ch.parentId) return null;
+      const found = findExistingChannel(guild, { id: ch.parentId, name: ch.parentName, type: ChannelType.GuildCategory }, claimedChannels);
+      return found === AMBIGUOUS ? null : found;
+    };
     /** Salons et catégories recréés pendant cette restauration (exclus de la resynchronisation). */
     const createdIds = new Set();
     for (const cat of categories) {
-      if (findCategory(cat.name)) continue;
+      const existing = findExistingChannel(guild, cat, claimedChannels);
+      if (existing === AMBIGUOUS) ambiguous.push(cat.name);
+      if (existing) continue;
       await guild.channels
-        .create({ name: cat.name, type: ChannelType.GuildCategory, permissionOverwrites: resolveOverwrites(cat.overwrites, guild, skippedOverwrites) })
+        .create({ name: cat.name, type: ChannelType.GuildCategory, permissionOverwrites: resolveOverwrites(cat.overwrites, guild, skippedOverwrites, ctx) })
         .then((c) => {
           createdChannels += 1;
           if (c?.id) createdIds.add(c.id);
@@ -317,8 +392,10 @@ class BackupService {
     /** Salons créés sans leur catégorie (introuvable à ce moment-là). */
     const orphans = [];
     for (const ch of channels.filter((c) => c.type !== ChannelType.GuildCategory)) {
-      if (guild.channels.cache.find((c) => c.name === ch.name && c.type === ch.type)) continue;
-      const parent = ch.parentName ? findCategory(ch.parentName) : null;
+      const existing = findExistingChannel(guild, ch, claimedChannels);
+      if (existing === AMBIGUOUS) ambiguous.push(`#${ch.name}`);
+      if (existing) continue;
+      const parent = findCategory(ch);
       const created = await guild.channels
         .create({
           name: ch.name,
@@ -328,37 +405,64 @@ class BackupService {
           nsfw: ch.nsfw,
           // Permissions restaurées (salons privés inclus) ; à défaut (ancienne
           // sauvegarde), on hérite de la catégorie plutôt que de rendre public.
-          permissionOverwrites: resolveOverwrites(ch.overwrites, guild, skippedOverwrites) ?? (parent ? parent.permissionOverwrites.cache : undefined),
+          permissionOverwrites: resolveOverwrites(ch.overwrites, guild, skippedOverwrites, ctx) ?? (parent ? parent.permissionOverwrites.cache : undefined),
         })
         .then((c) => {
           createdChannels += 1;
           return c;
         }, fail('channel', ch.name));
-      if (created && ch.parentName && !parent) orphans.push([created, ch.parentName]);
+      if (created && ch.parentName && !parent) orphans.push([created, ch]);
       if (created?.id) createdIds.add(created.id);
     }
 
     // Second passage : rattache les salons dont la catégorie existe désormais
     // (créée entre-temps, ou apparue dans le cache après leur création).
     let reparented = 0;
-    for (const [channel, parentName] of orphans) {
-      const parent = findCategory(parentName);
+    for (const [channel, ch] of orphans) {
+      const parent = findCategory(ch);
       if (!parent || typeof channel.setParent !== 'function') continue;
       await channel.setParent(parent.id, { lockPermissions: false, reason: `Restauration backup ${id}` }).then(() => (reparented += 1), () => {});
     }
 
     // Option : permissions des salons qui existaient déjà (jamais ceux recréés à l'instant).
-    const permissionsSynced = syncPermissions ? await this.#syncOverwrites(guild, channels, createdIds, id, skippedOverwrites, fail) : 0;
+    const permissionsSynced = syncPermissions ? await this.#syncOverwrites(guild, channels, { createdIds, claimedChannels, ctx }, id, skippedOverwrites, fail) : 0;
     return {
       roles: createdRoles,
       channels: createdChannels,
       failed,
       skippedOverwrites: [...new Set(skippedOverwrites)],
+      ambiguous: [...new Set(ambiguous)],
       reparented,
       reordered,
       permissionsSynced,
       syncPermissions: Boolean(syncPermissions),
     };
+  }
+
+  /**
+   * Relit les membres visés par des surcharges et absents du cache (cache partiel, normal sur un
+   * gros serveur) : seul « membre inconnu » (10007/10013) les dit partis ; une autre erreur
+   * laisse leur état inconnu (leurs surcharges actuelles sont alors conservées).
+   * @returns {Promise<{ present: Set<string>, unknown: Set<string> }>}
+   */
+  async #fetchMembers(guild, channels) {
+    const present = new Set();
+    const unknown = new Set();
+    const ids = new Set(channels.flatMap((c) => (Array.isArray(c.overwrites) ? c.overwrites : []).map((o) => o?.member).filter(Boolean)));
+    for (const memberId of ids) {
+      if (guild.members.cache.has(memberId)) continue;
+      if (typeof guild.members.fetch !== 'function') {
+        unknown.add(memberId);
+        continue;
+      }
+      try {
+        await guild.members.fetch({ user: memberId, force: true, cache: true });
+        present.add(memberId);
+      } catch (err) {
+        if (err?.code !== 10007 && err?.code !== 10013) unknown.add(memberId);
+      }
+    }
+    return { present, unknown };
   }
 
   /**
@@ -388,20 +492,26 @@ class BackupService {
    * rôles gérés (intégrations, dont celui du bot) et du bot lui-même sont conservées.
    * @returns {Promise<number>} salons dont les permissions ont été modifiées
    */
-  async #syncOverwrites(guild, channels, createdIds, id, skippedOverwrites, fail) {
+  async #syncOverwrites(guild, channels, { createdIds, claimedChannels, ctx }, id, skippedOverwrites, fail) {
     let synced = 0;
     const done = new Set(createdIds);
     const meId = guild.members?.me?.id;
     const plain = (o) => ({ id: o.id, type: o.type, allow: o.allow.bitfield, deny: o.deny.bitfield });
     for (const ch of channels) {
       if (!Array.isArray(ch.overwrites)) continue; // ancienne sauvegarde sans permissions
-      const existing = guild.channels.cache.find((c) => c.name === ch.name && c.type === ch.type && !done.has(c.id));
+      const existing = findExistingChannel(guild, ch, claimedChannels, done);
+      if (existing === AMBIGUOUS) {
+        ctx.ambiguous.push(ch.type === ChannelType.GuildCategory ? ch.name : `#${ch.name}`);
+        continue;
+      }
       if (!existing?.permissionOverwrites?.cache) continue;
       done.add(existing.id);
-      const wanted = resolveOverwrites(ch.overwrites, guild, skippedOverwrites);
+      const wanted = resolveOverwrites(ch.overwrites, guild, skippedOverwrites, ctx);
       const current = [...existing.permissionOverwrites.cache.values()].map(plain);
+      // Conservées : bot, rôles gérés, et membres dont l'état n'a pas pu être relu (erreur passagère).
       const kept = current.filter((o) => !wanted.some((w) => w.id === o.id)
-        && (o.id === meId || (o.type === OverwriteType.Role && guild.roles.cache.get(o.id)?.managed)));
+        && (o.id === meId || (o.type === OverwriteType.Role && guild.roles.cache.get(o.id)?.managed)
+          || (o.type === OverwriteType.Member && ctx.members.unknown.has(o.id))));
       const next = [...wanted, ...kept];
       if (sameOverwrites(current, next)) continue;
       await existing.permissionOverwrites
@@ -412,4 +522,4 @@ class BackupService {
   }
 }
 
-module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD, planRolePositions, sameOverwrites, resolveOverwrites, generatedChannelIds };
+module.exports = { BackupService, MAX_AUTO_BACKUPS, MAX_MANUAL_BACKUPS, MAX_BACKUPS_PER_GUILD, planRolePositions, sameOverwrites, resolveOverwrites, generatedChannelIds, findExistingChannel, findExistingRole, AMBIGUOUS };

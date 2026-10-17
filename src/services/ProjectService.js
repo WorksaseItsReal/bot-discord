@@ -366,8 +366,14 @@ class ProjectService {
   async refreshPublished(projectId) {
     const project = this.repo.get(projectId);
     if (!project?.channelId || !project.messageId) return;
-    const channel = await this.client.channels.fetch(project.channelId).catch(() => null);
-    const message = channel?.messages ? await channel.messages.fetch(project.messageId).catch(() => null) : null;
+    // Seuls « salon inconnu » (10003) et « message inconnu » (10008) font oublier la publication :
+    // une erreur passagère (503, délai) remonte à l'appelant (journalisée), la fiche reste suivie.
+    const gone = (err) => {
+      if (err?.code === 10003 || err?.code === 10008) return null;
+      throw err;
+    };
+    const channel = await this.client.channels.fetch(project.channelId).catch(gone);
+    const message = channel?.messages ? await channel.messages.fetch(project.messageId).catch(gone) : null;
     if (!message) {
       // Message ou salon supprimé : on oublie la publication.
       this.repo.update(project.id, { channelId: null, messageId: null });
