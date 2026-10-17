@@ -720,11 +720,15 @@ function resolveRoleId(guild, ctx, store, id) {
   return guild.roles?.cache?.has?.(id) ? id : null;
 }
 
-/** Permissions du bot : masque appliqué aux recréations s'il n'est pas Administrateur. */
+/**
+ * Permissions du bot : masque appliqué aux recréations s'il n'est pas Administrateur. « Gérer les
+ * permissions » (bit ManageRoles) dans une surcharge est réservé à un Administrateur : retiré du
+ * masque, sinon Discord refuse toute la recréation (50013).
+ */
 function botMask(guild) {
   const me = guild.members?.me;
   if (!me?.permissions) return null;
-  return me.permissions.has(PermissionFlagsBits.Administrator) ? null : toBig(me.permissions);
+  return me.permissions.has(PermissionFlagsBits.Administrator) ? null : toBig(me.permissions) & ~PermissionFlagsBits.ManageRoles;
 }
 
 /** discordCdn (ADM3), chargé paresseusement : null s'il est absent. */

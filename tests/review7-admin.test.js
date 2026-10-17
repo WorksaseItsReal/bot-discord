@@ -3,13 +3,18 @@
 /**
  * Revue 7, lot admin — tests unitaires.
  *  S12 : LockdownService.nativeOpenings (refus d'@everyone que le bot n'a pas posé), purgeMinimum de /clear.
+ *  S42 : surcharges recopiées par /channel renouveler et par Secur (recréation) — règle de Discord à
+ *        la création d'un salon : « only permissions your bot has in the guild can be allowed/denied.
+ *        Setting MANAGE_ROLES permission in channels is only possible for guild administrators ».
  */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { PermissionFlagsBits: P, ChannelType } = require('discord.js');
+const { PermissionFlagsBits: P, PermissionsBitField, ChannelType } = require('discord.js');
 const { LockdownService } = require('../src/services/LockdownService');
 const { purgeMinimum } = require('../src/commands/moderation/clear');
+const { missingGrantedPermissions } = require('../src/services/ChannelRenewService');
+const St = require('../src/services/secur/structure');
 
 const G = 'g1';
 
@@ -96,4 +101,30 @@ test('S12 purgeMinimum : 20 par défaut, réglage du module borné à [2, 100]',
   assert.equal(purgeMinimum({ secur: { modules: { messagePurge: { minMessages: 1 } } } }), 2);
   assert.equal(purgeMinimum({ secur: { modules: { messagePurge: { minMessages: 500 } } } }), 100);
   assert.equal(purgeMinimum({ secur: { modules: { messagePurge: { minMessages: 'x' } } } }), 20);
+});
+
+test('S42 missingGrantedPermissions : un REFUS d\'une permission que le bot n\'a pas bloque aussi la copie', () => {
+  const bot = P.ViewChannel | P.SendMessages | P.ManageChannels | P.ManageRoles;
+  // @everyone : « Mentionner @everyone » refusé dans le salon, le bot ne l'a pas.
+  assert.deepEqual(missingGrantedPermissions([{ allow: 0n, deny: P.MentionEveryone | P.SendMessages }], bot), ['MentionEveryone']);
+  assert.deepEqual(missingGrantedPermissions([{ allow: { bitfield: 0n }, deny: { bitfield: P.ManageWebhooks } }], bot), ['ManageWebhooks']);
+  assert.deepEqual(missingGrantedPermissions([{ allow: 0n, deny: P.SendMessages }], bot), []);
+});
+
+test('S42 missingGrantedPermissions : « Gérer les permissions » (ManageRoles) dans une surcharge exige un bot Administrateur', () => {
+  const bot = P.ViewChannel | P.ManageChannels | P.ManageRoles;
+  assert.deepEqual(missingGrantedPermissions([{ allow: P.ManageRoles, deny: 0n }], bot), ['ManageRoles']);
+  assert.deepEqual(missingGrantedPermissions([{ allow: 0n, deny: P.ManageRoles }], bot), ['ManageRoles']);
+  assert.deepEqual(missingGrantedPermissions([{ allow: P.ManageRoles | P.MentionEveryone, deny: P.ManageWebhooks }], P.Administrator), []);
+});
+
+test('S42 Secur botMask : ManageRoles retiré du masque d\'un bot non administrateur (recréation refusée sinon)', () => {
+  const guild = (bits) => ({ members: { me: { permissions: new PermissionsBitField(bits) } } });
+  const mask = St.botMask(guild(P.ViewChannel | P.ManageChannels | P.ManageRoles));
+  assert.equal(mask & P.ManageRoles, 0n);
+  assert.equal(mask & P.ManageChannels, P.ManageChannels);
+  assert.equal(St.botMask(guild(P.Administrator)), null);
+  const [ow] = St.mapOverwrites([{ id: 'r1', type: 0, allow: String(P.ManageRoles | P.ViewChannel), deny: String(P.ManageRoles) }], (id) => id, mask);
+  assert.equal(ow.allow, P.ViewChannel);
+  assert.equal(ow.deny, 0n);
 });
