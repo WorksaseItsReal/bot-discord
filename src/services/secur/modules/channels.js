@@ -287,7 +287,7 @@ const channelDelete = {
     }
     if (!snap) snap = St.channelFromChanges(entry); // dernier recours : jamais recréé
     if (entry.executorId) store.markDeleted(guild.id, id, entry.executorId);
-    return { weight: 1, record: { channelId: id, name: snap.name ?? null, type: snap.type ?? null, executorId: entry.executorId ?? null, snapshot: snap } };
+    return { weight: 1, record: { channelId: id, originId: store.originOf(guild.id, id), name: snap.name ?? null, type: snap.type ?? null, executorId: entry.executorId ?? null, snapshot: snap } };
   },
   async undo(guild, record, ctx) {
     const store = St.storeFor(ctx.client);
@@ -297,9 +297,10 @@ const channelDelete = {
     return recreate(guild, snap, ctx, store, record.executorId ?? null);
   },
   describe: (record) => `Salon supprimé${record?.name ? ` : #${record.name}` : ''}`,
-  // Par nom et type : un salon recréé change d'identifiant ; un autre bot qui le supprime en boucle
-  // déclenche ainsi le disjoncteur.
-  targetKey: (record) => `delete:${record?.type ?? ''}:${record?.name ?? record?.channelId ?? record?.targetId ?? ''}`,
+  // Par identifiant d'ORIGINE (suivi à travers les recréations) : un autre bot qui supprime en boucle
+  // le salon recréé déclenche le disjoncteur, mais trois homonymes supprimés par un nuke restent
+  // trois objets distincts.
+  targetKey: (record) => `delete:${record?.originId ?? record?.channelId ?? record?.targetId ?? ''}`,
 };
 
 const channelUpdate = {

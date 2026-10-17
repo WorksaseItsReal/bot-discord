@@ -110,3 +110,70 @@ test('S8 : un modérateur qui glisse 5 membres vers un autre vocal (entrée 26 r
     await h.close();
   }
 });
+
+/* -------------------------------------------------------------------- */
+/* S19 : homonymes et disjoncteur                                          */
+/* -------------------------------------------------------------------- */
+
+const settleLong = async (h) => {
+  await h.settle();
+  await sleep(800);
+  await h.settle();
+};
+
+test('S19 : nuke avec 3 vocaux homonymes « Vocal » → le disjoncteur ne se déclenche pas, tous les salons sont recréés', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const vocs = [];
+    for (const parent of [IDS.channels.catGeneral, IDS.channels.catVoice, IDS.channels.catTickets]) vocs.push(await h.guild.channels.create({ name: 'Vocal', type: 2, parent }));
+    await h.settle();
+    h.configure({ secur: { modules: { channelDelete: { mode: 'on' } } } });
+    const ids = [...vocs.map((v) => v.id), IDS.channels.general, IDS.channels.rules, IDS.channels.announcements];
+    await Promise.all(ids.map((id) => h.fake.perform('DELETE', `/channels/${id}`, undefined, { actorId: IDS.users.admin })));
+    await settleLong(h);
+    const names = [...h.fake.channels.values()].map((c) => c.name);
+    for (const n of ['général', 'règles', 'annonces']) assert.ok(names.includes(n), `#${n} jamais recréé`);
+    assert.equal(names.filter((n) => n === 'Vocal').length, 3);
+    assert.equal(h.client.services.secur.breaker.isSuspended(h.guild.id, 'channelDelete'), false, 'disjoncteur déclenché par des homonymes');
+  } finally {
+    await h.close();
+  }
+});
+
+test('S19 : 3 rôles séparateurs homonymes supprimés avec @Joueur et @Notifications → les 5 rôles sont recréés', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const seps = [];
+    for (let i = 0; i < 3; i += 1) seps.push(await h.guild.roles.create({ name: '──────────', permissions: [] }));
+    await h.settle();
+    h.configure({ secur: { modules: { roleDelete: { mode: 'on' } } } });
+    const before = h.fake.calls.length;
+    const ids = [...seps.map((r) => r.id), IDS.roles.gamer, IDS.roles.notif];
+    await Promise.all(ids.map((id) => h.fake.perform('DELETE', `/guilds/${h.guild.id}/roles/${id}`, undefined, { actorId: IDS.users.admin })));
+    await settleLong(h);
+    const posts = h.fake.calls.slice(before).filter((c) => c.method === 'POST' && /^\/guilds\/\d+\/roles$/.test(c.route)).map((c) => c.body.name);
+    assert.equal(posts.length, 5, `rôles recréés : ${posts.join(', ')}`);
+    assert.equal(h.client.services.secur.breaker.isSuspended(h.guild.id, 'roleDelete'), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('S19 : boucle réelle (le salon recréé supprimé à chaque fois) → le disjoncteur se déclenche toujours', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ secur: { modules: { channelDelete: { mode: 'on', punish: 'none' } } } });
+    let id = IDS.channels.rules;
+    for (let i = 0; i < 4 && id && h.fake.channels.has(id); i += 1) {
+      await h.fake.perform('DELETE', `/channels/${id}`, undefined, { actorId: IDS.users.admin });
+      await settleLong(h);
+      id = [...h.fake.channels.values()].find((c) => c.name === 'règles')?.id;
+    }
+    assert.ok(h.client.services.secur.breaker.isSuspended(h.guild.id, 'channelDelete'), 'boucle non détectée');
+  } finally {
+    await h.close();
+  }
+});

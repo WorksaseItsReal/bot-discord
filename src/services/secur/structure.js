@@ -299,7 +299,7 @@ class StructureStore {
     if (!guildId) return null;
     let st = this.guilds.get(guildId);
     if (!st && create) {
-      st = { snaps: new Map(), orphans: new Map(), overwrites: new Map(), remap: new Map(), deleted: new Map(), prunedAt: this.now() };
+      st = { snaps: new Map(), orphans: new Map(), overwrites: new Map(), remap: new Map(), origin: new Map(), deleted: new Map(), prunedAt: this.now() };
       StructureStore.#put(this.guilds, guildId, st, this.maxGuilds);
     }
     if (st && this.now() - st.prunedAt > PRUNE_EVERY_MS) this.#prune(st);
@@ -308,7 +308,7 @@ class StructureStore {
 
   #prune(st, now = this.now()) {
     st.prunedAt = now;
-    for (const [map, ttl] of [[st.snaps, this.snapshotTtlMs], [st.remap, this.snapshotTtlMs], [st.deleted, this.snapshotTtlMs], [st.orphans, this.bufferTtlMs], [st.overwrites, this.bufferTtlMs]]) {
+    for (const [map, ttl] of [[st.snaps, this.snapshotTtlMs], [st.remap, this.snapshotTtlMs], [st.origin, this.snapshotTtlMs], [st.deleted, this.snapshotTtlMs], [st.orphans, this.bufferTtlMs], [st.overwrites, this.bufferTtlMs]]) {
       for (const [k, v] of map) if (now - v.at >= ttl) map.delete(k);
     }
   }
@@ -373,10 +373,23 @@ class StructureStore {
     return [...st.overwrites.values()].filter((v) => v.id === targetId && this.now() - v.at < this.bufferTtlMs);
   }
 
-  /** Ancien identifiant (salon ou rôle recréé) → nouveau, 120 s (entre incidents). */
+  /**
+   * Ancien identifiant (salon ou rôle recréé) → nouveau, 120 s (entre incidents). Le nouveau garde
+   * l'identifiant d'ORIGINE de la chaîne (originOf) : clé du disjoncteur, qui suit un objet recréé
+   * puis supprimé de nouveau sans confondre deux homonymes.
+   */
   setRemap(guildId, oldId, newId) {
     const st = this.#state(guildId);
-    if (st && oldId && newId) StructureStore.#put(st.remap, oldId, { id: newId, at: this.now() }, this.maxSnapshots);
+    if (!st || !oldId || !newId) return;
+    StructureStore.#put(st.remap, oldId, { id: newId, at: this.now() }, this.maxSnapshots);
+    const root = this.#fresh(st.origin, oldId, this.snapshotTtlMs)?.id ?? oldId;
+    StructureStore.#put(st.origin, newId, { id: root, at: this.now() }, this.maxSnapshots);
+  }
+
+  /** Identifiant d'origine d'un salon ou rôle recréé par Secur (lui-même s'il ne l'a pas été). */
+  originOf(guildId, id) {
+    const st = this.#state(guildId, false);
+    return (st && id ? this.#fresh(st.origin, id, this.snapshotTtlMs)?.id : null) ?? id ?? null;
   }
 
   remapOf(guildId, oldId) {

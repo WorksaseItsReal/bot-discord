@@ -46,8 +46,9 @@ const expressions = {
   classify(entry, guild, ctx) {
     if (!entry.targetId) return null;
     const kind = entry.action === 62 ? 'emoji' : 'sticker';
-    const snap = snapshotFor(entry, guild, St.storeFor(ctx.client), kind);
-    return { weight: 1, record: { kind, id: entry.targetId, name: snap.name ?? null, snapshot: snap } };
+    const store = St.storeFor(ctx.client);
+    const snap = snapshotFor(entry, guild, store, kind);
+    return { weight: 1, record: { kind, id: entry.targetId, originId: store.originOf(guild.id, entry.targetId), name: snap.name ?? null, snapshot: snap } };
   },
   async undo(guild, record, ctx) {
     const snap = record?.snapshot;
@@ -73,14 +74,17 @@ const expressions = {
       summarize(ctx, false, image.reason);
       return { ok: false };
     }
+    const store = St.storeFor(ctx.client);
     try {
+      let created;
       if (snap.kind === 'emoji') {
-        const roles = (snap.roles ?? []).map((id) => St.resolveRoleId(guild, ctx, St.storeFor(ctx.client), id)).filter(Boolean);
-        await guild.emojis.create({ attachment: image.data, name: snap.name, ...(roles.length ? { roles } : {}), reason: REASON });
+        const roles = (snap.roles ?? []).map((id) => St.resolveRoleId(guild, ctx, store, id)).filter(Boolean);
+        created = await guild.emojis.create({ attachment: image.data, name: snap.name, ...(roles.length ? { roles } : {}), reason: REASON });
       } else {
         const ext = snap.format === 4 ? 'gif' : 'png';
-        await guild.stickers.create({ file: { attachment: image.buffer, name: `${snap.name}.${ext}` }, name: snap.name, tags: snap.tags || '⭐', description: snap.description ?? '', reason: REASON });
+        created = await guild.stickers.create({ file: { attachment: image.buffer, name: `${snap.name}.${ext}` }, name: snap.name, tags: snap.tags || '⭐', description: snap.description ?? '', reason: REASON });
       }
+      if (created?.id) store.setRemap(guild.id, snap.id, created.id); // clé du disjoncteur suivie
     } catch (e) {
       summarize(ctx, false, String(e?.message ?? e).slice(0, 80));
       return { ok: false };
@@ -89,7 +93,7 @@ const expressions = {
     return { ok: true };
   },
   describe: (record) => `${record?.kind === 'sticker' ? 'Autocollant' : 'Emoji'} supprimé${record?.name ? ` : ${record.name}` : ''}`,
-  targetKey: (record) => `${record?.kind ?? 'emoji'}:${record?.name ?? record?.id ?? ''}`,
+  targetKey: (record) => `${record?.kind ?? 'emoji'}:${record?.originId ?? record?.id ?? ''}`,
 };
 
 module.exports = expressions;

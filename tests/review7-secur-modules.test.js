@@ -59,3 +59,24 @@ test('S8 : voiceKick ne lit que les déconnexions (audit 27), comme le déclare 
   const S = require('../src/utils/secur');
   assert.deepEqual(securVoice.VOICE_TYPES, S.SECUR_MODULES.voiceKick.auditTypes);
 });
+
+// ---------------------------------------------------------------- S19
+
+test('S19 : clé du disjoncteur des suppressions = identifiant d\'origine (suivi à travers les recréations), jamais le nom', () => {
+  const St = require('../src/services/secur/structure');
+  const channelDelete = require('../src/services/secur/modules/channels').find((m) => m.key === 'channelDelete');
+  const roleDelete = require('../src/services/secur/modules/roles').find((m) => m.key === 'roleDelete');
+  const expressions = require('../src/services/secur/modules/expressions');
+  const store = new St.StructureStore();
+  const G = '300000000000000020';
+  store.setRemap(G, 'A', 'B');
+  store.setRemap(G, 'B', 'C');
+  assert.equal(store.originOf(G, 'C'), 'A', 'chaîne de recréations');
+  assert.equal(store.originOf(G, 'Z'), 'Z');
+  // Deux homonymes : clés distinctes.
+  assert.notEqual(channelDelete.targetKey({ channelId: '1', originId: '1', name: 'Vocal', type: 2 }), channelDelete.targetKey({ channelId: '2', originId: '2', name: 'Vocal', type: 2 }));
+  assert.notEqual(roleDelete.targetKey({ roleId: '1', originId: '1', name: '──' }), roleDelete.targetKey({ roleId: '2', originId: '2', name: '──' }));
+  assert.notEqual(expressions.targetKey({ kind: 'emoji', id: '1', originId: '1', name: 'gg' }), expressions.targetKey({ kind: 'emoji', id: '2', originId: '2', name: 'gg' }));
+  // Objet recréé puis supprimé de nouveau : même clé que l'original.
+  assert.equal(channelDelete.targetKey({ channelId: 'C', originId: 'A' }), channelDelete.targetKey({ channelId: 'A', originId: 'A' }));
+});

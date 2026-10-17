@@ -188,7 +188,7 @@ const roleDelete = {
     // Rôle géré (bot expulsé, intégration retirée, booster) : action de Discord, jamais comptée.
     if (St.protectedRoleKind(snap) === 'managed') return null;
     if (!snap && St.changeValue(entry, 'managed', 'old') === true) return null;
-    return { weight: 1, record: { roleId: id, name: snap?.name ?? St.changeValue(entry, 'name', 'old') ?? null, snapshot: snap ?? null } };
+    return { weight: 1, record: { roleId: id, originId: store.originOf(guild.id, id), name: snap?.name ?? St.changeValue(entry, 'name', 'old') ?? null, snapshot: snap ?? null } };
   },
   async undo(guild, record, ctx) {
     const store = St.storeFor(ctx.client);
@@ -198,8 +198,9 @@ const roleDelete = {
     return recreate(guild, snap, ctx, store);
   },
   describe: (record) => `Rôle supprimé${record?.name ? ` : @${record.name}` : ''}`,
-  // Par nom : un rôle recréé change d'identifiant (disjoncteur contre un autre bot).
-  targetKey: (record) => `delete:${record?.name ?? record?.roleId ?? record?.targetId ?? ''}`,
+  // Par identifiant d'ORIGINE (suivi à travers les recréations, disjoncteur contre un autre bot) :
+  // des rôles homonymes (séparateurs) restent des objets distincts.
+  targetKey: (record) => `delete:${record?.originId ?? record?.roleId ?? record?.targetId ?? ''}`,
 };
 
 const roleUpdate = {
