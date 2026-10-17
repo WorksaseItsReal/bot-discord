@@ -70,6 +70,14 @@ test('/lockdown suspendre → invites_disabled_until dans ]maintenant, +24 h] ; 
     assert.equal(h.fake.guild.incidents_data.dms_disabled_until, null);
     assert.equal(puts(h, mark).length, 2);
     assert.equal(botMessages(h, msgMark, (m) => m.channel_id === IDS.channels.logs && titled(/Mesures d'incident levées/)(m)).length, 1);
+    // Régression (chaos, graine 7070) : relancer « Rétablir » (double clic) ne publie ni log ni PUT de plus.
+    mark = h.fake.calls.length;
+    msgMark = h.fake.messageLog.length;
+    const again = await h.click(h.messagesOf(status)[0], 'cmd:lockdown:resume:invites');
+    assert.ok(!h.isError(again), h.replyText(again));
+    assert.match(h.replyText(again), /Aucune mesure à lever/);
+    assert.equal(puts(h, mark).length, 0, 'PUT inutile');
+    assert.equal(botMessages(h, msgMark, (m) => m.channel_id === IDS.channels.logs && titled(/Mesures d'incident levées/)(m)).length, 0, 'log en double');
 
     // Ni invitations ni MP : refus clair, aucun appel.
     mark = h.fake.calls.length;

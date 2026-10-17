@@ -125,7 +125,7 @@ class RaidResponseService {
    * Une échéance déjà plus lointaine est conservée (jamais raccourcie). `notAfter` (riposte de
    * vague) : échéance visée plafonnée à cet instant ; rien à prolonger (plafond à moins d'une
    * minute ou déjà atteint) : aucun appel.
-   * @returns {Promise<{ invitesDisabledUntil: number|null, dmsDisabledUntil: number|null, previous: { invites: number|null, dms: number|null } }>}
+   * @returns {Promise<{ invitesDisabledUntil: number|null, dmsDisabledUntil: number|null, previous: { invites: number|null, dms: number|null }, changed: boolean }>}
    */
   async pause(guild, { invites = true, dms = false, hours = DEFAULT_HOURS, actorId = null, reason = null, notAfter = Infinity } = {}) {
     if (!invites && !dms) throw new UserError('Choisissez au moins les invitations ou les messages privés.');
@@ -165,11 +165,16 @@ class RaidResponseService {
       const curDms = future(current?.dmsDisabledUntil, now);
       const nextInv = invites ? null : curInv;
       const nextDms = dms ? null : curDms;
+      // Rien d'actif parmi ce qui est demandé (double clic, déjà rétabli) : aucun appel.
+      if (nextInv === curInv && nextDms === curDms) {
+        return { invitesDisabledUntil: curInv, dmsDisabledUntil: curDms, previous: { invites: curInv, dms: curDms }, changed: false };
+      }
       const data = await this.#put(guild, nextInv, nextDms);
       return {
         invitesDisabledUntil: future(data?.invitesDisabledUntil, now),
         dmsDisabledUntil: future(data?.dmsDisabledUntil, now),
         previous: { invites: curInv, dms: curDms },
+        changed: true,
       };
     });
   }

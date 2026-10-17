@@ -174,6 +174,14 @@ async function runResume(interaction, client, { invites, dms }) {
   svc.assertCanManage(interaction.guild);
   await interaction.deferReply({ ephemeral: true });
   const state = await svc.resume(interaction.guild, { invites, dms });
+  if (state.changed === false) {
+    // Double clic ou mesures déjà levées : réponse sans nouveau log.
+    await interaction.editReply({
+      embeds: [card({ tone: 'info', section: 'security', icon: '▶️', title: 'Aucune mesure à lever', description: 'Les mesures demandées ne sont plus actives : rien à rétablir.', fields: stateFields(state) })],
+      components: buttonRows(...resumeButtons(state)),
+    });
+    return;
+  }
   const what = [invites ? 'les invitations' : null, dms ? 'les MP entre membres' : null].filter(Boolean).join(' et ');
   const description = `${what[0].toUpperCase()}${what.slice(1)} ${invites && !dms ? 'sont rétablies' : 'sont rétablis'}.`;
   await interaction.editReply({
