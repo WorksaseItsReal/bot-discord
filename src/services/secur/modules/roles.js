@@ -45,7 +45,7 @@ function roleApiValue(role, key) {
   switch (key) {
     case 'name': return role.name;
     case 'permissions': return St.toBig(role.permissions).toString();
-    case 'color': return role.colors?.primaryColor ?? 0;
+    case 'color': return role.color ?? role.colors?.primaryColor ?? 0; // champ d'API « color » (déprécié mais encore renvoyé)
     case 'colors': return { primary_color: role.colors?.primaryColor ?? 0, secondary_color: role.colors?.secondaryColor ?? null, tertiary_color: role.colors?.tertiaryColor ?? null };
     case 'hoist': return Boolean(role.hoist);
     case 'mentionable': return Boolean(role.mentionable);
