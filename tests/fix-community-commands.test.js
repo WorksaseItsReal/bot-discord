@@ -35,6 +35,8 @@ function modalInteraction({ granted = [PermissionFlagsBits.ManageMessages], chan
     fields: { getTextInputValue: (k) => values[k] },
     channel: { toString: () => '#salon', permissionsFor: () => perms(channelPerms), send: async (p) => { sent.push(p); return { url: 'https://discord.com/x' }; } },
     reply: async () => {},
+    deferReply: async () => {},
+    editReply: async () => {},
   };
 }
 

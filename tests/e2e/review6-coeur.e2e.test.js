@@ -91,3 +91,47 @@ test('R3 : serveur quitté pendant un arrêt du bot → daté au premier passage
     await h.close();
   }
 });
+
+/** Embeds publiés dans un salon depuis `mark`, par titre. */
+function published(h, channelId, title, mark) {
+  return h.fake.messageLog.slice(mark).map((id) => h.message(id)).filter((m) => m?.channel_id === channelId && m.embeds?.[0]?.title === title);
+}
+
+test('R4 : constructeur d\'embed (formulaire) acquitté avant la publication, même sous limite de débit', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const open = await h.slash('embed', [{ name: 'create', type: 1, options: [] }], { as: 'admin' });
+    assert.equal(open.modals?.length, 1);
+    h.resetProblems();
+    const general = IDS.channels.general;
+    h.fake.inject({ method: 'POST', route: `/channels/${general}/messages` }, { status: 429, retryAfter: 3200, times: 1 });
+    const mark = h.fake.messageLog.length;
+    const rec = await h.submitModal(open, { title: 'Annonce', description: 'Réunion ce soir', color: '', image: '' }, { as: 'admin' });
+    await h.waitFor(() => published(h, general, 'Annonce', mark).length > 0, { timeout: 6000 });
+    assert.ok(rec.ackType != null && rec.ackedAt - rec.createdAt < 3000, `acquittement après ${rec.ackedAt - rec.createdAt} ms`);
+    assert.equal(published(h, general, 'Annonce', mark).length, 1);
+    assert.match(h.replyText(rec), /Embed envoyé/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R5 : /embed send acquitté avant la publication, même sous limite de débit', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  try {
+    const general = IDS.channels.general;
+    h.fake.inject({ method: 'POST', route: `/channels/${general}/messages` }, { status: 429, retryAfter: 3200, times: 1 });
+    const mark = h.fake.messageLog.length;
+    const rec = await h.slash('embed', [{ name: 'send', type: 1, options: [{ name: 'titre', type: 3, value: 'Annonce directe' }, { name: 'description', type: 3, value: 'Texte' }] }], { as: 'admin' });
+    await h.waitFor(() => published(h, general, 'Annonce directe', mark).length > 0, { timeout: 6000 });
+    assert.ok(rec.ackType != null && rec.ackedAt - rec.createdAt < 3000, `acquittement après ${rec.ackedAt - rec.createdAt} ms`);
+    assert.equal(published(h, general, 'Annonce directe', mark).length, 1);
+    assert.match(h.replyText(rec), /Embed envoyé/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

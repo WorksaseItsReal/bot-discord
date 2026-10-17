@@ -71,11 +71,12 @@ module.exports = {
       if (!perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
         throw new UserError(`Vous n'avez pas la permission d'envoyer des embeds dans ${channel}.`);
       }
+      // Acquittement AVANT la publication (limite de débit du salon : pas d'expiration ni de doublon).
+      await interaction.deferReply({ ephemeral: true });
       const sent = await channel.send({ embeds: [embed] });
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [status.ok(`Votre embed a été publié dans ${channel}.`, 'Embed envoyé')],
         components: sent?.url ? buttonRows(linkButton('Voir le message', sent.url, ICONS.link)) : [],
-        ephemeral: true,
       });
     }
   },
