@@ -414,3 +414,36 @@ test('R68 bouton « Transcript » : un transcript en cours par salon, délai par
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R69
+
+test('R69 candidatures : « Gérer les permissions » sur le seul salon de réception ne suffit pas pour accepter', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const service = h.client.services.applications;
+    const form = service.createForm(h.guild.id, { name: 'Recrutement', questions: [{ label: 'Âge ?', long: false }] });
+    service.updateForm(h.guild.id, form.id, { reviewChannelId: IDS.channels.staff, roleIds: [IDS.roles.notif], panelChannelId: IDS.channels.general, open: true });
+    const { form: published } = await service.publishPanel(h.guild, service.form(h.guild.id, form.id));
+    const panel = h.message(published.panel_message_id);
+    // « Membre » reçoit, sur #staff uniquement, Voir le salon + Gérer les permissions (bit Gérer les rôles).
+    setOverwrites(h, IDS.channels.staff, [{ id: IDS.users.member, type: 1, allow: String(P.ViewChannel | P.ManageRoles), deny: '0' }]);
+    await h.settle();
+    assert.ok(!h.guild.members.cache.get(IDS.users.member).permissions.has(P.ManageRoles));
+    const mark = h.fake.messageLog.length;
+    const open = await h.click(panel, `cmd:candidature:apply:${form.id}`, { as: 'target' });
+    await h.submitModal(open, { q0: '20 ans' }, { as: 'target' });
+    const cardMsg = messagesIn(h, IDS.channels.staff, mark).find((m) => m.author.id === h.client.user.id);
+    const app = h.client.repositories.applications.listPending(h.guild.id)[0];
+    const res = await h.click(cardMsg, `cmd:candidatures:accept:${app.id}`, { as: 'member' });
+    assert.ok(h.isError(res), 'candidature acceptée avec une simple surcharge de salon');
+    assert.equal(h.client.repositories.applications.getApplication(h.guild.id, app.id).status, 'pending');
+    assert.ok(!h.fake.members.get(IDS.users.target).roles.includes(IDS.roles.notif), 'rôle attribué');
+    // Le modérateur sans « Gérer les rôles » sur le serveur non plus ; l'administrateur oui.
+    const ok = await h.click(cardMsg, `cmd:candidatures:accept:${app.id}`, { as: 'admin' });
+    assert.ok(!h.isError(ok), h.replyText(ok));
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

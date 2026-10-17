@@ -52,9 +52,14 @@ const SNOWFLAKE = /^\d{17,20}$/;
 const PENDING_SHOWN = 15;
 
 const guard = (interaction) => requirePermission(interaction, 'ManageGuild');
-/** Actions sur les cartes : « Gérer le serveur » ou « Gérer les rôles ». */
+/**
+ * Actions sur les cartes : « Gérer le serveur » ou « Gérer les rôles » sur le SERVEUR. Les
+ * permissions du salon (memberPermissions) ne suffisent pas : une surcharge « Gérer les
+ * permissions » sur le seul salon de réception ferait attribuer des rôles par le bot.
+ */
 function guardReview(interaction) {
-  if (!canReview(interaction.memberPermissions)) {
+  const perms = interaction.member?.permissions;
+  if (!canReview(typeof perms?.has === 'function' ? perms : null)) {
     throw new UserError('Il faut la permission **Gérer les rôles** (ou **Gérer le serveur**) pour traiter les candidatures.');
   }
 }
