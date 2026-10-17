@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { PermissionFlagsBits } = require('discord.js');
 const { safeName } = require('../utils/safeText');
+const { hasForbiddenPermissions } = require('../commands/roles/rolemenu');
 const { card, field, ICONS, userLine } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
@@ -245,6 +246,11 @@ function roleIssue(role, guild) {
   return null;
 }
 
+/** Rôle conférant une permission de modération / d'administration (serveur ou surcharge de salon) ? */
+function sensitiveRole(role) {
+  return Boolean(role?.permissions?.any && hasForbiddenPermissions(role));
+}
+
 /** Libellés des permissions sensibles qu'un rôle confère. Pur. */
 function dangerousPermissions(role) {
   const perms = role?.permissions;
@@ -441,7 +447,11 @@ class WelcomeService {
 
   /** Rôles attribuables parmi `ids` (existants, sous mon rôle, ni gérés ni administrateurs). */
   assignable(guild, ids) {
-    return [...new Set(ids ?? [])].filter((id) => !roleIssue(guild.roles?.cache?.get(id), guild));
+    // Revérifié à chaque attribution : un rôle devenu sensible après sa configuration n'est plus distribué.
+    return [...new Set(ids ?? [])].filter((id) => {
+      const role = guild.roles?.cache?.get(id);
+      return !roleIssue(role, guild) && !sensitiveRole(role);
+    });
   }
 
   // ------------------------------------------------------------ événements
@@ -659,6 +669,9 @@ class WelcomeService {
     if (roleIssue(guild.roles?.cache?.get(v.roleId), guild)) {
       throw new UserError('Je ne peux pas gérer le rôle de vérification : prévenez un administrateur (mon rôle doit être placé au-dessus).');
     }
+    if (v.mode !== 'remove' && sensitiveRole(guild.roles?.cache?.get(v.roleId))) {
+      throw new UserError('Le rôle de vérification confère des permissions de modération ou d\'administration : je ne l\'attribue pas. Prévenez un administrateur.');
+    }
     const plan = verifyRoles(cfg);
     const wanted = this.assignable(guild, plan.add).filter((id) => !member.roles.cache.has(id));
     const unwanted = plan.remove.filter((id) => member.roles.cache.has(id));
@@ -688,6 +701,8 @@ class WelcomeService {
       ],
     });
     await this.logging?.send(guild.id, 'members', embed, undefined, { event: 'memberVerify' }).catch(() => {});
+    // Membre qui revient : ses rôles de récompense de niveau, retenus jusqu'à la vérification.
+    await this.client?.services?.levels?.restoreRewards?.(member, { verified: true })?.catch?.(() => {});
     return { added: add, removed: remove };
   }
 }

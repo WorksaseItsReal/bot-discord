@@ -4,6 +4,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const { card, field, ICONS } = require('../utils/ui');
 const { truncate } = require('../utils/embeds');
 const { safeName } = require('../utils/safeText');
+const { hasForbiddenPermissions } = require('../commands/roles/rolemenu');
 const { MAX_XP } = require('../database/repositories/LevelRepository');
 const { createLogger } = require('../core/logger');
 const { applyRoles } = require('../utils/memberRoles');
@@ -302,11 +303,16 @@ class LevelService {
 
   // ------------------------------------------------------------ récompenses
 
-  /** Rôle attribuable par le bot (existe, pas @everyone ni géré, sous mon rôle le plus haut). */
+  /**
+   * Rôle attribuable par le bot (existe, pas @everyone ni géré, sous mon rôle le plus haut) et
+   * sans permission de modération ou d'administration — revérifié à chaque attribution : un rôle
+   * devenu sensible après sa configuration n'est plus distribué.
+   */
   static assignable(guild, roleId) {
     const role = guild?.roles?.cache?.get(roleId);
     const me = guild?.members?.me;
     if (!role || role.id === guild.id || role.managed || !me) return false;
+    if (role.permissions?.any && hasForbiddenPermissions(role)) return false;
     return role.position < (me.roles?.highest?.position ?? 0);
   }
 
@@ -489,6 +495,24 @@ class LevelService {
   markReturned(guildId, userId) {
     if (!guildId || !userId) return false;
     return this.levels.markReturned(guildId, userId);
+  }
+
+  /**
+   * Retour d'un membre : ses rôles de récompense (niveau conservé) lui sont rendus. Jamais avant
+   * l'écran d'adhésion ni, si la vérification est active, avant qu'il l'ait passée (`verified` :
+   * appel par la vérification réussie) — sinon une récompense donnerait l'accès sans vérification.
+   * @returns {Promise<{ added: string[] }>}
+   */
+  async restoreRewards(member, { verified = false } = {}) {
+    const guild = member?.guild;
+    if (!guild || member.user?.bot || member.pending || this.stopped) return { added: [] };
+    const cfg = this.cfg(guild.id);
+    if (!cfg.enabled || !cfg.rewards?.length) return { added: [] };
+    const v = this.config.get(guild.id).welcome?.verification;
+    if (!verified && v?.enabled && v.roleId) return { added: [] };
+    const level = this.levels.get(guild.id, member.id)?.level ?? 0;
+    if (level <= 0) return { added: [] };
+    return this.syncRewards(member, level, cfg);
   }
 
   /** Limite de date d'une purge « partis depuis plus de N jours » (0 : tous les partis). Pur. */

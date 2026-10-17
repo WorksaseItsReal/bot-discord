@@ -647,3 +647,67 @@ test('R82 giveaway : double clic sur « Relancer » → un seul nouveau tirage a
     await h.close();
   }
 });
+
+// ------------------------------------------------------------------ R83 / R84 : récompenses et rôles automatiques
+
+test('R83 niveaux : un membre qui revient retrouve ses rôles de récompense (après la vérification si elle est active)', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({ automod: { enabled: false }, levels: { enabled: true, cooldownSeconds: 0, minLength: 1, rewards: [{ level: 1, roleId: IDS.roles.notif }] } });
+    const lvl = require('../../src/services/LevelService');
+    const u = h.addUser('Habitué', { ageDays: 500 });
+    await h.memberJoin(u);
+    h.client.repositories.levels.setXp(h.guild.id, u.id, lvl.totalXpForLevel(3), lvl.levelFromXp);
+    await h.memberLeave(u.id);
+    await h.memberJoin(u);
+    await h.settle();
+    assert.ok(await h.waitFor(() => h.fake.members.get(u.id).roles.includes(IDS.roles.notif), { timeout: 1_500 }), 'récompense non rendue au retour');
+
+    // Vérification active (mode ajout) : rien avant la vérification, rendue après.
+    h.configure({ welcome: { verification: { enabled: true, mode: 'add', roleId: IDS.roles.member, channelId: IDS.channels.rules } } });
+    const v = h.addUser('Revenant', { ageDays: 500 });
+    await h.memberJoin(v);
+    h.client.repositories.levels.setXp(h.guild.id, v.id, lvl.totalXpForLevel(3), lvl.levelFromXp);
+    await h.memberLeave(v.id);
+    await h.memberJoin(v);
+    await h.settle();
+    assert.ok(!h.fake.members.get(v.id).roles.includes(IDS.roles.notif), 'récompense rendue avant la vérification');
+    const panel = await publishVerifyPanel(h);
+    await h.click(panel, 'cmd:bienvenue:verify', { as: v.id });
+    assert.ok(await h.waitFor(() => h.fake.members.get(v.id).roles.includes(IDS.roles.notif), { timeout: 1_500 }), 'récompense non rendue après la vérification');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R84 rôle devenu sensible : plus distribué par l\'accueil ni par les niveaux', async () => {
+  const h = await createHarness();
+  try {
+    h.configure({
+      automod: { enabled: false },
+      welcome: { autoRoles: { humans: [IDS.roles.gamer], bots: [] } },
+      levels: { enabled: true, cooldownSeconds: 0, minLength: 1, rewards: [{ level: 1, roleId: IDS.roles.notif }] },
+    });
+    updateRole(h, IDS.roles.gamer, () => P.BanMembers, 'préparation : Joueur peut bannir');
+    const gen = h.fake.channels.get(IDS.channels.general);
+    const updated = { ...gen, permission_overwrites: [...gen.permission_overwrites, { id: IDS.roles.notif, type: 0, allow: P.ManageMessages.toString(), deny: '0' }] };
+    h.fake.channels.set(gen.id, updated);
+    h.fake.dispatchNow('CHANNEL_UPDATE', updated, 'préparation : Notifications gère les messages dans #général');
+    await h.settle();
+
+    const u = h.addUser('Nouveau', { ageDays: 300 });
+    await h.memberJoin(u);
+    assert.ok(!h.fake.members.get(u.id).roles.includes(IDS.roles.gamer), 'rôle automatique sensible attribué');
+
+    h.client.services.levels.grantDelayMs = 0;
+    for (let i = 0; i < 12; i += 1) await h.userMessage({ as: 'target', content: `message ${i} pour monter de niveau` });
+    await sleep(100);
+    await h.settle();
+    assert.ok((h.client.repositories.levels.get(h.guild.id, IDS.users.target)?.level ?? 0) >= 1, 'calibrage : niveau 1 non atteint');
+    assert.ok(!h.fake.members.get(IDS.users.target).roles.includes(IDS.roles.notif), 'récompense sensible attribuée');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
