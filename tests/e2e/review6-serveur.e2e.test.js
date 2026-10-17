@@ -319,3 +319,25 @@ test('R102 : fin de boost : le rôle de remerciement devenu sensible est retiré
     await h.close();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* R111 : « Tout effacer » acquitté avant la suppression                */
+/* ------------------------------------------------------------------ */
+
+test('R111 : « Oui, tout effacer » acquitte (deferUpdate) avant de supprimer, puis affiche le résultat', async () => {
+  const h = await setup();
+  try {
+    await h.userMessage({ as: 'member', content: 'Bonjour' });
+    h.client.services.activity.flush();
+    const rec = await h.slash('statistiques', [], { as: 'admin' });
+    const settings = await h.click(h.messagesOf(rec)[0], 'cmd:statistiques:nav', { values: ['reglages'] });
+    const view = await h.click(h.messagesOf(settings)[0], 'cmd:statistiques:go:wipe:30');
+    const wipe = await h.click(h.messagesOf(view)[0], 'cmd:statistiques:wipe');
+    await h.settle();
+    assert.equal(wipe.ackType, 6, `acquittement attendu avant la suppression (type ${wipe.ackType})`);
+    assert.match(JSON.stringify(h.messagesOf(wipe).map((m) => m.embeds)), /Statistiques effacées/);
+    assert.equal(h.client.repositories.activity.totals(h.guild.id, '2000-01-01').messages, 0);
+  } finally {
+    await h.close();
+  }
+});

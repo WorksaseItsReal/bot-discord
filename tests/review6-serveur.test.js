@@ -131,3 +131,55 @@ test('R91 : présence dans un vocal ignoré des logs retenue comme activité (ho
   assert.equal(list.some((e) => e.member.id === U), false);
   assert.equal(repo.totals(G, '2000-01-01').voice, 0);
 });
+
+/* ------------------------------------------------------------------ */
+/* R111 : suppression massive des statistiques par lots                 */
+/* ------------------------------------------------------------------ */
+
+function bigActivity(rows) {
+  const ctx = activitySetup();
+  const ins = ctx.repo.db.prepare('INSERT INTO activity_daily (guild_id, day, channel_id, user_id, messages, voice_seconds) VALUES (?, ?, ?, ?, 3, 0)');
+  ctx.repo.db.transaction(() => {
+    for (let i = 0; i < rows; i += 1) {
+      const day = new Date(Date.parse('2025-10-17T00:00:00Z') + (i % 365) * DAY).toISOString().slice(0, 10);
+      ins.run(ctx.G, day, `4000000000000${String(i % 7).padStart(5, '0')}`, `5${String(i).padStart(17, '0')}`);
+    }
+  })();
+  return ctx;
+}
+
+/** Compte les tours de boucle d'événements pendant `fn` (0 : bloc synchrone). */
+async function yieldsDuring(fn) {
+  let yielded = 0;
+  let done = false;
+  const spin = () => {
+    if (done) return;
+    yielded += 1;
+    setImmediate(spin);
+  };
+  setImmediate(spin);
+  const result = await fn();
+  done = true;
+  return { yielded, result };
+}
+
+test('R111 : « Tout effacer » supprime par lots en rendant la main à la boucle d\'événements', async () => {
+  const { G, repo, service } = bigActivity(3_000);
+  service.deleteChunk = 200;
+  const { yielded, result } = await yieldsDuring(() => service.wipe(G));
+  assert.ok(yielded >= 10, `suppression d'un seul bloc (${yielded} tour(s) de boucle)`);
+  assert.ok(result >= 3_000, `lignes supprimées : ${result}`);
+  assert.equal(repo.db.prepare('SELECT COUNT(*) AS n FROM activity_daily WHERE guild_id = ?').get(G).n, 0);
+  assert.ok(repo.getSince(G), 'la collecte (active) repart de zéro');
+});
+
+test('R111 : purge quotidienne (conservation réduite) par lots, sans figer le bot', async () => {
+  const { G, repo, service, time } = bigActivity(3_000);
+  service.deleteChunk = 200;
+  time.now = Date.parse('2026-10-17T12:00:00Z');
+  service.config.update(G, { stats: { retentionDays: 7 } });
+  const { yielded, result } = await yieldsDuring(() => service.processDue({ now: time.now }));
+  assert.ok(yielded >= 10, `purge d'un seul bloc (${yielded} tour(s) de boucle)`);
+  assert.ok(result > 2_900, `lignes purgées : ${result}`);
+  assert.equal(repo.db.prepare('SELECT COUNT(*) AS n FROM activity_daily WHERE guild_id = ? AND day < ?').get(G, '2026-10-11').n, 0);
+});

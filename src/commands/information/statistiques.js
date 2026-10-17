@@ -662,8 +662,10 @@ module.exports = {
     /** cmd:statistiques:wipe — après confirmation. */
     async wipe(interaction, client) {
       requirePermission(interaction, 'ManageGuild');
-      const n = client.services.activity.wipe(interaction.guildId);
-      await interaction.update(render(client, interaction.guild, { view: 'reglages', manager: true, notice: `${ICONS.success} Statistiques effacées (${A.fr(n)} ligne(s)).` }));
+      // Suppression potentiellement longue (gros serveur, par lots) : on acquitte d'abord.
+      await interaction.deferUpdate();
+      const n = await client.services.activity.wipe(interaction.guildId);
+      await interaction.editReply(render(client, interaction.guild, { view: 'reglages', manager: true, notice: `${ICONS.success} Statistiques effacées (${A.fr(n)} ligne(s)).` }));
     },
   },
 };

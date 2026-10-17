@@ -74,6 +74,19 @@ class ActivityRepository {
     this.purgeHourlyStmt = db.prepare('DELETE FROM activity_hourly WHERE guild_id = ? AND day < ?');
     this.purgeFlowStmt = db.prepare('DELETE FROM member_flow_daily WHERE guild_id = ? AND day < ?');
     this.purgeDmsStmt = db.prepare('DELETE FROM inactivity_dms WHERE sent_at < ?');
+    // Purge PAR LOTS de la plus grosse table (clés primaires) : jamais tout un serveur d'un bloc
+    // synchrone, qui figerait la boucle d'événements du bot (revue n° 6, R111).
+    this.purgeDailyChunkStmt = db.prepare(
+      `DELETE FROM activity_daily WHERE (guild_id, day, channel_id, user_id) IN (
+         SELECT guild_id, day, channel_id, user_id FROM activity_daily WHERE guild_id = @guildId AND day < @before LIMIT @limit)`,
+    );
+    this.wipeRestTx = db.transaction((guildId) => {
+      let n = 0;
+      for (const table of ['activity_hourly', 'member_flow_daily', 'inactivity_dms', 'stats_guilds']) {
+        n += db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(guildId).changes;
+      }
+      return n;
+    });
     this.wipeTx = db.transaction((guildId) => {
       let n = 0;
       for (const table of ['activity_daily', 'activity_hourly', 'member_flow_daily', 'inactivity_dms', 'stats_guilds']) {
@@ -200,6 +213,24 @@ class ActivityRepository {
   /** Supprime les compteurs antérieurs à `day` (exclu). @returns {number} lignes supprimées */
   purgeBefore(guildId, day) {
     return this.purgeDailyStmt.run(guildId, day).changes + this.purgeHourlyStmt.run(guildId, day).changes + this.purgeFlowStmt.run(guildId, day).changes;
+  }
+
+  /**
+   * Supprime au plus `limit` compteurs quotidiens antérieurs à `before` (exclu ; null : tous).
+   * @returns {number} lignes supprimées (moins que `limit` : plus rien à supprimer)
+   */
+  purgeDailyChunk(guildId, before, limit) {
+    return this.purgeDailyChunkStmt.run({ guildId, before: before ?? '9999-12-31', limit }).changes;
+  }
+
+  /** Compteurs horaires et arrivées/départs antérieurs à `day` (tables courtes : d'un bloc). */
+  purgeRestBefore(guildId, day) {
+    return this.purgeHourlyStmt.run(guildId, day).changes + this.purgeFlowStmt.run(guildId, day).changes;
+  }
+
+  /** Efface tout SAUF les compteurs quotidiens (supprimés par lots) : heures, flux, MP, début de collecte. */
+  wipeRest(guildId) {
+    return this.wipeRestTx(guildId);
   }
 
   purgeDmsBefore(ts) {
