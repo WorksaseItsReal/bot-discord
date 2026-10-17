@@ -1,6 +1,7 @@
 'use strict';
 
 const { createLogger } = require('../core/logger');
+const { handleFatal } = require('../core/errors');
 
 const logger = createLogger('gateway');
 
@@ -22,9 +23,14 @@ module.exports = [
     },
   },
   {
+    // discord.js n'émet shardDisconnect QUE pour une fermeture non récupérable (4004 jeton
+    // invalide, 4010-4013, 4014 intents privilégiés refusés) : AUCUNE reconnexion n'aura lieu.
+    // Rester en vie ferait un processus zombie (plus aucun événement, /healthz à 200) : on
+    // passe par le chemin fatal (arrêt propre puis exit(1)) pour que le superviseur relance.
     name: 'shardDisconnect',
     execute(client, event, shardId) {
-      logger.warn(`Shard ${shardId} déconnecté (code ${event?.code ?? '?'}). Reconnexion automatique…`);
+      const err = new Error(`Shard ${shardId} fermé définitivement par Discord (code ${event?.code ?? '?'}) : jeton, intents privilégiés ou sharding à corriger.`);
+      return handleFatal(logger, err, { label: 'Connexion à Discord perdue sans reconnexion possible' });
     },
   },
   {

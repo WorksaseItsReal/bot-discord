@@ -34,11 +34,12 @@ function setShutdownHook(fn) {
  * (le superviseur — pm2, systemd, Docker — redémarre le bot).
  * @param {import('./logger').logger} logger
  * @param {unknown} err
- * @param {{ exit?: (code: number) => void, timeoutMs?: number }} [opts] injectables (tests)
+ * @param {{ exit?: (code: number) => void, timeoutMs?: number, label?: string }} [opts] injectables (tests) ;
+ *   `label` : intitulé du journal (autre cause fatale qu'une exception, ex. passerelle fermée)
  */
 let fatalInProgress = false;
-async function handleFatal(logger, err, { exit = (code) => process.exit(code), timeoutMs = FATAL_SHUTDOWN_TIMEOUT_MS } = {}) {
-  logger.error('Exception non capturée :', err);
+async function handleFatal(logger, err, { exit = (code) => process.exit(code), timeoutMs = FATAL_SHUTDOWN_TIMEOUT_MS, label = 'Exception non capturée' } = {}) {
+  logger.error(`${label} :`, err);
   if (fatalInProgress) return;
   fatalInProgress = true;
   const guard = setTimeout(() => exit(1), timeoutMs);
