@@ -347,6 +347,7 @@ class GadgetClient extends Client {
       ['Arrêt du scheduler', () => s.scheduler?.stop()],
       ['Arrêt du suivi des niveaux', () => s.levels?.stop()],
       ['Arrêt des compteurs de statistiques', () => s.counters?.stop()],
+      ['Arrêt des récapitulatifs AntiRaid', () => s.antiraid?.stop?.()],
       ['Arrêt des réponses automatiques', () => s.autoResponses?.stop()],
       ['Arrêt des messages épinglés', () => s.sticky?.stop()],
       ['Arrêt du starboard', () => s.starboard?.stop()],

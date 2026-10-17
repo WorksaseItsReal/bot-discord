@@ -30,6 +30,8 @@ module.exports = [
     name: 'guildBanAdd',
     async execute(client, ban) {
       if (client.services.moderation?.isRecentBotAction?.('ban', ban.guild.id, ban.user.id)) return;
+      // Pas de lecture du journal d'audit si ce log n'est pas envoyé (raid : des centaines de bans).
+      if (client.services.logging?.wouldLog?.(ban.guild.id, 'moderation', { event: 'manualBan' }) === false) return;
       const executor = await fetchExecutor(ban.guild, AuditLogEvent.MemberBanAdd, ban.user.id);
       if (executor && executor === client.user?.id) return;
       await client.services.logging.send(
@@ -56,6 +58,7 @@ module.exports = [
       // Débannissement (commande, scheduler ou manuel) : plus aucun ban temporaire actif.
       client.services.moderation?.clearTempbans(ban.guild.id, ban.user.id);
       if (client.services.moderation?.isRecentBotAction?.('unban', ban.guild.id, ban.user.id)) return;
+      if (client.services.logging?.wouldLog?.(ban.guild.id, 'moderation', { event: 'manualBan' }) === false) return;
       const executor = await fetchExecutor(ban.guild, AuditLogEvent.MemberBanRemove, ban.user.id);
       if (executor && executor === client.user?.id) return;
       await client.services.logging.send(
@@ -79,10 +82,16 @@ module.exports = [
     // Requiert l'intent GuildModeration et la permission « Voir les logs du serveur ».
     name: 'guildAuditLogEntryCreate',
     async execute(client, entry, guild) {
+      // Salon créé : son auteur (bot de tickets, de vocaux temporaires…) peut le supprimer sans être compté.
+      if (entry?.action === AuditLogEvent.ChannelCreate && guild && entry.executorId) {
+        client.services.antiraid?.rememberChannelCreator?.(guild.id, entry.targetId, entry.executorId);
+        return;
+      }
       const type = DESTRUCTIVE_AUDIT_ACTIONS[entry?.action];
       if (!type || !guild || !entry.executorId) return;
-      // Cible transmise pour les bans et kicks : sanctionner un arrivant récent (raider) n'est pas compté.
-      const target = type === 'ban' || type === 'kick' ? { targetId: entry.targetId ?? null } : undefined;
+      // Cible transmise pour les bans et kicks (sanctionner un arrivant récent n'est pas compté) et
+      // les suppressions de salons (supprimer un salon que l'on a créé n'est pas compté).
+      const target = type === 'ban' || type === 'kick' || type === 'channelDelete' ? { targetId: entry.targetId ?? null } : undefined;
       await client.services.antiraid?.handleDestructive(guild, entry.executorId, type, target).catch(() => {});
     },
   },

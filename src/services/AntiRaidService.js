@@ -1,8 +1,8 @@
 'use strict';
 
-const { PermissionFlagsBits } = require('discord.js');
+const { PermissionFlagsBits, escapeMarkdown } = require('discord.js');
 const { SlidingWindow } = require('../utils/rate');
-const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle } = require('../utils/ui');
+const { card, field, wide, ICONS, userLine, actionButton, buttonRows, ButtonStyle, fitEmbeds } = require('../utils/ui');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('antiraid');
@@ -11,6 +11,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const JOIN_ALERT_COOLDOWN_MS = 60_000;
 /** Fréquence de purge des fenêtres d'actions destructrices vides (mémoire bornée). */
 const WINDOW_PRUNE_INTERVAL_MS = 60_000;
+/**
+ * Alertes « nouveau membre sanctionné » publiées par minute et par serveur ; au-delà (raid), et
+ * pendant une vague, elles sont regroupées dans une carte récapitulative par minute.
+ */
+const MEMBER_ALERTS_PER_MINUTE = 3;
+/** Période des cartes récapitulatives pendant un raid. */
+const DIGEST_INTERVAL_MS = 60_000;
 
 /** Plafond de membres sanctionnés par déclenchement de vague (garde-fou contre un faux positif massif). */
 const MAX_WAVE_PUNISH = 50;
@@ -34,6 +41,12 @@ function newAccountAction(cfg) {
 const RECENT_JOIN_MS = 10 * 60_000;
 /** Plafond d'arrivants récents mémorisés par serveur (mémoire bornée pendant un raid). */
 const MAX_RECENT_JOINERS = 5_000;
+/**
+ * Salons créés récemment (journal d'audit) : supprimer un salon que l'on a soi-même créé (ticket,
+ * vocal temporaire d'un bot tiers) n'est pas destructeur. Mémoire bornée par serveur et par durée.
+ */
+const CREATED_CHANNEL_TTL_MS = 7 * DAY_MS;
+const MAX_CREATED_CHANNELS = 2_000;
 /** Permissions qu'un exécutant « dépouillé » ne doit plus avoir (sinon la sanction a échoué). */
 const DANGEROUS_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.Administrator,
@@ -41,6 +54,13 @@ const DANGEROUS_PERMISSIONS = Object.freeze([
   PermissionFlagsBits.ManageChannels,
   PermissionFlagsBits.BanMembers,
   PermissionFlagsBits.ManageGuild,
+  // Autres outils de nuke : expulsions, exclusions, webhooks (spam), émojis/autocollants, purge, pings de masse.
+  PermissionFlagsBits.KickMembers,
+  PermissionFlagsBits.ModerateMembers,
+  PermissionFlagsBits.ManageWebhooks,
+  PermissionFlagsBits.ManageGuildExpressions,
+  PermissionFlagsBits.ManageMessages,
+  PermissionFlagsBits.MentionEveryone,
 ]);
 
 const DESTRUCTIVE_LABELS = { channelDelete: 'Suppressions de salons', roleDelete: 'Suppressions de rôles', ban: 'Bannissements', kick: 'Expulsions' };
@@ -105,6 +125,122 @@ class AntiRaidService {
      * @type {Map<string, Map<string, number>>}
      */
     this.recentJoiners = new Map();
+    /** @type {Map<string, SlidingWindow>} alertes « nouveau membre » publiées par serveur (minute glissante) */
+    this.memberAlertWindows = new Map();
+    /**
+     * Regroupement des alertes pendant un raid, par serveur : sanctions individuelles et de vague
+     * non annoncées, publiées dans une carte récapitulative par minute.
+     * @type {Map<string, { guild: object, until: number, timer: NodeJS.Timeout|null, banned: number, kicked: number, failed: number, wave: number, lastError: string|null }>}
+     */
+    this.digests = new Map();
+    /** @type {Map<string, Map<string, { by: string, at: number }>>} salons créés (id → auteur) par serveur */
+    this.createdChannels = new Map();
+  }
+
+  /** Salon créé (entrée ChannelCreate du journal d'audit) : son auteur pourra le supprimer sans être compté. */
+  rememberChannelCreator(guildId, channelId, executorId, now = Date.now()) {
+    if (!guildId || !channelId || !executorId) return;
+    if (!this.config.get(guildId).antiraid?.enabled) return;
+    let m = this.createdChannels.get(guildId);
+    if (!m) {
+      m = new Map();
+      this.createdChannels.set(guildId, m);
+    }
+    m.delete(channelId);
+    m.set(channelId, { by: executorId, at: now });
+    for (const [id, e] of m) {
+      if (m.size <= MAX_CREATED_CHANNELS && now - e.at < CREATED_CHANNEL_TTL_MS) break;
+      m.delete(id);
+    }
+  }
+
+  /** true (et oublié) si ce salon a été créé récemment par cet auteur. */
+  #ownChannel(guildId, channelId, executorId, now = Date.now()) {
+    const m = this.createdChannels.get(guildId);
+    const e = channelId ? m?.get(channelId) : null;
+    if (!e) return false;
+    m.delete(channelId);
+    if (!m.size) this.createdChannels.delete(guildId);
+    return e.by === executorId && now - e.at < CREATED_CHANNEL_TTL_MS;
+  }
+
+  /** Arrêt du bot : minuteurs des cartes récapitulatives annulés. */
+  stop() {
+    for (const d of this.digests.values()) if (d.timer) clearTimeout(d.timer);
+    this.digests.clear();
+  }
+
+  /** Regroupement en cours pour ce serveur (créé au besoin, pour une minute). */
+  #digest(guild, now = Date.now()) {
+    let d = this.digests.get(guild.id);
+    if (!d) {
+      d = { guild, until: now + DIGEST_INTERVAL_MS, timer: null, banned: 0, kicked: 0, failed: 0, wave: 0, lastError: null };
+      this.digests.set(guild.id, d);
+      this.#scheduleDigest(guild.id, d, DIGEST_INTERVAL_MS);
+    }
+    d.guild = guild;
+    return d;
+  }
+
+  /** Ouvre (ou prolonge d'une minute) le regroupement : après une alerte de vague ou d'échec. */
+  #quietFor(guild, now = Date.now()) {
+    const d = this.#digest(guild, now);
+    d.until = Math.max(d.until, now + DIGEST_INTERVAL_MS);
+    return d;
+  }
+
+  #scheduleDigest(guildId, d, ms) {
+    if (d.timer) clearTimeout(d.timer);
+    d.timer = setTimeout(() => {
+      d.timer = null;
+      this.flushDigest(guildId).catch((e) => logger.debug('flushDigest', e?.message));
+    }, Math.max(1_000, ms));
+    d.timer.unref?.();
+  }
+
+  /** Sanctions non annoncées prises au regroupement (compteurs remis à zéro). */
+  #takeDigest(guildId) {
+    const d = this.digests.get(guildId);
+    if (!d) return null;
+    const counts = { banned: d.banned, kicked: d.kicked, failed: d.failed, wave: d.wave, lastError: d.lastError };
+    d.banned = 0;
+    d.kicked = 0;
+    d.failed = 0;
+    d.wave = 0;
+    d.lastError = null;
+    return counts.banned + counts.kicked + counts.failed + counts.wave ? counts : null;
+  }
+
+  /**
+   * Carte récapitulative du regroupement en cours (appelée chaque minute par le minuteur).
+   * Rien de neuf : le regroupement prend fin à son échéance.
+   * @returns {Promise<boolean>} true si une carte a été publiée
+   */
+  async flushDigest(guildId, now = Date.now()) {
+    const d = this.digests.get(guildId);
+    if (!d) return false;
+    const counts = this.#takeDigest(guildId);
+    if (!counts) {
+      if (now < d.until) this.#scheduleDigest(guildId, d, d.until - now);
+      else {
+        if (d.timer) clearTimeout(d.timer);
+        this.digests.delete(guildId);
+      }
+      return false;
+    }
+    // Raid toujours en cours : une minute de regroupement de plus.
+    d.until = now + DIGEST_INTERVAL_MS;
+    this.#scheduleDigest(guildId, d, DIGEST_INTERVAL_MS);
+    await this.alert(d.guild, {
+      tone: counts.failed ? 'danger' : 'caution',
+      icon: ICONS.shield,
+      title: 'Raid en cours : récapitulatif',
+      description: 'Sanctions automatiques appliquées depuis la dernière alerte (regroupées pour ne pas inonder le salon).',
+      fields: digestFields(counts),
+      trigger: false,
+      fallback: counts.failed > 0,
+    });
+    return true;
   }
 
   /** Mémorise un arrivant (ordre d'insertion = du plus ancien au plus récent). */
@@ -149,12 +285,39 @@ class AntiRaidService {
     return true;
   }
 
-  /** Oublie les fenêtres d'actions destructrices devenues vides. */
+  /** Oublie les fenêtres d'actions destructrices devenues vides et les arrivants / salons expirés. */
   pruneWindows(now = Date.now()) {
     this.lastWindowPrune = now;
     for (const [key, w] of this.destructiveWindows) {
       if (w.count(now) === 0) this.destructiveWindows.delete(key);
     }
+    for (const [key, w] of this.memberAlertWindows) {
+      if (w.count(now) === 0) this.memberAlertWindows.delete(key);
+    }
+    for (const [guildId, m] of this.recentJoiners) {
+      for (const [id, at] of m) {
+        if (now - at < RECENT_JOIN_MS) break; // ordre d'insertion : du plus ancien au plus récent
+        m.delete(id);
+      }
+      if (!m.size) this.recentJoiners.delete(guildId);
+    }
+    for (const [guildId, w] of this.joinWindows) {
+      if (!w.entries.some((e) => e.at > now - w.windowMs)) this.joinWindows.delete(guildId);
+    }
+    for (const [guildId, m] of this.createdChannels) {
+      for (const [id, e] of m) if (now - e.at >= CREATED_CHANNEL_TTL_MS) m.delete(id);
+      if (!m.size) this.createdChannels.delete(guildId);
+    }
+  }
+
+  /** Serveur quitté (guildDelete) : tout l'état mémoire de ce serveur est oublié. */
+  forgetGuild(guildId) {
+    if (!guildId) return;
+    for (const map of [this.joinWindows, this.joinAlertAt, this.lastTrigger, this.recentJoiners, this.memberAlertWindows, this.createdChannels]) map.delete(guildId);
+    const d = this.digests.get(guildId);
+    if (d?.timer) clearTimeout(d.timer);
+    this.digests.delete(guildId);
+    for (const key of this.destructiveWindows.keys()) if (key.startsWith(`${guildId}:`)) this.destructiveWindows.delete(key);
   }
 
   /** Marque un ban lancé par le bot (pas de log en double dans guildBanAdd). */
@@ -162,10 +325,15 @@ class AntiRaidService {
     this.client.services?.moderation?.markBotAction?.('ban', guildId, userId);
   }
 
+  /**
+   * Utilisateur ou rôle whitelisté. Un rôle géré (Booster, rôle de bot) n'immunise jamais :
+   * il s'obtient sans contrôle du serveur (refusé par /whitelist et le tableau de bord).
+   */
   isWhitelisted(guildId, userId, roleIds = []) {
     const wl = this.config.get(guildId).whitelist || { users: [], roles: [] };
     if (wl.users?.includes(userId)) return true;
-    return roleIds.some((r) => wl.roles?.includes(r));
+    const roles = this.client.guilds?.cache?.get?.(guildId)?.roles?.cache;
+    return roleIds.some((r) => wl.roles?.includes(r) && !roles?.get?.(r)?.managed);
   }
 
   /** Enregistre une arrivée et renvoie les arrivants encore dans la fenêtre (le plus ancien d'abord). */
@@ -196,37 +364,46 @@ class AntiRaidService {
   async handleJoin(member) {
     const cfg = this.config.get(member.guild.id).antiraid;
     if (!cfg?.enabled) return;
+    if (Date.now() - this.lastWindowPrune > WINDOW_PRUNE_INTERVAL_MS) this.pruneWindows();
     this.#rememberJoin(member.guild.id, member.id);
     if (this.isWhitelisted(member.guild.id, member.id, [...(member.roles?.cache?.keys() ?? [])])) return;
 
-    // Anti-bot : bot ajouté hors whitelist
-    if (cfg.antiBot && member.user.bot) {
-      return { punished: await this.#punishNewMember(member, 'AntiRaid: bot non autorisé', cfg) };
-    }
-
-    // Âge de compte minimal
-    if (cfg.minAccountAgeDays > 0) {
-      const ageDays = (Date.now() - member.user.createdTimestamp) / DAY_MS;
-      if (ageDays < cfg.minAccountAgeDays) {
-        return { punished: await this.#punishNewMember(member, `AntiRaid: compte trop récent (${ageDays.toFixed(1)}j)`, cfg) };
-      }
-    }
-
-    // Vague d'arrivées
+    // Vague d'arrivées : TOUT arrivant hors whitelist est compté, avant les filtres individuels.
+    // Un raid de comptes récents ou de bots déclenche ainsi la vague (lockdown), que leur
+    // sanction individuelle réussisse ou échoue (permission perdue, hiérarchie, 429).
     const guild = member.guild;
     const entries = this.#recordJoin(guild.id, member.id, cfg.joinWindowSeconds * 1000);
+    const entry = entries[entries.length - 1];
     const count = entries.length;
-    if (count < cfg.joinThreshold) return { punished: false };
+    const waveEntries = count >= cfg.joinThreshold ? entries : null;
+    if (waveEntries) {
+      // Réinitialise la fenêtre : une vague = un déclenchement.
+      this.joinWindows.delete(guild.id);
+      // Arrivants de la vague : leur bannissement par un modérateur reste exempté 10 min après la détection.
+      const waveAt = Date.now();
+      for (const e of waveEntries) this.#rememberJoin(guild.id, e.id, waveAt);
+    }
 
-    // Réinitialise la fenêtre : une vague = un déclenchement.
-    const joinerIds = entries.map((e) => e.id);
-    this.joinWindows.delete(guild.id);
-    // Arrivants de la vague : leur bannissement par un modérateur reste exempté 10 min après la détection.
-    const waveAt = Date.now();
-    for (const id of joinerIds) this.#rememberJoin(guild.id, id, waveAt);
+    // Anti-bot (bot ajouté hors whitelist) et âge de compte minimal.
+    let reason = null;
+    if (cfg.antiBot && member.user.bot) reason = 'AntiRaid: bot non autorisé';
+    else if (cfg.minAccountAgeDays > 0) {
+      const ageDays = (Date.now() - member.user.createdTimestamp) / DAY_MS;
+      if (ageDays < cfg.minAccountAgeDays) reason = `AntiRaid: compte trop récent (${ageDays.toFixed(1)}j)`;
+    }
+    let punished = false;
+    if (reason) {
+      const res = await this.#punishNewMember(member, reason, cfg);
+      punished = res.ok;
+      if (res.ok) entry.done = true; // déjà sanctionné : la vague ne le sanctionne pas une 2e fois
+      await this.#reportNewMember(member, reason, res, { inWave: Boolean(waveEntries) });
+    }
+    if (!waveEntries) return { punished };
+
     // En mode kick/ban, les arrivants de la vague sont sanctionnés à chaque
     // déclenchement (le raid continue pendant le cooldown) ; seules l'alerte et
     // le lockdown sont limités à un par cooldown.
+    const joinerIds = waveEntries.filter((e) => !e.done).map((e) => e.id);
     const wave = cfg.action === 'kick' || cfg.action === 'ban' ? await this.#punishWave(guild, joinerIds, cfg.action) : null;
     const now = Date.now();
     const cooling = now - (this.joinAlertAt.get(guild.id) || 0) < JOIN_ALERT_COOLDOWN_MS;
@@ -234,6 +411,9 @@ class AntiRaidService {
       this.joinAlertAt.set(guild.id, now);
       const lock = cfg.action === 'lockdown' ? await this.#tryLockdown(guild) : null;
       const locked = lock?.count ?? null;
+      // Sanctions individuelles regroupées jusqu'ici, puis regroupement pour la minute qui suit.
+      const counts = this.#takeDigest(guild.id);
+      this.#quietFor(guild);
       await this.alert(guild, {
         tone: 'danger',
         icon: '🚨',
@@ -245,13 +425,70 @@ class AntiRaidService {
           wave
             ? field(cfg.action === 'ban' ? ICONS.ban : ICONS.kick, cfg.action === 'ban' ? 'Bannis' : 'Expulsés', waveSummary(wave))
             : field(ICONS.lock, 'Lockdown', lockdownText(lock)),
+          ...(counts ? digestFields(counts) : []),
         ],
         buttons: lock && !lock.count ? [retryLockdownButton()] : locked ? [liftLockdownButton()] : [],
+        fallback: true,
       });
     } else if (wave?.punished.length) {
+      this.#digest(guild).wave += wave.punished.length;
       logger.info(`Vague continue sur ${guild.id} : ${wave.punished.length} arrivant(s) sanctionné(s) (${cfg.action}).`);
     }
-    return { punished: Boolean(wave?.punished.includes(member.id)) };
+    return { punished: punished || Boolean(wave?.punished.includes(member.id)) };
+  }
+
+  /**
+   * Annonce la sanction (ou l'échec) d'un compte récent / bot. Pendant un raid (vague, regroupement
+   * en cours ou plus de MEMBER_ALERTS_PER_MINUTE alertes dans la minute), la sanction est comptée
+   * dans la carte récapitulative. Un échec est toujours signalé (puis regroupé une minute).
+   */
+  async #reportNewMember(member, reason, { ok, ban, error }, { inWave = false } = {}) {
+    const guild = member.guild;
+    const now = Date.now();
+    const quiet = this.digests.has(guild.id) && now < this.digests.get(guild.id).until;
+    if (inWave || quiet || (ok && this.#window(this.memberAlertWindows, guild.id, 60_000).hit(now) > MEMBER_ALERTS_PER_MINUTE)) {
+      const d = this.#digest(guild, now);
+      if (!ok) {
+        d.failed += 1;
+        d.lastError = error ?? d.lastError;
+      } else if (ban) d.banned += 1;
+      else d.kicked += 1;
+      return;
+    }
+    if (ok) {
+      await this.alert(guild, {
+        tone: 'caution',
+        icon: ICONS.shield,
+        title: ban ? 'Nouveau membre banni' : 'Nouveau membre expulsé',
+        description: `${member.user} a été ${ban ? 'banni' : 'expulsé'} automatiquement à son arrivée.`,
+        thumbnail: member.user.displayAvatarURL?.(),
+        fields: [
+          field(ICONS.user, 'Membre', userLine(member.user)),
+          field(ban ? ICONS.ban : ICONS.kick, 'Sanction', ban ? 'Bannissement' : 'Expulsion'),
+          wide(ICONS.reason, 'Motif', reason.replace(/^AntiRaid: /, '')),
+        ],
+        footer: `ID : ${member.id}`,
+      }).catch((e) => logger.debug('alerte nouveau membre', e?.message));
+      return;
+    }
+    // Échec : le membre est toujours là. Alerte immédiate, les suivantes sont regroupées une minute.
+    this.#quietFor(guild, now);
+    await this.alert(guild, {
+      tone: 'danger',
+      icon: ICONS.warning,
+      title: 'Sanction automatique impossible',
+      description: `${member.user} n'a pas pu être ${ban ? 'banni' : 'expulsé'} à son arrivée : **il est toujours sur le serveur**.`,
+      thumbnail: member.user.displayAvatarURL?.(),
+      fields: [
+        field(ICONS.user, 'Membre', userLine(member.user)),
+        field(ban ? ICONS.ban : ICONS.kick, 'Sanction prévue', ban ? 'Bannissement' : 'Expulsion'),
+        wide(ICONS.reason, 'Motif', reason.replace(/^AntiRaid: /, '')),
+        wide(ICONS.error, 'Erreur', String(error ?? 'inconnue').slice(0, 200)),
+        wide(ICONS.info, 'Ensuite', 'Vérifiez mes permissions (Expulser / Bannir) et ma place dans la liste des rôles. Les échecs de la minute suivante sont regroupés dans un récapitulatif.'),
+      ],
+      footer: `ID : ${member.id}`,
+      fallback: true,
+    }).catch((e) => logger.debug('alerte échec', e?.message));
   }
 
   /**
@@ -305,13 +542,16 @@ class AntiRaidService {
    * @param {import('discord.js').Guild} guild
    * @param {string} executorId
    * @param {'channelDelete'|'roleDelete'|'ban'|'kick'} type
-   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban/kick (exemption des arrivants récents)
+   * @param {{ targetId?: string|null, targetJoinedAt?: number|null }} [target] cible du ban/kick (exemption des arrivants
+   *   récents) ou salon supprimé (exemption des salons créés par le même auteur)
    */
   async handleDestructive(guild, executorId, type, { targetId = null, targetJoinedAt = null } = {}) {
     const cfg = this.config.get(guild.id).antiraid;
     if (!cfg?.enabled || !executorId) return;
     if (executorId === this.client.user?.id) return;
     if (executorId === guild.ownerId) return;
+    // Supprimer un salon que l'on a soi-même créé (ticket ou vocal temporaire d'un bot tiers) non plus.
+    if (type === 'channelDelete' && this.#ownChannel(guild.id, targetId, executorId)) return;
     // Bannir ou expulser un raider (arrivé il y a moins de 10 min) n'est pas une action destructrice.
     if (MEMBER_SANCTIONS.has(type) && targetId) {
       const joinedAt = targetJoinedAt ?? guild.members?.cache?.get?.(targetId)?.joinedTimestamp ?? null;
@@ -351,43 +591,29 @@ class AntiRaidService {
         outcome.note ? wide(ICONS.warning, 'Attention', outcome.note) : null,
       ],
       footer: `ID : ${executorId}`,
+      fallback: true,
     });
   }
 
-  /** @returns {Promise<boolean>} true si le membre a été expulsé/banni */
+  /**
+   * Expulse / bannit un compte récent ou un bot à son arrivée (l'annonce est faite par l'appelant).
+   * @returns {Promise<{ ok: boolean, ban: boolean, error?: string }>}
+   */
   async #punishNewMember(member, reason, cfg) {
-    let ban = false;
-    let acted = false;
+    const ban = newAccountAction(cfg) === 'ban';
     try {
-      ban = newAccountAction(cfg) === 'ban';
       this.client.services?.welcome?.silence?.(member.guild.id, member.id);
       if (ban) {
         this.#markBan(member.guild.id, member.id);
         await member.ban({ reason });
-      }
-      else await member.kick(reason);
-      acted = true;
-      await this.alert(member.guild, {
-        tone: 'caution',
-        icon: ICONS.shield,
-        title: ban ? 'Nouveau membre banni' : 'Nouveau membre expulsé',
-        description: `${member.user} a été ${ban ? 'banni' : 'expulsé'} automatiquement à son arrivée.`,
-        thumbnail: member.user.displayAvatarURL?.(),
-        fields: [
-          field(ICONS.user, 'Membre', userLine(member.user)),
-          field(ban ? ICONS.ban : ICONS.kick, 'Sanction', ban ? 'Bannissement' : 'Expulsion'),
-          wide(ICONS.reason, 'Motif', reason.replace(/^AntiRaid: /, '')),
-        ],
-        footer: `ID : ${member.id}`,
-      });
-      return true;
+      } else await member.kick(reason);
+      return { ok: true, ban };
     } catch (e) {
       // Échec : l'événement guildBanAdd ne viendra pas du bot, la marque est retirée.
-      if (acted) return true; // seule l'alerte a échoué : la sanction est bien appliquée
       if (ban) this.client.services?.moderation?.unmarkBotAction?.('ban', member.guild.id, member.id);
       this.client.services?.welcome?.unsilence?.(member.guild.id, member.id);
       logger.debug('punishNewMember', e?.message);
-      return false;
+      return { ok: false, ban, error: e?.message ?? String(e) };
     }
   }
 
@@ -399,8 +625,21 @@ class AntiRaidService {
    */
   async #punishExecutor(guild, executorId, cfg, type) {
     const member = await guild.members.fetch(executorId).catch(() => null);
-    if (!member) return { ok: false };
     const reason = `AntiRaid: ${type} massif`;
+    if (!member) {
+      // Auteur parti (script « supprime puis quitte », bot retiré) : banni par identifiant,
+      // sinon il revient avec n'importe quelle invitation.
+      if (cfg.punishExecutor !== 'ban') return { ok: false };
+      try {
+        this.#markBan(guild.id, executorId);
+        await guild.bans.create(executorId, { reason });
+        return { ok: true, note: 'L\'auteur avait quitté le serveur : il a été banni par identifiant et ne pourra pas revenir.' };
+      } catch (e) {
+        this.client.services?.moderation?.unmarkBotAction?.('ban', guild.id, executorId);
+        logger.debug('punishExecutor (auteur parti)', e?.message);
+        return { ok: false, note: 'L\'auteur a quitté le serveur et son bannissement par identifiant a échoué : il peut revenir.' };
+      }
+    }
     if (cfg.punishExecutor === 'ban') {
       try {
         this.#markBan(guild.id, member.id);
@@ -426,11 +665,16 @@ class AntiRaidService {
         return { ok: false, note: 'Le retrait des rôles a échoué (permission ou hiérarchie).' };
       }
       const dangerous = remaining.filter((r) => r.permissions?.any?.(DANGEROUS_PERMISSIONS));
-      if (dangerous.length) {
-        return {
-          ok: false,
-          note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${dangerous.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)).join(', ')}.`,
-        };
+      // Surcharges de salon propres à l'auteur : le retrait des rôles ne les touche pas.
+      const overwrites = [...(guild.channels?.cache?.values?.() ?? [])]
+        .filter((c) => c.permissionOverwrites?.cache?.get?.(member.id)?.allow?.any?.(DANGEROUS_PERMISSIONS));
+      if (dangerous.length || overwrites.length) {
+        const via = [
+          ...dangerous.map((r) => (r.id === guild.id ? '@everyone' : `${r}`)),
+          ...overwrites.slice(0, 5).map((c) => `la surcharge de ${c}`),
+          overwrites.length > 5 ? `${overwrites.length - 5} autre(s) salon(s)` : null,
+        ].filter(Boolean);
+        return { ok: false, note: `Rôles retirés, mais l'auteur garde des permissions dangereuses via ${via.join(', ')}.` };
       }
       return { ok: true };
     }
@@ -464,13 +708,17 @@ class AntiRaidService {
 
   /**
    * Publie une alerte (carte danger/caution) dans le salon d'alertes et les logs sécurité.
+   * Alerte critique (`fallback`) reçue nulle part (salon supprimé par un nukeur, logs sécurité
+   * débranchés ou mis en pause, permissions) : MP au propriétaire, sinon salon système.
    * @param {import('discord.js').Guild} guild
    * @param {string | { tone?: string, icon?: string, title: string, description?: string, fields?: object[],
-   *   thumbnail?: string, footer?: string, buttons?: import('discord.js').ButtonBuilder[] }} alert
+   *   thumbnail?: string, footer?: string, buttons?: import('discord.js').ButtonBuilder[], trigger?: boolean, fallback?: boolean }} alert
+   * @returns {Promise<boolean>} true si l'alerte a été publiée quelque part
    */
   async alert(guild, alert) {
     const a = typeof alert === 'string' ? { description: alert } : alert;
-    this.lastTrigger.set(guild.id, { at: Date.now(), title: a.title ?? 'Alerte AntiRaid', description: a.description });
+    // Carte récapitulative : pas un nouveau déclenchement (le tableau de bord garde la vague).
+    if (a.trigger !== false) this.lastTrigger.set(guild.id, { at: Date.now(), title: a.title ?? 'Alerte AntiRaid', description: a.description });
     const guildCfg = this.config.get(guild.id);
     const alertChannelId = guildCfg.antiraid?.alertChannel;
     const embed = card({
@@ -484,13 +732,66 @@ class AntiRaidService {
       footer: a.footer,
     });
     const components = buttonRows(...(a.buttons ?? []));
+    let delivered = false;
     // Salon d'alertes dédié uniquement s'il diffère du salon de logs sécurité,
     // sinon l'alerte serait postée deux fois au même endroit.
     if (alertChannelId && alertChannelId !== guildCfg.logChannels?.security) {
-      const channel = await this.client.channels.fetch(alertChannelId).catch(() => null);
-      if (channel?.isTextBased()) await channel.send({ embeds: [embed], components }).catch(() => {});
+      const channel = guild.channels?.cache?.get?.(alertChannelId) ?? (await this.client.channels?.fetch?.(alertChannelId).catch(() => null));
+      if (typeof channel?.send === 'function') delivered = await channel.send({ embeds: [embed], components }).then(() => true, () => false);
     }
-    await this.logging.send(guild.id, 'security', embed, components, { event: 'antiraid' });
+    const logged = await this.logging.send(guild.id, 'security', embed, components, { event: 'antiraid' });
+    delivered = delivered || logged === true;
+    if (!delivered && a.fallback) delivered = await this.#fallback(guild, embed);
+    return delivered;
+  }
+
+  /**
+   * Journalise un changement de réglage de l'AntiRaid ou de la whitelist (logs sécurité) : un
+   * administrateur compromis ne désarme pas la protection sans trace. Désactivation par un autre
+   * que le propriétaire : MP au propriétaire en plus.
+   * @param {import('discord.js').Guild} guild
+   * @param {import('discord.js').User} user auteur du changement
+   * @param {string|string[]} changes lignes « Réglage : avant → après »
+   * @param {{ disabled?: boolean }} [opts]
+   */
+  async logConfigChange(guild, user, changes, { disabled = false } = {}) {
+    const list = (Array.isArray(changes) ? changes : [changes]).filter(Boolean);
+    if (!list.length || !guild?.id) return false;
+    const embed = card({
+      tone: disabled ? 'danger' : 'caution',
+      section: 'security',
+      icon: disabled ? '🔴' : ICONS.settings,
+      title: disabled ? 'AntiRaid désactivé' : 'Réglages AntiRaid modifiés',
+      description: list.map((l) => `• ${l}`).join('\n').slice(0, 3_900),
+      fields: [field(ICONS.moderator, 'Par', user ? userLine(user) : '*Inconnu*')],
+      footer: user?.id ? `ID : ${user.id}` : undefined,
+    });
+    const logged = await this.logging.send(guild.id, 'security', embed, undefined, { event: 'antiraid' });
+    if (disabled && user?.id !== guild.ownerId && guild.ownerId) {
+      const owner = await this.client.users?.fetch?.(guild.ownerId).catch(() => null);
+      await owner?.send?.({
+        content: `${ICONS.warning} L'AntiRaid de **${escapeMarkdown(String(guild.name ?? guild.id)).slice(0, 100)}** vient d'être **désactivé** par ${user ? `\`${escapeMarkdown(String(user.tag ?? user.username ?? user.id))}\`` : 'un administrateur'}. Si ce n'était pas prévu, réactivez-le avec /antiraid.`,
+        embeds: fitEmbeds([embed]),
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+    }
+    return logged === true;
+  }
+
+  /** Repli d'une alerte critique perdue : MP au propriétaire, sinon salon système (sans boutons). */
+  async #fallback(guild, embed) {
+    const payload = {
+      content: `${ICONS.warning} **Alerte AntiRaid** sur **${escapeMarkdown(String(guild.name ?? guild.id)).slice(0, 100)}** : ni le salon d'alerte ni les logs sécurité n'ont pu la recevoir (salon supprimé, logs coupés ou permissions). Vérifiez /antiraid et /logs.`,
+      embeds: fitEmbeds([embed]),
+      allowedMentions: { parse: [] },
+    };
+    const owner = guild.ownerId ? await this.client.users?.fetch?.(guild.ownerId).catch(() => null) : null;
+    if (owner && (await owner.send(payload).then(() => true, () => false))) return true;
+    const system = guild.systemChannel;
+    const me = guild.members?.me;
+    if (typeof system?.send !== 'function') return false;
+    if (me && typeof system.permissionsFor === 'function' && !system.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) return false;
+    return system.send(payload).then(() => true, () => false);
   }
 }
 
@@ -502,4 +803,14 @@ function waveSummary({ punished, skipped, capped }) {
   return parts.join(' · ');
 }
 
-module.exports = { AntiRaidService, newAccountAction, waveSummary, MAX_WAVE_PUNISH, RECENT_JOIN_MS, DANGEROUS_PERMISSIONS };
+/** Champs d'une carte récapitulative (sanctions regroupées pendant un raid). Pur. */
+function digestFields({ banned = 0, kicked = 0, failed = 0, wave = 0, lastError = null }) {
+  const done = [banned && `**${banned}** banni${banned > 1 ? 's' : ''}`, kicked && `**${kicked}** expulsé${kicked > 1 ? 's' : ''}`].filter(Boolean);
+  return [
+    done.length ? field(ICONS.shield, 'Comptes récents / bots', done.join(' · ')) : null,
+    wave ? field(ICONS.members, 'Arrivants de vague', `**${wave}** sanctionné${wave > 1 ? 's' : ''}`) : null,
+    failed ? wide(ICONS.warning, 'Sanctions en échec', `**${failed}** échec${failed > 1 ? 's' : ''} : ces membres sont toujours sur le serveur.${lastError ? `\nDernière erreur : ${String(lastError).slice(0, 200)}` : ''}`) : null,
+  ].filter(Boolean);
+}
+
+module.exports = { AntiRaidService, newAccountAction, waveSummary, digestFields, MAX_WAVE_PUNISH, RECENT_JOIN_MS, DANGEROUS_PERMISSIONS };

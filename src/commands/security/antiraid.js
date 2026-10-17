@@ -98,6 +98,27 @@ const NAV = [
 // ---------------------------------------------------------------- helpers
 
 const guard = (interaction) => assertAdmin(interaction);
+
+/**
+ * Journalise un changement de réglage (logs sécurité ; MP au propriétaire si désactivation),
+ * APRÈS la réponse. Best-effort : n'échoue jamais.
+ */
+async function journal(client, interaction, changes, opts) {
+  try {
+    await client.services.antiraid?.logConfigChange?.(interaction.guild, interaction.user, changes, opts);
+  } catch {
+    /* journal best-effort */
+  }
+}
+
+/** « +<@a> −<@b> » : entrées ajoutées et retirées d'une liste de whitelist. Pur. */
+function listDiff(before, after, mention) {
+  const old = new Set(before ?? []);
+  const now = new Set(after ?? []);
+  const added = [...now].filter((id) => !old.has(id)).map((id) => `+${mention(id)}`);
+  const removed = [...old].filter((id) => !now.has(id)).map((id) => `−${mention(id)}`);
+  return fitList([...added, ...removed], 900);
+}
 /** Clé propre d'un catalogue (« constructor », « toString »… refusés). */
 const own = (obj, key) => typeof key === 'string' && Object.hasOwn(obj, key);
 const cfgOf = (client, guildId) => client.services.config.get(guildId);
@@ -370,11 +391,14 @@ function alertsView(client, guild, notice) {
   };
 }
 
-/** Entrées de whitelist présélectionnées : existantes en cache (si connu), 25 au plus. */
+/** Rôle géré par une intégration (Booster, rôle de bot…) : jamais whitelistable (comme /whitelist). */
+const managedRole = (guild, id) => Boolean(guild.roles?.cache?.get?.(id)?.managed);
+
+/** Entrées de whitelist présélectionnées : existantes en cache (si connu), hors rôles gérés, 25 au plus. */
 function whitelistDefaults(cfg, guild) {
   const wl = cfg.whitelist ?? {};
   const roleCache = guild.roles?.cache;
-  const roles = (wl.roles ?? []).filter((r) => !roleCache || roleCache.has(r)).slice(0, MAX_WL);
+  const roles = (wl.roles ?? []).filter((r) => (!roleCache || roleCache.has(r)) && !managedRole(guild, r)).slice(0, MAX_WL);
   const users = (wl.users ?? []).slice(0, MAX_WL);
   return { users, roles };
 }
@@ -598,40 +622,50 @@ module.exports = {
     /** cmd:antiraid:toggle:<on|off> — interrupteur global. */
     async toggle(interaction, client, [state]) {
       guard(interaction);
-      const enabled = target(state, cfgOf(client, interaction.guildId).antiraid?.enabled);
+      const before = Boolean(cfgOf(client, interaction.guildId).antiraid?.enabled);
+      const enabled = target(state, before);
       client.services.config.update(interaction.guildId, { antiraid: { enabled } });
       await interaction.update(render(client, interaction.guild, 'home', `AntiRaid **${enabled ? 'activé' : 'désactivé'}**.`));
+      if (before !== enabled) await journal(client, interaction, `AntiRaid **${enabled ? 'activé' : 'désactivé'}**.`, { disabled: !enabled });
     },
     /** cmd:antiraid:antibot:<on|off> */
     async antibot(interaction, client, [state]) {
       guard(interaction);
-      const antiBot = target(state, cfgOf(client, interaction.guildId).antiraid?.antiBot);
+      const before = Boolean(cfgOf(client, interaction.guildId).antiraid?.antiBot);
+      const antiBot = target(state, before);
       client.services.config.update(interaction.guildId, { antiraid: { antiBot } });
       await interaction.update(render(client, interaction.guild, 'accounts', `Anti-bot **${antiBot ? 'activé' : 'désactivé'}**.`));
+      if (before !== antiBot) await journal(client, interaction, `Anti-bot : **${antiBot ? 'activé' : 'désactivé'}**.`);
     },
     /** Menu : action en cas de vague. */
     async action(interaction, client) {
       guard(interaction);
       const action = interaction.values?.[0];
       if (!own(WAVE_ACTIONS, action)) throw new UserError('Action inconnue.');
+      const changed = cfgOf(client, interaction.guildId).antiraid?.action !== action;
       client.services.config.update(interaction.guildId, { antiraid: { action } });
       await interaction.update(render(client, interaction.guild, 'joins', `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`));
+      if (changed) await journal(client, interaction, `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`);
     },
     /** Menu : sanction des comptes récents et bots. */
     async newaccount(interaction, client) {
       guard(interaction);
       const value = interaction.values?.[0];
       if (!own(NEW_ACCOUNT_ACTIONS, value)) throw new UserError('Sanction inconnue.');
+      const changed = newAccountAction(cfgOf(client, interaction.guildId).antiraid) !== value;
       client.services.config.update(interaction.guildId, { antiraid: { newAccountAction: value } });
       await interaction.update(render(client, interaction.guild, 'accounts', `Comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`));
+      if (changed) await journal(client, interaction, `Sanction des comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`);
     },
     /** Menu : sanction de l'auteur d'actions destructrices. */
     async executor(interaction, client) {
       guard(interaction);
       const punishExecutor = interaction.values?.[0];
       if (!own(EXECUTOR_ACTIONS, punishExecutor)) throw new UserError('Sanction inconnue.');
+      const changed = cfgOf(client, interaction.guildId).antiraid?.punishExecutor !== punishExecutor;
       client.services.config.update(interaction.guildId, { antiraid: { punishExecutor } });
       await interaction.update(render(client, interaction.guild, 'destructive', `Sanction de l'auteur : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`));
+      if (changed) await journal(client, interaction, `Sanction de l'auteur d'actions destructrices : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`);
     },
     /** cmd:antiraid:set:<joins|accounts|destructive> — ouvre le formulaire de réglages. */
     async set(interaction, client, [kind]) {
@@ -650,9 +684,12 @@ module.exports = {
         if (v !== undefined) patch[key] = v;
       }
       if (!Object.keys(patch).length) throw new UserError('Aucune valeur saisie : rien n\'a été modifié.');
+      const before = { ...cfgOf(client, interaction.guildId).antiraid };
       client.services.config.update(interaction.guildId, { antiraid: patch });
       const n = Object.keys(patch).length;
       await interaction.update(render(client, interaction.guild, kind, `${n} paramètre${n > 1 ? 's' : ''} mis à jour.`));
+      const changes = fields.filter(([key]) => key in patch && patch[key] !== before[key]).map(([key, label]) => `${label} : ${before[key] ?? 0} → ${patch[key]}`);
+      await journal(client, interaction, changes);
     },
     /** Sélecteur du salon d'alerte (vide : logs sécurité seulement). */
     async alertch(interaction, client) {
@@ -663,8 +700,11 @@ module.exports = {
         const ch = interaction.guild.channels?.cache?.get(id);
         if (ch && ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(ch.type)) throw new UserError('Choisissez un salon textuel.');
       }
+      const before = cfgOf(client, interaction.guildId).antiraid?.alertChannel ?? null;
       client.services.config.update(interaction.guildId, { antiraid: { alertChannel: id } });
       await interaction.update(render(client, interaction.guild, 'alerts', id ? `${ICONS.success} Alertes → <#${id}>.` : `${ICONS.success} Salon d'alerte retiré : les alertes vont dans les logs sécurité.`));
+      const where = (c) => (c ? `<#${c}>` : 'logs sécurité');
+      if (before !== id) await journal(client, interaction, `Salon d'alerte : ${where(before)} → ${where(id)}`);
     },
     /** Envoie une alerte de test dans le salon d'alerte. */
     async alerttest(interaction, client) {
@@ -693,26 +733,39 @@ module.exports = {
       const users = [...new Set([...picked, ...hidden])];
       client.services.config.update(interaction.guildId, { whitelist: { users } });
       await interaction.update(render(client, interaction.guild, 'whitelist', `${users.length} membre(s) whitelisté(s).`));
+      const diff = listDiff(cfg.whitelist?.users, users, (id) => `<@${id}>`);
+      if (diff) await journal(client, interaction, `Whitelist (membres) : ${diff}`);
     },
     /** Sélecteur des rôles whitelistés (remplace la sélection visible ; rôles supprimés nettoyés). */
     async wlroles(interaction, client) {
       guard(interaction);
       const cfg = cfgOf(client, interaction.guildId);
       const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId);
+      // Rôle géré (Booster, rôle de bot) : n'importe qui l'obtient sans contrôle du serveur → immunité totale.
+      const managed = picked.filter((id) => managedRole(interaction.guild, id) || interaction.roles?.get?.(id)?.managed);
+      if (managed.length) {
+        throw new UserError(`${managed.map((id) => `<@&${id}>`).join(', ')} : rôle géré par une intégration (boost, bot…), il ne peut pas être whitelisté. Whitelistez plutôt le bot ou le membre concerné.`);
+      }
       const shown = new Set(whitelistDefaults(cfg, interaction.guild).roles);
       const cache = interaction.guild.roles?.cache;
-      const hidden = (cfg.whitelist?.roles ?? []).filter((id) => !shown.has(id) && (!cache || cache.has(id)));
+      // Rôles gérés d'une ancienne configuration : retirés au passage.
+      const hidden = (cfg.whitelist?.roles ?? []).filter((id) => !shown.has(id) && (!cache || cache.has(id)) && !managedRole(interaction.guild, id));
       const roles = [...new Set([...picked, ...hidden])];
       client.services.config.update(interaction.guildId, { whitelist: { roles } });
       await interaction.update(render(client, interaction.guild, 'whitelist', `${roles.length} rôle(s) whitelisté(s).`));
+      const diff = listDiff(cfg.whitelist?.roles, roles, (id) => `<@&${id}>`);
+      if (diff) await journal(client, interaction, `Whitelist (rôles) : ${diff}`);
     },
     /** cmd:antiraid:preset:<faible|equilibre|strict> */
     async preset(interaction, client, [key]) {
       guard(interaction);
       const preset = own(PRESETS, key) ? PRESETS[key] : null;
       if (!preset) throw new UserError('Préréglage inconnu.');
+      const current = cfgOf(client, interaction.guildId).antiraid ?? {};
+      const changed = Object.entries(preset.patch).some(([k, v]) => current[k] !== v);
       client.services.config.update(interaction.guildId, { antiraid: preset.patch });
       await interaction.update(render(client, interaction.guild, 'home', `Préréglage ${preset.emoji} **${preset.label}** appliqué. Salon d'alerte et whitelist conservés.`));
+      if (changed) await journal(client, interaction, `Préréglage ${preset.emoji} **${preset.label}** appliqué (AntiRaid activé).`);
     },
     /** Simulation sans effet : nouveau message éphémère (le tableau de bord reste en place). */
     async simulate(interaction, client) {

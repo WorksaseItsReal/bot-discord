@@ -77,6 +77,9 @@ module.exports = {
 
     const targets = [user, role].filter(Boolean).map(String).join(' et ');
     const notice = add ? `${targets} ${user && role ? 'ajoutés' : 'ajouté'} à la whitelist.` : `${targets} ${user && role ? 'retirés' : 'retiré'} de la whitelist.`;
-    return interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], components: antiraidShortcut(interaction), ephemeral: true });
+    await interaction.reply({ embeds: [whitelistCard({ users: [...users], roles: [...roles] }, notice)], components: antiraidShortcut(interaction), ephemeral: true });
+    // Journal des sécurités (après la réponse) : une whitelist élargie sans trace désarme l'AntiRaid.
+    await client.services.antiraid?.logConfigChange?.(interaction.guild, interaction.user, `Whitelist (/whitelist ${sub}) : ${notice}`).catch(() => {});
+    return undefined;
   },
 };
