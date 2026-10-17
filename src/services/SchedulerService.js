@@ -1,5 +1,6 @@
 'use strict';
 
+const { PermissionFlagsBits } = require('discord.js');
 const { createLogger } = require('../core/logger');
 const { truncate } = require('../utils/embeds');
 const { discordTimestamp } = require('../utils/time');
@@ -21,6 +22,15 @@ const PURGE_INTERVAL_MS = DAY_MS;
  * ne pas retarder les autres étapes (débans, mutes, rappels…) ni les ticks suivants.
  */
 const SERVICE_STAGE_BUDGET_MS = 15_000;
+/** Levée échue en échec (débans, fins de mute) : nouvel essai après 1 min, doublé à chaque échec, 1 h au plus. */
+const EXPIRY_RETRY_BASE_MS = 60_000;
+const EXPIRY_RETRY_MAX_MS = 3_600_000;
+/** Levée toujours impossible plus de 24 h après l'échéance : le staff est prévenu (une fois). */
+const EXPIRY_ALERT_LATE_MS = DAY_MS;
+/** Appels Discord de levée par étape (débans, fins de mute) et par passage : la suite au passage suivant. */
+const MAX_EXPIRY_CALLS_PER_PASS = 25;
+/** Giveaways terminés en parallèle, HORS du passage du scheduler. */
+const MAX_GIVEAWAY_ENDINGS = 3;
 
 /** Salon définitivement inutilisable (supprimé, accès ou permission retirés). */
 const PERMANENT_CHANNEL_CODES = new Set([10003, 10004, 50001, 50008, 50013, 50024, 50083]);
@@ -61,6 +71,12 @@ class SchedulerService {
     this.lastPurgeAt = 0;
     /** Rattrapage des serveurs quittés hors ligne fait (une fois par démarrage). */
     this.leftGuildsReconciled = false;
+    /** Levées échues en échec : id de sanction → { at: prochain essai, attempts }. */
+    this.expiryRetries = new Map();
+    /** Sanctions dont l'échec prolongé (> 24 h) a déjà été signalé au staff. */
+    this.expiryAlerted = new Set();
+    /** Fins de giveaways en cours (hors passage) : id → promesse. */
+    this.giveawayEndings = new Map();
   }
 
   start() {
@@ -71,12 +87,13 @@ class SchedulerService {
     logger.info(`Scheduler démarré (intervalle ${this.intervalMs}ms)`);
   }
 
-  /** Arrête la boucle et attend la fin du tick en cours (avant fermeture de la base). */
+  /** Arrête la boucle et attend la fin du tick et des tirages en cours (avant fermeture de la base). */
   async stop() {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.currentTick) await this.currentTick.catch(() => {});
+    if (this.giveawayEndings.size) await Promise.allSettled([...this.giveawayEndings.values()]);
   }
 
   tick() {
@@ -124,15 +141,26 @@ class SchedulerService {
     }
   }
 
+  /**
+   * Fins de giveaways lancées HORS du passage : un tirage lent (une requête par participant
+   * parti, limite de débit) ne retarde plus les débans, fins de mute, rappels… ni les ticks
+   * suivants. Au plus MAX_GIVEAWAY_ENDINGS à la fois ; un giveaway en cours de tirage n'est
+   * jamais relancé. stop() attend les tirages en cours.
+   */
   async #processDueGiveaways() {
     const giveaways = this.client.services?.giveaways;
     const repo = this.client.repositories?.giveaways;
     if (!giveaways || !repo) return;
     for (const g of repo.findDue()) {
-      if (this.stopping) return;
-      // Annonce impossible (salon supprimé, permission retirée) : visible dans les logs,
-      // le staff peut la retenter avec /giveaway end.
-      await giveaways.end(g.id).catch((e) => logger.warn(`Fin du giveaway #${g.id} (serveur ${g.guild_id}) :`, e?.message ?? e));
+      if (this.stopping || this.giveawayEndings.size >= MAX_GIVEAWAY_ENDINGS) return;
+      if (this.giveawayEndings.has(g.id)) continue;
+      const run = Promise.resolve()
+        .then(() => giveaways.end(g.id))
+        // Annonce impossible (salon supprimé, permission retirée) : visible dans les logs,
+        // le staff peut la retenter avec /giveaway end.
+        .catch((e) => logger.warn(`Fin du giveaway #${g.id} (serveur ${g.guild_id}) :`, e?.message ?? e))
+        .finally(() => this.giveawayEndings.delete(g.id));
+      this.giveawayEndings.set(g.id, run);
     }
   }
 
@@ -238,28 +266,101 @@ class SchedulerService {
     return true;
   }
 
-  /** Sanction « absente » : serveur quitté (client prêt) → désactivée ; sinon réessai. */
+  /**
+   * Serveur d'une sanction échue, ou null (réessai plus tard). Serveur absent (bot retiré,
+   * peut-être temporairement) ou indisponible : la sanction reste ACTIVE — levée au retour du
+   * bot, supprimée par la purge des serveurs quittés s'il ne revient pas sous 30 jours. (La
+   * clore ici laissait le membre banni ou muet à vie après une réinvitation.)
+   */
   #resolveGuild(s) {
     const guild = this.client.guilds.cache.get(s.guild_id);
-    if (!guild) {
-      // Client prêt et serveur absent du cache : le bot a quitté le serveur, la
-      // sanction ne pourra jamais être levée → on la désactive (sinon réessai à vie).
-      if (this.client.isReady?.()) this.sanctions.deactivate(s.id);
-      return null;
-    }
-    // Serveur indisponible (outage, cache pas encore prêt) : on réessaie au prochain tick.
-    if (!guild.available) return null;
+    if (!guild || !guild.available) return null;
     return guild;
   }
 
+  /** Levée en attente d'un nouvel essai (backoff) ? */
+  #retryPending(s) {
+    return (this.expiryRetries.get(s.id)?.at ?? 0) > Date.now();
+  }
+
+  /** Oublie l'état d'échec des sanctions qui ne sont plus échues (levées, closes, supprimées). */
+  #forgetSettledRetries(due) {
+    const ids = new Set(due.map((s) => s.id));
+    for (const id of this.expiryRetries.keys()) if (!ids.has(id)) this.expiryRetries.delete(id);
+    for (const id of this.expiryAlerted) if (!ids.has(id)) this.expiryAlerted.delete(id);
+  }
+
+  #expirySucceeded(s) {
+    this.expiryRetries.delete(s.id);
+    this.expiryAlerted.delete(s.id);
+  }
+
+  /** Vérification faite une fois par serveur et par passage (cache `memo`). */
+  static #memo(memo, key, check) {
+    if (!memo.has(key)) memo.set(key, check());
+    return memo.get(key);
+  }
+
+  /** Le bot peut-il débannir ? (membre du bot inconnu : Discord tranchera) */
+  #canUnban(guild) {
+    const me = guild.members?.me;
+    return !me?.permissions || me.permissions.has(PermissionFlagsBits.BanMembers);
+  }
+
+  /** Le bot peut-il retirer le rôle Muted (permission et hiérarchie) ? */
+  #canUnmute(guild, roleId) {
+    const me = guild.members?.me;
+    if (!me?.permissions) return true;
+    if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) return false;
+    const role = guild.roles?.cache?.get(roleId);
+    return !role || role.position < (me.roles?.highest?.position ?? Infinity);
+  }
+
+  /**
+   * Levée échue en échec : nouvel essai différé (1 min, doublé, 1 h au plus) au lieu de toutes
+   * les 30 s ; plus de 24 h après l'échéance, le staff est prévenu une fois (logs Modération).
+   * La sanction reste active : retentée toutes les heures, levée dès que la cause est corrigée.
+   */
+  async #expiryFailed(guild, s, reason) {
+    const attempts = (this.expiryRetries.get(s.id)?.attempts ?? 0) + 1;
+    this.expiryRetries.set(s.id, { attempts, at: Date.now() + Math.min(EXPIRY_RETRY_MAX_MS, EXPIRY_RETRY_BASE_MS * 2 ** (attempts - 1)) });
+    const what = s.type === 'mute' ? 'Fin du mute' : 'Débannissement';
+    const line = `${what} automatique échoué (essai ${attempts}, nouvel essai plus tard) guild=${s.guild_id} user=${s.user_id} : ${reason}`;
+    if (attempts === 1) logger.warn(line);
+    else logger.debug(line);
+    if (Date.now() - s.expires_at <= EXPIRY_ALERT_LATE_MS || this.expiryAlerted.has(s.id)) return;
+    this.expiryAlerted.add(s.id);
+    const logging = this.client.services?.logging;
+    if (!logging) return;
+    const mute = s.type === 'mute';
+    const embed = card({
+      tone: 'warning',
+      section: 'moderation',
+      icon: ICONS.warning,
+      title: mute ? 'Fin de mute impossible' : 'Débannissement automatique impossible',
+      description: [
+        `${mute ? 'Le mute temporaire' : 'Le bannissement temporaire'} de <@${s.user_id}> est terminé depuis plus de 24 h, mais je n'arrive pas à le lever : ${truncate(String(reason), 300)}.`,
+        `Je réessaie toutes les heures. Corrigez ${mute ? 'la permission « Gérer les rôles » ou la position de mon rôle' : 'la permission « Bannir des membres »'}, ou faites-le à la main avec \`${mute ? '/unmute' : '/unban'}\`.`,
+      ].join('\n'),
+      fields: [field(ICONS.user, 'Membre', `<@${s.user_id}>`), field(ICONS.date, 'Échéance', discordTimestamp(s.expires_at, 'R'))],
+      footer: `Sanction #${s.id}`,
+    });
+    await logging.send(guild.id, 'moderation', embed, undefined, { event: 'revocation' }).catch(() => {});
+  }
+
   async #processExpiredTempbans() {
-    for (const s of this.sanctions.findDue()) {
+    const due = this.sanctions.findDue();
+    this.#forgetSettledRetries(due);
+    const allowed = new Map();
+    let calls = 0;
+    for (const s of due) {
       if (this.stopping) return;
       if (s.type === 'mute') continue; // étape dédiée
       if (s.type !== 'tempban') {
         this.sanctions.deactivate(s.id); // timeout : expiré côté Discord
         continue;
       }
+      if (this.#retryPending(s)) continue;
       const guild = this.#resolveGuild(s);
       if (!guild) continue;
       // findDue() est lu une fois par tick : la sanction a pu changer pendant les appels
@@ -275,6 +376,13 @@ class SchedulerService {
         await this.#logExpiry(guild, s, 'unban', `Le bannissement temporaire de <@${s.user_id}> est arrivé à échéance, mais un **bannissement définitif** (\`#${permanent.id}\`) est enregistré : il reste banni. Utilisez \`/unban\` si ce bannissement définitif n'a plus lieu d'être.`).catch(() => {});
         continue;
       }
+      // Sans « Bannir des membres », aucun appel voué au 403 (limite des requêtes invalides).
+      if (!SchedulerService.#memo(allowed, guild.id, () => this.#canUnban(guild))) {
+        await this.#expiryFailed(guild, s, 'la permission « Bannir des membres » manque au bot');
+        continue;
+      }
+      if (calls >= MAX_EXPIRY_CALLS_PER_PASS) continue; // la suite au prochain passage
+      calls += 1;
       const moderation = this.client.services?.moderation;
       // Marqué AVANT l'appel : guildBanRemove ne journalise pas une seconde fois cette levée.
       moderation?.markBotAction?.('unban', guild.id, s.user_id);
@@ -283,10 +391,15 @@ class SchedulerService {
       } catch (e) {
         moderation?.unmarkBotAction?.('unban', guild.id, s.user_id);
         // 10026 Unknown Ban : déjà débanni manuellement → rien à faire.
-        if (e?.code === 10026) this.sanctions.deactivate(s.id);
-        else logger.debug(`Débannissement automatique échoué (réessai) guild=${s.guild_id} user=${s.user_id}`, e?.message);
+        if (e?.code === 10026) {
+          this.sanctions.deactivate(s.id);
+          this.#expirySucceeded(s);
+        } else {
+          await this.#expiryFailed(guild, s, e?.message ?? String(e));
+        }
         continue;
       }
+      this.#expirySucceeded(s);
       this.sanctions.deactivate(s.id);
       logger.info(`Ban temporaire expiré retiré: guild=${s.guild_id} user=${s.user_id}`);
       await this.#logExpiry(guild, s, 'unban', `<@${s.user_id}> a purgé son bannissement temporaire et peut de nouveau rejoindre le serveur.`);
@@ -299,15 +412,27 @@ class SchedulerService {
    * (permissions, hiérarchie, API) la garde active pour un nouvel essai.
    */
   async #processExpiredMutes() {
+    const allowed = new Map();
+    let calls = 0;
     for (const s of this.sanctions.findDue()) {
       if (this.stopping) return;
       if (s.type !== 'mute') continue;
+      if (this.#retryPending(s)) continue;
       const guild = this.#resolveGuild(s);
       if (!guild) continue;
+      // Rôle Muted au-dessus du bot ou « Gérer les rôles » retirée : aucun appel voué au 403.
+      const roleId = this.client.services?.config?.get(guild.id)?.moderation?.mutedRoleId;
+      if (roleId && !SchedulerService.#memo(allowed, guild.id, () => this.#canUnmute(guild, roleId))) {
+        await this.#expiryFailed(guild, s, 'le rôle Muted est au-dessus du mien ou « Gérer les rôles » me manque');
+        continue;
+      }
+      if (calls >= MAX_EXPIRY_CALLS_PER_PASS) continue; // la suite au prochain passage
+      calls += 1;
       try {
         await this.#expireMute(guild, s);
+        this.#expirySucceeded(s);
       } catch (e) {
-        logger.warn(`Levée du mute expiré échouée (réessai) guild=${s.guild_id} user=${s.user_id} :`, e?.message ?? e);
+        await this.#expiryFailed(guild, s, e?.message ?? String(e));
       }
     }
   }
@@ -435,4 +560,4 @@ class SchedulerService {
   }
 }
 
-module.exports = { SchedulerService, REMINDER_MAX_LATE_MS, LEFT_GUILD_RETENTION_MS, SERVICE_STAGE_BUDGET_MS };
+module.exports = { SchedulerService, REMINDER_MAX_LATE_MS, LEFT_GUILD_RETENTION_MS, SERVICE_STAGE_BUDGET_MS, MAX_EXPIRY_CALLS_PER_PASS };

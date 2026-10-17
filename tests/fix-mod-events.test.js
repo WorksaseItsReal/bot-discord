@@ -120,7 +120,9 @@ test('Scheduler : débannissement marqué comme action du bot', async () => {
   assert.equal(sanctions.listActiveByType('g1', 'tempban').length, 0);
 });
 
-test('Scheduler : sanctions d\'un serveur quitté désactivées seulement quand le client est prêt', async () => {
+// Revue n° 6 (R97) : bot retiré peut-être temporairement → la sanction reste active (levée au
+// retour, supprimée par la purge des serveurs quittés après 30 jours), client prêt ou non.
+test('Scheduler : sanctions d\'un serveur quitté gardées actives (levées au retour du bot)', async () => {
   const { sanctions } = moderationService();
   sanctions.create({ guildId: 'gone', userId: UID, moderatorId: 'm', type: 'tempban', expiresAt: Date.now() - 1 });
   const notReady = { guilds: { cache: new Map() }, services: {}, repositories: {}, isReady: () => false };
@@ -128,5 +130,5 @@ test('Scheduler : sanctions d\'un serveur quitté désactivées seulement quand 
   assert.equal(sanctions.listActiveByType('gone', 'tempban').length, 1);
   const ready = { ...notReady, isReady: () => true };
   await new SchedulerService({ client: ready, sanctions, reminders: { findDue: () => [] } }).tick();
-  assert.equal(sanctions.listActiveByType('gone', 'tempban').length, 0);
+  assert.equal(sanctions.listActiveByType('gone', 'tempban').length, 1);
 });
