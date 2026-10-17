@@ -565,6 +565,8 @@ class TicketService {
     const ticket = this.tickets.getByChannel(channel.id);
     if (!ticket) throw new UserError('Ce salon n\'est pas un ticket.');
     this.assertStaff(staff);
+    // Fermeture en cours (délai de 5 s) : l'instantané de fermeture effacerait la prise en charge.
+    if (this.closing.has(channel.id)) throw new UserError('Ce ticket est en cours de fermeture : il ne peut plus être pris en charge.');
     if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé : il ne peut plus être pris en charge.');
     if (ticket.status === 'claimed') {
       throw new UserError(ticket.claimed_by ? `Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.` : 'Ce ticket est déjà pris en charge.');
@@ -745,6 +747,8 @@ class TicketService {
         };
       });
     }
+    // Ligne relue après le délai : elle fait foi pour l'instantané (prise en charge comprise).
+    ticket = this.tickets.getByChannel(channel.id) ?? ticket;
     const cfg = this.config.get(channel.guild.id).tickets;
     // Arrêt du bot (flush) : archive sans télécharger les pièces jointes (liens seulement),
     // sinon les téléchargements dépassent le délai d'arrêt et le salon n'est jamais supprimé.

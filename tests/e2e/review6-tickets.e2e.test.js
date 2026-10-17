@@ -542,3 +542,30 @@ test('R71 entretien de candidature : fermé par l\'équipe seulement, sans notat
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R72
+
+test('R72 prise en charge pendant les 5 s de fermeture : refusée, instantané cohérent', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const { channelId, welcome } = await openTicket(h);
+    const row = h.client.repositories.tickets.getByChannel(channelId);
+    const close = await h.click(welcome, 'ticket:close', { as: 'member' });
+    const pending = h.click(h.message(close.original), 'ticket:closeconfirm', { as: 'member' });
+    await sleep(800);
+    const claim = await h.click(h.message(welcome.id), 'ticket:claim', { as: 'mod' });
+    assert.ok(h.isError(claim), 'prise en charge acceptée pendant la fermeture');
+    assert.match(h.replyText(claim), /fermeture/);
+    await pending;
+    await sleep(4_800);
+    await h.settle();
+    const snap = h.client.repositories.ticketRatings.get(row.id);
+    assert.ok(snap, 'instantané absent');
+    assert.equal(snap.claimed_by, null);
+    assert.equal(snap.claimed_at ?? null, null, 'claimed_at sans claimed_by');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
