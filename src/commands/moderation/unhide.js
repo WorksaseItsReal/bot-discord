@@ -2,7 +2,7 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows } = require('../../utils/ui');
-const { channelCard, channelForButton, channelForCommand } = require('../../services/LockdownService');
+const { channelCard, channelForButton, channelForCommand, guardOpening, reportOpening } = require('../../services/LockdownService');
 const { requirePermission } = require('../../services/ModerationService');
 
 /** Rend le salon visible (restaure l'état sauvegardé par /hide, sinon retire le refus). */
@@ -35,10 +35,12 @@ module.exports = {
 
   async execute(interaction, client) {
     const channel = channelForCommand(interaction, 'salon', { overwrites: true });
+    const opened = guardOpening(client, interaction, channel, 'hide');
     // Catégorie : ses salons masqués avec elle sont rendus visibles un par un (plus de 3 s possible).
     await interaction.deferReply();
     await unhide(client, channel, interaction.user);
     await interaction.editReply(render(channel, interaction.user, interaction.user.id));
+    await reportOpening(client, interaction, opened);
   },
 
   buttons: {
@@ -46,9 +48,11 @@ module.exports = {
     async run(interaction, client, [channelId, ownerId]) {
       requirePermission(interaction, 'ManageChannels');
       const channel = await channelForButton(interaction, channelId, { overwrites: true });
+      const opened = guardOpening(client, interaction, channel, 'hide');
       await interaction.deferUpdate();
       await unhide(client, channel, interaction.user);
       await interaction.editReply(render(channel, interaction.user, ownerId));
+      await reportOpening(client, interaction, opened);
     },
   },
 };

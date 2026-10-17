@@ -3,8 +3,19 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { card, field, ICONS, userLine, subtext } = require('../../utils/ui');
 const { UserError } = require('../../core/errors');
+const { moduleConfig, SECUR_BOUNDS } = require('../../utils/secur');
 
 const BULK_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Taille à partir de laquelle une purge compte pour le module Secur messagePurge (même calcul
+ * que son classify, src/services/secur/modules/messages.js : 20 par défaut, borné). Pur.
+ */
+function purgeMinimum(cfg) {
+  const raw = Number(moduleConfig(cfg, 'messagePurge').minMessages);
+  const [min, max] = SECUR_BOUNDS.minMessages;
+  return Math.min(max, Math.max(min, Number.isInteger(raw) ? raw : 20));
+}
 
 module.exports = {
   category: 'moderation',
@@ -17,8 +28,10 @@ module.exports = {
     )
     .addUserOption((o) => o.setName('membre').setDescription('Ne supprimer que les messages de ce membre')),
 
+  purgeMinimum,
+
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
-  async execute(interaction) {
+  async execute(interaction, client) {
     const amount = interaction.options.getInteger('nombre');
     const target = interaction.options.getUser('membre');
     // Salon non résolu (non mis en cache, contexte inattendu) : refus explicite plutôt qu'un crash.
@@ -32,6 +45,11 @@ module.exports = {
     if (target) messages = messages.filter((m) => m.author.id === target.id);
     const toDelete = [...messages.values()].slice(0, amount);
     if (!toDelete.length) throw new UserError('Aucun message supprimable trouvé (les messages de plus de 14 jours ne peuvent pas être supprimés en masse).');
+
+    // Purge signée du bot dans le journal d'audit (73) : sans pré-contrôle, elle échapperait au
+    // module Secur messagePurge. Comptée au nom de l'auteur, comme une purge faite à la main.
+    const min = purgeMinimum(client.services.config.get(interaction.guildId));
+    if (toDelete.length >= min) client.services.secur?.assertAllowed?.(interaction, 'messagePurge');
 
     const deleted = await interaction.channel.bulkDelete(toDelete, true);
     const n = deleted.size;
@@ -54,5 +72,6 @@ module.exports = {
         }),
       ],
     });
+    if (n >= min) await client.services.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'messagePurge');
   },
 };

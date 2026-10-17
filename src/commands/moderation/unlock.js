@@ -2,7 +2,7 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { ICONS, actionButton, deleteButton, buttonRows } = require('../../utils/ui');
-const { channelCard, channelForButton, channelForCommand } = require('../../services/LockdownService');
+const { channelCard, channelForButton, channelForCommand, guardOpening, reportOpening } = require('../../services/LockdownService');
 const { requirePermission } = require('../../services/ModerationService');
 const { LOCK_CHANNEL_TYPES } = require('./lock');
 
@@ -27,8 +27,10 @@ module.exports = {
 
   async execute(interaction, client) {
     const channel = channelForCommand(interaction, 'salon', { overwrites: true });
+    const opened = guardOpening(client, interaction, channel, 'lock');
     await client.services.lockdown.unlockChannel(channel, `Unlock par ${interaction.user.tag}`);
     await interaction.reply(render(channel, interaction.user, interaction.user.id));
+    await reportOpening(client, interaction, opened);
   },
 
   buttons: {
@@ -36,8 +38,10 @@ module.exports = {
     async run(interaction, client, [channelId, ownerId]) {
       requirePermission(interaction, 'ManageChannels');
       const channel = await channelForButton(interaction, channelId, { overwrites: true });
+      const opened = guardOpening(client, interaction, channel, 'lock');
       await client.services.lockdown.unlockChannel(channel, `Unlock par ${interaction.user.tag}`);
       await interaction.update(render(channel, interaction.user, ownerId));
+      await reportOpening(client, interaction, opened);
     },
   },
 };

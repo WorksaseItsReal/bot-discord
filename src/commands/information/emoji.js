@@ -248,14 +248,20 @@ async function deleteEmoji(interaction, client) {
   assertManage(interaction);
   const emoji = findGuildEmoji(interaction.guild, interaction.options.getString('emoji'));
   const { name, id } = emoji;
+  // Suppression signée du bot dans le journal d'audit (62) : sans pré-contrôle, elle échapperait au
+  // module Secur expressions. Contrôlée avant la confirmation, puis juste avant l'appel (fenêtre
+  // relue après l'attente), et comptée au nom de l'auteur comme une suppression faite à la main.
+  const secur = client.services.secur;
+  secur?.assertAllowed?.(interaction, 'expressions');
   if (client.services.config.get(interaction.guild.id)?.moderation?.confirmDangerous) {
     const ok = await confirm(interaction, { description: `Supprimer définitivement l'emoji ${emoji} \`:${name}:\` ?`, confirmLabel: 'Supprimer' });
     if (!ok) return undefined;
+    secur?.assertAllowed?.(interaction, 'expressions');
   } else {
     await interaction.deferReply({ ephemeral: true });
   }
   await emoji.delete(truncate(`Supprimé par ${interaction.user.tag}`, 400));
-  return interaction.editReply({
+  await interaction.editReply({
     embeds: [card({
       tone: 'danger',
       section: 'information',
@@ -266,6 +272,8 @@ async function deleteEmoji(interaction, client) {
     })],
     components: [],
   });
+  await client.services.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'expressions', { targetId: id });
+  return undefined;
 }
 
 async function renameEmoji(interaction) {

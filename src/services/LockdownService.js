@@ -546,6 +546,35 @@ class LockdownService {
   }
 
   /**
+   * Salons où unlockChannel (`kind` 'lock') ou unhideChannel ('hide') LÈVERAIT un refus
+   * d'@everyone que le bot n'a pas posé (« Envoyer des messages » / « Voir le salon » refusé
+   * d'origine ou à la main) : l'ouverture que Secur (channelUpdate) juge à risque. Lever un
+   * /lock ou un /hide du bot rend l'état d'origine et ne compte pas. Calcul sur le cache, sans
+   * rien modifier (catégorie : ses salons masqués avec elle comptent aussi).
+   * @param {'lock'|'hide'} kind
+   * @returns {number}
+   */
+  nativeOpenings(channel, kind) {
+    const guildId = channel?.guild?.id;
+    if (!guildId || !channel.permissionOverwrites) return 0;
+    const flag = kind === 'hide' ? 'ViewChannel' : 'SendMessages';
+    const opens = (c) => {
+      if (overwriteState(c.permissionOverwrites?.cache?.get(guildId), flag) !== false) return false;
+      const saved = kind === 'hide' ? this.locks.get(guildId, c.id, 'hide') : this.locks.get(guildId, c.id);
+      // Sans état : refus d'origine retiré. /unlock avec état : refus d'origine rendu tel quel.
+      // /unhide avec état : « Voir le salon » repasse à neutre, même si l'origine était un refus.
+      if (!saved) return true;
+      return kind === 'hide' && normalizeLock(saved.data).perms?.ViewChannel === false;
+    };
+    const children = kind === 'hide'
+      ? (this.locks.get(guildId, channel.id, 'hide')?.data?.children ?? [])
+        .map((id) => channel.guild.channels.cache.get(id))
+        .filter((c) => c?.permissionOverwrites && this.locks.get(guildId, c.id, 'hide'))
+      : [];
+    return [channel, ...children].filter(opens).length;
+  }
+
+  /**
    * Verrouille tous les salons où l'on peut écrire (textuels, annonces, forums, médias,
    * texte des vocaux et des conférences), par lots de 5.
    * @param {{ log?: boolean, wait?: boolean }} [opts] log=false : l'appelant publie sa propre carte (AntiRaid) ;
@@ -647,6 +676,25 @@ async function channelForButton(interaction, rawChannelId, opts = {}) {
   return channel;
 }
 
+/**
+ * /unlock et /unhide : lever un refus d'@everyone que le bot n'a pas posé (nativeOpenings) est
+ * une ouverture à risque pour Secur (channelUpdate), signée du bot dans le journal d'audit.
+ * Pré-contrôle AVANT, au nom de l'auteur (UserError si le seuil serait atteint) ; lever un /lock
+ * ou un /hide du bot n'est pas contrôlé.
+ * @param {'lock'|'hide'} kind
+ * @returns {number} salons qui seront ouverts, à signaler ensuite avec reportOpening
+ */
+function guardOpening(client, interaction, channel, kind) {
+  const opened = client.services.lockdown.nativeOpenings(channel, kind);
+  if (opened) client.services.secur?.assertAllowed?.(interaction, 'channelUpdate', { count: opened });
+  return opened;
+}
+
+/** Signalement à Secur après coup, au nom de l'auteur (best-effort, une fois la réponse partie). */
+async function reportOpening(client, interaction, opened) {
+  if (opened) await client.services.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'channelUpdate', { count: opened });
+}
+
 /** Refuse les fils et salons sans permissions propres (UserError). */
 function assertOverwritable(channel) {
   if (!channel || channel.isThread?.() || !channel.permissionOverwrites || !channel.guild) {
@@ -663,6 +711,8 @@ module.exports = {
   serverLockCard,
   channelForButton,
   channelForCommand,
+  guardOpening,
+  reportOpening,
   normalizeLock,
   lockData,
   lockPermsFor,
