@@ -439,7 +439,17 @@ class TicketService {
     // « Ticket déjà ouvert » est plus utile que « patientez » : contrôlé avant le délai anti-boucle.
     const cfg = this.config.get(guild.id).tickets;
     const max = cfg.maxPerUser || 1;
-    const open = this.tickets.countOpenByUser(guild.id, user.id);
+    let open = this.tickets.countOpenByUser(guild.id, user.id);
+    if (open >= max) {
+      // Limite atteinte : un ticket dont le salon a été supprimé (à la main, ou pendant l'absence
+      // du bot) ne doit pas bloquer le membre. Verrouillé pendant la vérification (double clic).
+      this.creating.add(lockKey);
+      try {
+        open = await this.#forgetGoneTickets(guild, user.id);
+      } finally {
+        this.creating.delete(lockKey);
+      }
+    }
     if (open >= max) {
       throw new UserError(`Vous avez déjà **${open}** ticket(s) ouvert(s) (limite : ${max}). Terminez-en un avant d'en ouvrir un nouveau.`);
     }
@@ -452,6 +462,18 @@ class TicketService {
     } finally {
       this.creating.delete(lockKey);
     }
+  }
+
+  /**
+   * Oublie les tickets ouverts du membre dont le salon n'existe plus (confirmé par Discord).
+   * @returns {Promise<number>} tickets ouverts restants
+   */
+  async #forgetGoneTickets(guild, userId) {
+    for (const ticket of this.tickets.listByGuild?.(guild.id) ?? []) {
+      if (ticket.user_id !== userId || ticket.status === 'closed') continue;
+      if (await channelGone(guild, ticket.channel_id)) this.tickets.delete(ticket.channel_id);
+    }
+    return this.tickets.countOpenByUser(guild.id, userId);
   }
 
   async #create(guild, user, reason) {

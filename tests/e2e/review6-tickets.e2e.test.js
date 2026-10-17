@@ -447,3 +447,49 @@ test('R69 candidatures : « Gérer les permissions » sur le seul salon de réce
     await h.close();
   }
 });
+
+// ---------------------------------------------------------------- R70
+
+test('R70 tickets fantômes : réinvitation (guildCreate) et salon supprimé à la main → le membre peut rouvrir un ticket', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const { channelId } = await openTicket(h);
+    // Bot expulsé ; pendant son absence, le salon du ticket est supprimé ; puis réinvitation.
+    h.fake.dispatchNow('GUILD_DELETE', { id: IDS.guild, unavailable: false }, 'guildDelete');
+    await h.settle();
+    h.fake.channels.delete(channelId);
+    const raw = {
+      ...h.fake.guild,
+      id: IDS.guild,
+      roles: [...h.fake.roles.values()],
+      channels: [...h.fake.channels.values()].filter((c) => ![10, 11, 12].includes(c.type)),
+      threads: [],
+      members: [...h.fake.members.values()],
+      emojis: h.fake.guild.emojis ?? [],
+      stickers: [],
+      voice_states: [],
+      presences: [],
+      member_count: h.fake.members.size,
+    };
+    h.fake.dispatchNow('GUILD_CREATE', raw, 'guildCreate');
+    await h.settle();
+    await h.waitFor(() => !h.client.repositories.tickets.getByChannel(channelId));
+    assert.equal(h.client.repositories.tickets.getByChannel(channelId), undefined, 'ligne fantôme après réinvitation');
+
+    // Bot en ligne : un salon de ticket supprimé à la main ne bloque pas la limite du membre.
+    h.client.services.tickets.lastOpened.clear();
+    const second = await openTicket(h);
+    const ch = h.fake.channels.get(second.channelId);
+    h.fake.channels.delete(second.channelId);
+    h.fake.dispatchNow('CHANNEL_DELETE', ch);
+    await h.settle();
+    h.client.services.tickets.lastOpened.clear();
+    const third = await openTicket(h);
+    assert.ok(third.channelId && third.channelId !== second.channelId);
+    assert.equal(h.client.repositories.tickets.getByChannel(second.channelId), undefined);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
