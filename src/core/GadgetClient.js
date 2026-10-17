@@ -72,6 +72,8 @@ const { ReportService } = require('../services/ReportService');
 const { StarboardService } = require('../services/StarboardService');
 const { StickyService } = require('../services/StickyService');
 const { AutoResponderService } = require('../services/AutoResponderService');
+const { GhostPingService } = require('../services/GhostPingService');
+const { SupportRoleService } = require('../services/SupportRoleService');
 const { TempRoleService } = require('../services/TempRoleService');
 const { AnnouncementService } = require('../services/AnnouncementService');
 const { BirthdayService } = require('../services/BirthdayService');
@@ -86,8 +88,6 @@ const { ApplicationService } = require('../services/ApplicationService');
 const { TicketRatingService } = require('../services/TicketRatingService');
 const { FeedService } = require('../services/FeedService');
 const { AutomationService } = require('../services/AutomationService');
-const { GhostPingService } = require('../services/GhostPingService');
-const { SupportRoleService } = require('../services/SupportRoleService');
 
 const logger = createLogger('client');
 
@@ -220,6 +220,9 @@ class GadgetClient extends Client {
       starboard: new StarboardService({ client: this, starboard: this.repositories.starboard, config: configService }),
       sticky: new StickyService({ client: this, sticky: this.repositories.sticky }),
       autoResponses: new AutoResponderService({ client: this, config: configService }),
+      // Ghostping d'arrivée (/bienvenue) et rôle soutien (/automatisations) : minuteurs unref, arrêtés dans shutdown.
+      ghostPing: new GhostPingService({ client: this, config: configService }),
+      supportRole: new SupportRoleService({ client: this, config: configService }),
       // Tâches planifiées : chacune est une étape isolée du SchedulerService.
       tempRoles: new TempRoleService({ client: this, tempRoles: this.repositories.tempRoles }),
       announcements: new AnnouncementService({ client: this, announcements: this.repositories.announcements }),
@@ -242,9 +245,6 @@ class GadgetClient extends Client {
       feeds: new FeedService({ client: this, feeds: this.repositories.feeds, networkEnabled: config.feedsNetwork }),
       // Automatisations (/automatisations) : publication automatique, fils, rôle vocal, boosts.
       automations: new AutomationService({ client: this, config: configService, counters: this.repositories.autoThreadCounters }),
-      // Ghostping d'arrivée (/bienvenue) et rôle soutien (/automatisations) : minuteurs unref, arrêtés dans shutdown.
-      ghostPing: new GhostPingService({ client: this, config: configService }),
-      supportRole: new SupportRoleService({ client: this, config: configService }),
     };
 
     this.commands = this.commandHandler.loadAll(path.join(__dirname, '..', 'commands'));
