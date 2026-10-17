@@ -252,6 +252,23 @@ class AutoModService {
     return out;
   }
 
+  /**
+   * Pseudo PROPOSÉ par un membre qui n'est pas staff (/pseudo délégué par /permissions…) :
+   * infraction qu'il commettrait au filtre des pseudos, ou null (filtre coupé, cible exemptée,
+   * pseudo correct). Un renommage fait par le bot n'est jamais refiltré : il est donc vérifié
+   * AVANT d'être posé. `nick` null : le nom global (ou d'utilisateur) redevient visible.
+   */
+  proposedNameViolation(member, nick) {
+    const guild = member?.guild;
+    if (!guild) return null;
+    const cfg = this.config.get(guild.id).automod;
+    const fc = cfg?.filters?.badNames;
+    if (!cfg?.enabled || !fc?.enabled || this.isNameExempt(member, cfg, fc)) return null;
+    const name = nick ?? member.user?.globalName ?? member.user?.username ?? '';
+    if (!name) return null;
+    return nameViolation(name, fc, { words: cfg.filters?.badWords?.words ?? [], staff: fc.impersonation === false ? null : this.#staffSkeletons(guild, member.id) });
+  }
+
   /** Oublie les noms du staff mis en cache (rôles ou pseudos du staff modifiés). */
   forgetStaffNames(guildId) {
     this.staffNames.delete(guildId);

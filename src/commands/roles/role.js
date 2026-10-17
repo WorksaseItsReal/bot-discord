@@ -9,6 +9,7 @@ const { UserError } = require('../../core/errors');
 const { confirm } = require('../../utils/confirmation');
 const { hasForbiddenPermissions } = require('./rolemenu');
 const { isSensitiveRole } = require('../../utils/secur');
+const { assertRankAllows } = require('../../utils/permissions');
 
 const HEX_COLOR = /^#?[0-9a-f]{6}$/i;
 const PER_PAGE = 15;
@@ -554,6 +555,8 @@ module.exports = {
     }
     if (sub === 'remove') {
       if (!member.roles.cache.has(role.id)) throw new UserError(`${user} n'a pas le rôle ${role}.`);
+      // Cible protégée par son rang (owner de sécurité, niveau supérieur), comme pour /derank.
+      if (member.id !== interaction.user.id) assertRankAllows(interaction.member, member, guild.members.me, 'retirer un rôle à');
       if (sensitive) preCheck(client, interaction, 'roleRemove');
       await member.roles.remove(role, `Par ${interaction.user.tag}`);
       // Rôle temporaire retiré à la main : plus d'échéance ni de réapplication au retour.
@@ -619,6 +622,7 @@ module.exports = {
     async take(interaction, client, [memberId, roleId, ownerId]) {
       const { role, member } = await resolveButton(interaction, memberId, roleId);
       if (!member.roles.cache.has(role.id)) throw new UserError(`${member} n'a déjà plus le rôle ${role}.`);
+      if (member.id !== interaction.user.id) assertRankAllows(interaction.member, member, interaction.guild.members.me, 'retirer un rôle à');
       const sensitive = isSensitive(client, interaction.guild, role);
       if (sensitive) preCheck(client, interaction, 'roleRemove');
       await member.roles.remove(role, `Annulation par ${interaction.user.tag}`);

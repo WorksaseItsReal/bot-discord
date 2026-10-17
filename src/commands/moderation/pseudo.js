@@ -5,6 +5,10 @@ const { card, field, ICONS, userLine, code, actionButton, buttonRows } = require
 const { requirePermission } = require('../../services/ModerationService');
 const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
+const { assertRankAllows } = require('../../utils/permissions');
+
+/** Permissions qui font d'un membre un membre du staff (même règle que le filtre des pseudos de l'AutoMod). */
+const STAFF_PERMISSIONS = [PermissionFlagsBits.ModerateMembers, PermissionFlagsBits.ManageGuild, PermissionFlagsBits.Administrator];
 
 /** Vérifie que `actor` peut renommer `target` (propriétaire, hiérarchie, rôle du bot). */
 function assertCanRename(guild, actor, target) {
@@ -12,7 +16,20 @@ function assertCanRename(guild, actor, target) {
   if (target.id !== actor.id && actor.id !== guild.ownerId && target.roles.highest.position >= actor.roles.highest.position) {
     throw new UserError('Ce membre a un rôle supérieur ou égal au vôtre.');
   }
+  // Cible protégée par son rang (owner de sécurité, niveau supérieur), comme pour /timeout ou /warn.
+  if (target.id !== actor.id) assertRankAllows(actor, target, guild.members.me, 'renommer');
   if (!target.manageable) throw new UserError('Mon rôle est trop bas pour modifier le pseudo de ce membre.');
+}
+
+/**
+ * Pseudo choisi par un membre qui n'est PAS staff (délégation de /permissions, « Gérer les
+ * pseudos » seul) : le filtre des pseudos de l'AutoMod s'applique avant le renommage (le bot ne
+ * refiltre jamais ses propres renommages). Un membre du staff garde la main, comme dans Discord.
+ */
+function assertNameAllowed(interaction, target, nick) {
+  if (STAFF_PERMISSIONS.some((p) => interaction.member?.permissions?.has?.(p))) return;
+  const violation = interaction.client?.services?.automod?.proposedNameViolation?.(target, nick);
+  if (violation) throw new UserError(`Pseudo refusé par le filtre des pseudos : ${violation.reason.toLowerCase()}${violation.detail ? ` (${violation.detail})` : ''}.`);
 }
 
 /**
@@ -93,6 +110,7 @@ module.exports = {
     const target = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (!target) throw new UserError('Ce membre n\'est pas sur le serveur.');
     assertCanRename(interaction.guild, interaction.member, target);
+    assertNameAllowed(interaction, target, nickname);
     const before = target.nickname;
     // Choix d'un modérateur : le filtre des pseudos de l'AutoMod ne le remplace pas.
     interaction.client?.services?.automod?.allowName?.(interaction.guild.id, target.id, nickname);
@@ -110,6 +128,7 @@ module.exports = {
       const decoded = decodeNick(encoded);
       if (decoded == null) throw new UserError('Impossible de retrouver l\'ancien pseudo.');
       const previous = decoded || null;
+      assertNameAllowed(interaction, target, previous);
       const current = target.nickname;
       client?.services?.automod?.allowName?.(interaction.guild.id, target.id, previous);
       await target.setNickname(previous, `Pseudo restauré par ${interaction.user.tag}`);
