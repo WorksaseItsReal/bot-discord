@@ -7,11 +7,13 @@ const { UserError } = require('../../core/errors');
 /**
  * Permissions demandées à l'invitation : de quoi faire fonctionner toutes les commandes.
  * « Gérer le serveur » est requis par l'AutoMod natif de Discord (règles créées par /automod).
+ * « Gérer les webhooks » : Secur supprime les webhooks créés (module webhook) et, en max, le
+ * webhook auteur d'un @everyone (module everyone).
  * /diagnostics contrôle exactement cette liste.
  */
 const INVITE_PERMISSIONS = [
   'ManageGuild', 'ViewChannel', 'SendMessages', 'SendMessagesInThreads', 'EmbedLinks', 'AttachFiles', 'ReadMessageHistory', 'AddReactions',
-  'UseExternalEmojis', 'ManageMessages', 'ManageChannels', 'ManageRoles', 'ManageNicknames', 'ManageThreads', 'KickMembers',
+  'UseExternalEmojis', 'ManageMessages', 'ManageChannels', 'ManageRoles', 'ManageNicknames', 'ManageThreads', 'ManageWebhooks', 'KickMembers',
   'BanMembers', 'ModerateMembers', 'MuteMembers', 'DeafenMembers', 'MoveMembers', 'ViewAuditLog', 'SendPolls', 'Connect',
   // /emoji ajouter|supprimer|renommer ; fils automatiques ; entretiens de candidature en fil privé.
   'ManageGuildExpressions', 'CreatePublicThreads', 'CreatePrivateThreads',
