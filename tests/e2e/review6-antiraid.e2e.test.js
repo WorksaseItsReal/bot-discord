@@ -172,3 +172,61 @@ test('R31 : rôle Booster déjà whitelisté (ancienne configuration) → aucune
     await h.close();
   }
 });
+
+const opt = (name, type, value) => ({ name, type, value });
+const sub = (name, options = []) => [{ name, type: 1, options }];
+
+/** Espionne les signalements faits à l'AntiRaid au nom d'un humain (pas du bot). */
+function spyReports(h) {
+  const antiraid = h.client.services.antiraid;
+  const reports = [];
+  const original = antiraid.handleDestructive.bind(antiraid);
+  antiraid.handleDestructive = async (guild, actorId, type, extra) => {
+    if (actorId !== h.client.user.id) reports.push({ actorId, type });
+    return original(guild, actorId, type, extra);
+  };
+  return reports;
+}
+
+test('R101 : /channel supprimer signale la suppression à l\'AntiRaid même si la réponse échoue', async () => {
+  const { throwawayChannel } = require('./lib/overrides');
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    const reports = spyReports(h);
+    const id = await throwawayChannel(h, 'cible');
+    const rec = await h.slash('channel', sub('supprimer', [opt('salon', 7, id)]), { as: 'admin' });
+    // Message de confirmation disparu entre-temps : la réponse finale échoue (10008).
+    h.fake.inject({ method: 'PATCH', route: /^\/webhooks\/\d+\/[^/]+\/messages\/(@|%40)original$/ }, { status: 404, code: 10008, message: 'Unknown Message', times: 1 });
+    await h.confirm(rec);
+    await h.settle();
+    assert.ok(!h.fake.channels.has(id), 'salon non supprimé');
+    assert.deepEqual(reports.filter((r) => r.type === 'channelDelete'), [{ actorId: IDS.users.admin, type: 'channelDelete' }], 'suppression invisible pour l\'AntiRaid');
+  } finally {
+    await h.close();
+  }
+});
+
+test('R101 : /role delete sans confirmation acquitte avant la suppression (limite de débit) et la signale', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ moderation: { confirmDangerous: false } });
+    const reports = spyReports(h);
+    // Limite de débit sur la suppression (fréquente pendant un nuke) ; Discord invalide toute
+    // interaction acquittée après 3 s (10062).
+    const start = Date.now();
+    h.fake.inject({ method: 'DELETE', route: /^\/guilds\/\d+\/roles\/\d+$/ }, { status: 429, retryAfter: 3_200, times: 1 });
+    h.fake.inject({ match: (c) => c.method === 'POST' && /^\/interactions\/\d+\/[^/]+\/callback$/.test(c.route) && Date.now() - start > 3_000 }, { status: 404, code: 10062, message: 'Unknown interaction', times: 5 });
+    const rec = await h.slash('role', sub('delete', [opt('role', 8, IDS.roles.notif)]), { as: 'admin' });
+    await h.waitFor(() => !h.fake.roles.has(IDS.roles.notif), { timeout: 6_000 });
+    await h.settle({ timeout: 6_000 });
+    assert.ok(!h.fake.roles.has(IDS.roles.notif), 'rôle non supprimé');
+    assert.ok(rec.ackType != null && rec.ackedAt - rec.createdAt < 3_000, 'interaction acquittée trop tard (10062)');
+    assert.deepEqual(reports.filter((r) => r.type === 'roleDelete'), [{ actorId: IDS.users.admin, type: 'roleDelete' }], 'suppression invisible pour l\'AntiRaid');
+    assert.match(h.replyText(rec), /Rôle supprimé/);
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});

@@ -428,30 +428,37 @@ module.exports = {
           confirmLabel: 'Supprimer',
         });
         if (!ok) return undefined;
+      } else {
+        // Acquittée AVANT la suppression : une limite de débit (fréquente pendant un nuke) peut
+        // faire attendre la requête au-delà des 3 s de Discord.
+        await interaction.deferReply();
       }
       await role.delete(`Supprimé par ${interaction.user.tag}`);
       // Après confirmation, la carte remplace la demande (éphémère).
       const respond = (payload) => (interaction.replied || interaction.deferred ? interaction.editReply(payload) : interaction.reply(payload));
-      await respond({
-        embeds: [
-          card({
-            tone: 'danger',
-            section: 'roles',
-            icon: ICONS.delete,
-            title: 'Rôle supprimé',
-            description: `Le rôle **${name}** a été supprimé définitivement.`,
-            fields: [
-              field(ICONS.role, 'Nom', `**${name}**`),
-              field(ICONS.color, 'Couleur', color),
-              field(ICONS.members, 'Membres', `**${members}**`),
-              field(ICONS.moderator, 'Par', `${interaction.user}`),
-            ],
-          }),
-        ],
-      });
-      // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
-      // (suppressions de rôles en masse), après la réponse.
-      await client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'roleDelete');
+      try {
+        await respond({
+          embeds: [
+            card({
+              tone: 'danger',
+              section: 'roles',
+              icon: ICONS.delete,
+              title: 'Rôle supprimé',
+              description: `Le rôle **${name}** a été supprimé définitivement.`,
+              fields: [
+                field(ICONS.role, 'Nom', `**${name}**`),
+                field(ICONS.color, 'Couleur', color),
+                field(ICONS.members, 'Membres', `**${members}**`),
+                field(ICONS.moderator, 'Par', `${interaction.user}`),
+              ],
+            }),
+          ],
+        });
+      } finally {
+        // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
+        // (suppressions de rôles en masse), après la réponse, MÊME si elle échoue.
+        await client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'roleDelete');
+      }
       return undefined;
     }
 

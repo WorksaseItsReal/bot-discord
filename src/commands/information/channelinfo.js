@@ -223,20 +223,23 @@ async function remove(interaction) {
   // Relu après la confirmation : supprimé entre-temps ?
   if (!guild.channels.cache.has(channel.id)) throw new UserError('Ce salon a déjà été supprimé.');
   await channel.delete(reasonOf(interaction, 'Supprimé'));
-  await interaction.editReply({
-    embeds: [actionCard({
-      tone: 'danger',
-      icon: ICONS.delete,
-      title: 'Salon supprimé',
-      description: `Le salon **${truncate(name, 100)}** a été supprimé.`,
-      moderator: interaction.user,
-      fields: [field(ICONS.status, 'Type', `${icon} ${label}`), field(ICONS.id, 'Identifiant', code(channel.id))],
-    })],
-    components: [],
-  });
-  // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
-  // (suppressions de salons en masse), après la réponse.
-  await interaction.client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+  try {
+    await interaction.editReply({
+      embeds: [actionCard({
+        tone: 'danger',
+        icon: ICONS.delete,
+        title: 'Salon supprimé',
+        description: `Le salon **${truncate(name, 100)}** a été supprimé.`,
+        moderator: interaction.user,
+        fields: [field(ICONS.status, 'Type', `${icon} ${label}`), field(ICONS.id, 'Identifiant', code(channel.id))],
+      })],
+      components: [],
+    });
+  } finally {
+    // Suppression signée par le bot dans l'audit log : le MODÉRATEUR est signalé à l'AntiRaid
+    // (suppressions de salons en masse), après la réponse, MÊME si elle échoue (message disparu…).
+    await interaction.client?.services?.moderation?.reportDestructiveAction?.(guild, interaction.user, 'channelDelete');
+  }
 }
 
 async function clone(interaction) {
