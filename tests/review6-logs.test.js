@@ -127,3 +127,23 @@ test('R58 : truncateContent referme un spoiler ou un bloc de code coupé, sans d
   assert.ok(d.endsWith('```||'), d);
   assert.equal(truncateContent('court', 10), 'court');
 });
+
+// ---------------------------------------------------------------- R61
+
+test('R61 : la lecture accordée au rôle staff se limite aux permissions que le bot possède', () => {
+  const { overwrites } = require('../src/services/LogSetupService');
+  const STAFF = '300000000000000001';
+  const botPerms = new PermissionsBitField([P.ViewChannel, P.SendMessages, P.EmbedLinks, P.ManageChannels, P.ManageRoles]); // sans « Lire l'historique »
+  const guild = { id: GUILD, roles: { cache: new Collection([[STAFF, { id: STAFF }]]) }, members: { me: { id: '999999999999999999', permissions: botPerms } } };
+  const list = overwrites(guild, STAFF);
+  const has = (bits, flag) => bits.some((b) => b === flag);
+  for (const o of list) {
+    for (const flag of [...(o.allow ?? []), ...(o.deny ?? [])]) {
+      if (o.id === GUILD && flag === P.ViewChannel) continue;
+      assert.ok(botPerms.has(flag), `surcharge ${o.id} : ${flag} que le bot n'a pas (refus 50013 de Discord)`);
+    }
+  }
+  const staff = list.find((o) => o.id === STAFF);
+  assert.ok(has(staff.allow, P.ViewChannel));
+  assert.ok(!has(staff.allow, P.ReadMessageHistory));
+});

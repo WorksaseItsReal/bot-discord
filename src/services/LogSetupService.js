@@ -51,7 +51,7 @@ function overwrites(guild, staffRoleId) {
     { id: me.id, allow: BOT_ALLOW.filter(has) },
   ];
   if (staffRoleId && guild.roles.cache.has(staffRoleId)) {
-    list.push({ id: staffRoleId, allow: [P.ViewChannel, P.ReadMessageHistory], deny: STAFF_DENY.filter(has) });
+    list.push({ id: staffRoleId, allow: [P.ViewChannel, P.ReadMessageHistory].filter(has), deny: STAFF_DENY.filter(has) });
   }
   return list;
 }
