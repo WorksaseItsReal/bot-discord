@@ -9,6 +9,8 @@ const { requirePermission } = require('../../services/ModerationService');
  */
 module.exports = {
   category: 'moderation',
+  /** Mode strict de /permissions : restreint comme /sanctions (un menu contextuel n'est pas attribuable). */
+  strictKey: 'sanctions',
   description: 'Ajoute une note interne sur un membre (sans effet pour lui), comme /sanctions note.',
   data: new ContextMenuCommandBuilder()
     .setName('Note de modération')

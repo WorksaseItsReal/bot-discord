@@ -63,6 +63,7 @@ const CARRY_LABELS = Object.freeze({
   'lock_state.channel_id': 'États de verrouillage',
   'timed_channel_actions.channel_id': 'Levées programmées (mode lent)',
   'reminders.channel_id': 'Rappels',
+  'highlights.blocked_channels': 'Alertes de mots-clés (salon bloqué par le membre)',
 });
 
 /** Libellés des lignes perdues (tables « lost » de channelRemap). */

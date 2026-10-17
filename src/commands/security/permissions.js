@@ -486,7 +486,7 @@ function strictView(client, guild, notice) {
           '',
           lines.length ? `**Aperçu** (membres en cache qui ont la permission mais pas le niveau) :\n${lines.join('\n')}` : '*Aucune commande attribuée : le mode strict n\'a aucun effet.*',
           '',
-          subtext('Le mode strict s\'applique aux commandes et à leurs boutons ; il ne donne jamais d\'accès.'),
+          subtext('Le mode strict s\'applique aux commandes, à leurs boutons, aux menus contextuels équivalents et à l\'action elle-même (bannir, expulser, timeout… depuis n\'importe quel bouton ou escalade) ; il ne donne jamais d\'accès.'),
         ],
         fields: [field(ICONS.status, 'État', strict ? '🟢 Activé' : '⚪ Désactivé'), field(ICONS.list, 'Commandes attribuées', `${assignments.length}`)],
       }),

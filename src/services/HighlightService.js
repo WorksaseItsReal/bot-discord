@@ -5,6 +5,7 @@ const { truncate } = require('../utils/embeds');
 const { buildIndex, findMatches, keywordKey, quoteExcerpt, MIN_KEYWORD, MAX_KEYWORD, MAX_KEYWORDS } = require('../utils/highlights');
 const { isNsfwChannel } = require('../utils/community');
 const { canReadCached, needsThreadCheck } = require('../utils/channelAccess');
+const { listGeneration } = require('../utils/channelRemap');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
 
@@ -119,14 +120,20 @@ class HighlightService {
 
   // ------------------------------------------------------------ index
 
-  /** Index du serveur (construit à la première utilisation). */
+  /**
+   * Index du serveur (construit à la première utilisation), reconstruit si un salon bloqué a été
+   * reporté sur un autre en base (/channel renouveler, salon recréé par Secur : channelRemap).
+   */
   index(guildId) {
-    return this.indexes.get(guildId) ?? this.rebuild(guildId);
+    const index = this.indexes.get(guildId);
+    return index && index.generation === listGeneration(guildId) ? index : this.rebuild(guildId);
   }
 
   /** Reconstruit l'index d'un serveur depuis la base. */
   rebuild(guildId) {
+    const generation = listGeneration(guildId);
     const index = buildIndex(this.repo.listByGuild(guildId));
+    index.generation = generation;
     this.indexes.set(guildId, index);
     return index;
   }

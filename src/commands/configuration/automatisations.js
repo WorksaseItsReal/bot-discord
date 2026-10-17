@@ -38,7 +38,16 @@ const {
   MAX_BOOST_MESSAGE,
   CROSSPOST_LIMIT,
 } = require('../../services/AutomationService');
-const { SOURCES: SUPPORT_SOURCES, parseStatusText, MIN_TEXT, MAX_TEXT, RESYNC_COOLDOWN_MS } = require('../../services/SupportRoleService');
+const {
+  SOURCES: SUPPORT_SOURCES,
+  parseStatusText,
+  wearsGuildTag,
+  MIN_TEXT,
+  MAX_TEXT,
+  RESYNC_COOLDOWN_MS,
+  MEMBER_FETCH_LIMIT,
+  MEMBER_FETCH_TIMEOUT_MS,
+} = require('../../services/SupportRoleService');
 const { discordTimestamp } = require('../../utils/time');
 const { UserError } = require('../../core/errors');
 
@@ -162,6 +171,30 @@ function assertVoiceRole(interaction, client, roleId) {
     if (outside) throw new UserError(`**${outside}** membre(s) ont déjà le rôle ${role} sans être en vocal : il leur serait retiré. Créez un rôle dédié (ex : « En vocal »).`);
   }
   return role;
+}
+
+/** Rôle « neuf » (créé il y a moins de 15 minutes) : accepté sans relire la liste des membres. */
+const FRESH_ROLE_MS = 15 * 60_000;
+
+/**
+ * Porteurs (hors bots) d'un rôle, comptés sur la liste COMPLÈTE des membres : après un
+ * redémarrage, le cache ne contient presque personne, alors que le retrait (resynchronisation)
+ * relit tout le serveur. La liste est relue si besoin (interaction différée d'abord) ; UserError
+ * si elle est illisible. Au-delà de 10 000 membres (liste jamais relue) : rôle neuf accepté,
+ * sinon refus (`unverifiable: 'refuse'`) ou contrôle sauté (`'skip'`). `keep(member)` : porteurs
+ * qui garderaient le rôle (non comptés).
+ */
+async function supportHolders(interaction, guild, role, { keep = () => false, unverifiable = 'refuse' } = {}) {
+  if ((guild.members.cache.size ?? 0) < (guild.memberCount ?? 0)) {
+    if (guild.memberCount > MEMBER_FETCH_LIMIT) {
+      if (unverifiable === 'skip' || Date.now() - (role.createdTimestamp ?? 0) < FRESH_ROLE_MS) return 0;
+      throw new UserError(`Impossible de vérifier qui porte déjà ${role} sur un serveur de plus de ${MEMBER_FETCH_LIMIT.toLocaleString('fr-FR')} membres : créez un rôle **neuf**, dédié au soutien, et choisissez-le dans les 15 minutes.`);
+    }
+    await interaction.deferUpdate();
+    const ok = await guild.members.fetch({ time: MEMBER_FETCH_TIMEOUT_MS }).then(() => true, () => false);
+    if (!ok) throw new UserError(`Liste des membres illisible pour le moment : impossible de vérifier qui porte déjà ${role}. Réessayez dans quelques instants.`);
+  }
+  return [...role.members.values()].filter((m) => !m.user?.bot && !keep(m)).length;
 }
 
 /** Retire en arrière-plan les rôles qui ne sont plus « vocaux », puis resynchronise. */
@@ -875,6 +908,13 @@ module.exports = {
           if (!svc.presenceIntent()) throw new UserError('Indisponible : intent non activé. La source « statut » exige `PRESENCE_INTENT=on` (et l\'intent dans le Developer Portal). Choisissez plutôt « Tag du serveur ».');
           if (!su.text) throw new UserError('Choisissez d\'abord le texte à chercher dans le statut.');
         }
+        if (!su.enabled) {
+          // Désactivé, le rôle n'a plus de porteur (retiré à la désactivation) : ceux qu'il a
+          // maintenant l'ont reçu d'ailleurs et le perdraient (sauf ceux qui affichent le tag).
+          const keep = (m) => su.source !== 'statut' && wearsGuildTag(m.user, guild.id);
+          const foreign = await supportHolders(interaction, guild, role, { keep, unverifiable: 'skip' });
+          if (foreign) throw new UserError(`**${foreign}** membre(s) ont le rôle ${role} sans remplir la condition : il leur serait retiré. Utilisez un rôle dédié (ex : « Soutien »).`);
+        }
       }
       saveSupport(client, guild.id, { enabled });
       let notice = `${ICONS.success} Rôle soutien **${enabled ? 'activé' : 'désactivé'}**.`;
@@ -900,7 +940,7 @@ module.exports = {
         const issue = role ? svc.roleIssue(guild, role, interaction.member) : 'Ce rôle n\'existe plus.';
         if (issue) throw new UserError(issue);
         if (id !== su.roleId) {
-          const holders = [...role.members.values()].filter((m) => !m.user?.bot).length;
+          const holders = await supportHolders(interaction, guild, role);
           if (holders) throw new UserError(`**${holders}** membre(s) ont déjà le rôle ${role} : il leur serait retiré. Créez un rôle dédié (ex : « Soutien »).`);
         }
       }

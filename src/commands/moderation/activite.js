@@ -16,7 +16,8 @@ const { UserError } = require('../../core/errors');
 const { requirePermission } = require('../../services/ModerationService');
 const { logCard, fitList } = require('../../services/LoggingService');
 const { hasForbiddenPermissions } = require('../roles/rolemenu');
-const { canActOnByHierarchy } = require('../../utils/permissions');
+const { canActOnByHierarchy, assertRankAllows } = require('../../utils/permissions');
+const access = require('../../utils/access');
 const { applyRoles } = require('../../utils/memberRoles');
 const { DAY_MS, formatDay, fr } = require('../../utils/activity');
 const { createLogger } = require('../../core/logger');
@@ -175,6 +176,8 @@ function checkRole(interaction, roleId, action) {
 function assertActionPermissions(interaction, action) {
   guard(interaction);
   const perm = ACTIONS[action].permission;
+  // Expulsion groupée = /kick : son mode strict s'applique (même action, faite par le bot).
+  if (action === 'kick') access.assertStrict(interaction.client, interaction, 'kick');
   if (perm) {
     requirePermission(interaction, perm);
     if (!interaction.guild.members.me?.permissions?.has(PermissionFlagsBits[perm])) {
@@ -201,16 +204,34 @@ async function plan(client, interaction, days, action, roleId) {
     if (member.id === interaction.user.id) skipped.protected += 1;
     else if (action === 'give' && member.roles.cache.has(roleId)) skipped.done += 1;
     else if (action === 'take' && !member.roles.cache.has(roleId)) skipped.done += 1;
+    else if (action === 'take' && rankProtected(interaction.member, member, 'retirer un rôle à')) skipped.protected += 1;
     else if (action === 'dm' && recent.has(member.id)) skipped.recent += 1;
-    else if (action === 'kick' && !canKick(member, interaction.user.id, guild.ownerId, actorIsOwner, actorTop)) skipped.protected += 1;
+    else if (action === 'kick' && !canKick(member, interaction.user.id, guild.ownerId, actorIsOwner, actorTop, interaction.member)) skipped.protected += 1;
     else eligible.push(member);
   }
   return { targets: eligible.slice(0, LIMITS[action]), total: list.length, eligible: eligible.length, eligibleMembers: eligible, skipped, partial };
 }
 
-/** Expulsable : ni le propriétaire, ni l'auteur, sous le bot (kickable) et sous l'auteur (sauf propriétaire). */
-function canKick(member, actorId, ownerId, actorIsOwner, actorTop) {
+/**
+ * Cible protégée par les rangs de /permissions (owner de sécurité, niveau supérieur à celui de
+ * l'auteur), comme pour /kick et /derank (assertRankAllows).
+ */
+function rankProtected(actor, member, action) {
+  try {
+    assertRankAllows(actor, member, member.guild?.members?.me, action);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Expulsable : ni le propriétaire, ni l'auteur, sous le bot (kickable), sous l'auteur (sauf
+ * propriétaire) et non protégé par son rang.
+ */
+function canKick(member, actorId, ownerId, actorIsOwner, actorTop, actor) {
   if (member.id === ownerId || member.id === actorId || !member.kickable) return false;
+  if (rankProtected(actor, member, 'expulser')) return false;
   return canActOnByHierarchy({ isOwner: actorIsOwner, highestRolePosition: actorTop }, { isOwner: false, highestRolePosition: member.roles?.highest?.position ?? 0 });
 }
 
@@ -329,7 +350,7 @@ function confirmView(days, action, planned, { role, template, guild, sample, kic
         over ? `${ICONS.warning} ${over} autre(s) membre(s) attendront une prochaine exécution (limite de ${LIMITS[action]}).` : null,
         skipped.done ? subtext(`${skipped.done} membre(s) déjà dans l'état voulu, ignoré(s).`) : null,
         skipped.recent ? subtext(`${skipped.recent} membre(s) ont déjà reçu un MP ces 7 derniers jours : ignoré(s).`) : null,
-        skipped.protected ? subtext(`${skipped.protected} membre(s) protégé(s) (propriétaire, vous-même, ou rôle trop haut) : ignoré(s).`) : null,
+        skipped.protected ? subtext(`${skipped.protected} membre(s) protégé(s) (propriétaire, vous-même, rôle ou niveau de permissions trop haut) : ignoré(s).`) : null,
         action === 'kick' ? `\n${ICONS.warning} Action **irréversible** : vous devrez taper \`${KICK_WORD}\` pour confirmer.` : null,
       ],
       fields: [wide(ICONS.members, 'Membres concernés', names ?? '*Aucun*')],
