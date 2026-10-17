@@ -118,6 +118,17 @@ function publishFailure(channel, err) {
   return `${ICONS.error} Publication du panneau refusée par Discord dans ${channel} : ${detail}${code ? ` (code ${code})` : ''}`;
 }
 
+/**
+ * L'auteur doit lui-même pouvoir voir le salon et y écrire (comme /annonce et /flux) : sinon il
+ * ferait publier par le bot, aux couleurs du serveur, un texte libre dans un salon qui lui est fermé.
+ */
+function assertAuthorCanPost(interaction, channel) {
+  const perms = interaction.member && typeof channel?.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+  if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+    throw new UserError(`Vous ne pouvez pas écrire dans <#${channel.id}> : choisissez un salon où vous avez le droit de publier.`);
+  }
+}
+
 /** Inverse de parseReasons (préremplissage du formulaire). Pur. */
 const reasonsToText = (reasons = []) => reasons.map((r) => `${r.emoji ? `${r.emoji} ` : ''}${r.label}${r.description ? ` | ${r.description}` : ''}`).join('\n');
 
@@ -629,6 +640,7 @@ module.exports = {
       if (!/^\d{17,20}$/.test(id ?? '')) throw new UserError('Salon invalide.');
       const ch = interaction.guild.channels?.cache?.get(id);
       if (ch && !TEXT_TYPES.includes(ch.type)) throw new UserError('Choisissez un salon textuel.');
+      if (ch) assertAuthorCanPost(interaction, ch);
       const cfg = cfgOf(client, interaction.guildId);
       // Changer de salon : le prochain envoi crée un nouveau panneau.
       const patch = { panelChannelId: id, ...(cfg.panelChannelId !== id ? { panelMessageId: null } : {}) };
@@ -659,6 +671,8 @@ module.exports = {
       guard(interaction);
       const cfg = cfgOf(client, interaction.guildId);
       if (!cfg.panelChannelId) throw new UserError('Choisissez d\'abord le salon du panneau (section **Panneau**).');
+      const cached = interaction.guild.channels?.cache?.get(cfg.panelChannelId);
+      if (cached) assertAuthorCanPost(interaction, cached);
       await interaction.deferUpdate();
       const guild = interaction.guild;
       const channel = guild.channels?.cache?.get(cfg.panelChannelId) ?? (await guild.channels?.fetch?.(cfg.panelChannelId).catch(() => null));

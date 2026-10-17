@@ -9,6 +9,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PermissionFlagsBits: P } = require('discord.js');
 const { createHarness, IDS } = require('./harness');
+const { rawMember } = require('./lib/fixtures');
+const { nextId } = require('./lib/ids');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const opt = (name, type, value) => ({ name, type, value });
@@ -216,6 +218,82 @@ test('R63 ModMail : accès perdu à un salon encore en cache → conversation fe
     assert.match(relayed, /Message après la perte d'accès/);
     assert.match(relayed, new RegExp(`#${oldThread.id}`), 'le staff n\'est pas prévenu de la conversation précédente');
     assert.ok(h.warnLogs().some((l) => /accès perdu/i.test(l)));
+  } finally {
+    await h.close();
+  }
+});
+
+// ---------------------------------------------------------------- R64
+
+/** Membre « Gérer le serveur » seulement, qui ne voit pas #staff. */
+async function addManager(h) {
+  const roleId = nextId();
+  const role = { id: roleId, name: 'Gestion', color: 0, colors: { primary_color: 0, secondary_color: null, tertiary_color: null }, hoist: false, icon: null, unicode_emoji: null, position: 4, permissions: String(P.ManageGuild), managed: false, mentionable: false, flags: 0 };
+  h.fake.roles.set(roleId, role);
+  h.fake.dispatchNow('GUILD_ROLE_CREATE', { guild_id: h.guild.id, role });
+  const user = h.addUser('Gestionnaire', { ageDays: 800 });
+  const raw = rawMember(user, [roleId, IDS.roles.member], 300);
+  h.fake.members.set(user.id, raw);
+  h.guild.members._add(JSON.parse(JSON.stringify(raw)));
+  await h.settle();
+  const perms = h.client.channels.cache.get(IDS.channels.staff).permissionsFor(h.guild.members.cache.get(user.id));
+  assert.ok(!perms.has(P.ViewChannel), 'le gestionnaire ne doit pas voir #staff');
+  return user.id;
+}
+
+test('R64 publication par procuration : panneaux /tickets, /candidatures et test /bienvenue refusés dans un salon fermé à l\'auteur', async () => {
+  const h = await createHarness();
+  try {
+    h.configureAll();
+    h.configure({ antiraid: { enabled: false } });
+    const manager = await addManager(h);
+    const staffMessages = (mark) => messagesIn(h, IDS.channels.staff, mark).filter((m) => m.author.id === h.client.user.id);
+
+    // /tickets : choix du salon puis publication.
+    const view = (rec) => h.messagesOf(rec).at(-1);
+    const dash = await h.slash('tickets', [], { as: manager });
+    const panelV = await h.click(view(dash), 'cmd:tickets:nav', { as: manager, values: ['panel'] });
+    const pick = await h.click(view(panelV), 'cmd:tickets:panelch', { as: manager, values: [IDS.channels.staff] });
+    assert.ok(h.isError(pick), `salon du panneau accepté : ${h.replyText(pick)}`);
+    assert.match(h.replyText(pick), /Vous ne pouvez pas écrire/);
+    assert.notEqual(h.client.services.config.get(h.guild.id).tickets.panelChannelId, IDS.channels.staff);
+    h.configure({ tickets: { panelChannelId: IDS.channels.staff, panel: { title: 'Annonce officielle', description: 'Le serveur ferme : [ce site](https://exemple.invalid)' } } });
+    let mark = h.fake.messageLog.length;
+    const pub = await h.click(view(panelV), 'cmd:tickets:publish', { as: manager });
+    assert.ok(h.isError(pub), `panneau publié : ${h.replyText(pub)}`);
+    assert.match(h.replyText(pub), /Vous ne pouvez pas écrire/);
+    assert.equal(staffMessages(mark).length, 0, 'panneau de tickets publié dans #staff');
+    // Un administrateur qui voit le salon peut toujours publier.
+    const adminDash = await h.slash('tickets');
+    const ok = await h.click(view(adminDash), 'cmd:tickets:publish');
+    assert.ok(!h.isError(ok), h.replyText(ok));
+    assert.equal(staffMessages(mark).length, 1, 'publication refusée à un administrateur');
+
+    // /candidatures : choix du salon puis publication.
+    const service = h.client.services.applications;
+    const formId = service.createForm(h.guild.id, { name: 'Recrutement', questions: [{ label: 'Pourquoi vous ?', long: false }] }).id;
+    const home = await h.slash('candidatures', [], { as: manager });
+    const formV = await h.click(view(home), 'cmd:candidatures:pick', { as: manager, values: [String(formId)] });
+    const cpick = await h.click(view(formV), `cmd:candidatures:panelch:${formId}`, { as: manager, values: [IDS.channels.staff] });
+    assert.ok(h.isError(cpick), `salon du panneau de candidature accepté : ${h.replyText(cpick)}`);
+    service.updateForm(h.guild.id, formId, { panelChannelId: IDS.channels.staff });
+    mark = h.fake.messageLog.length;
+    const cpub = await h.click(view(formV), `cmd:candidatures:publish:${formId}`, { as: manager });
+    assert.ok(h.isError(cpub), `panneau de candidature publié : ${h.replyText(cpub)}`);
+    assert.equal(staffMessages(mark).length, 0, 'panneau de candidature publié dans #staff');
+
+    // /bienvenue : salon du message d'arrivée, puis « Tester ».
+    const wdash = await h.slash('bienvenue', [], { as: manager });
+    const joinV = await h.click(view(wdash), 'cmd:bienvenue:nav', { as: manager, values: ['join'] });
+    const wpick = await h.click(view(joinV), 'cmd:bienvenue:channel:join', { as: manager, values: [IDS.channels.staff] });
+    assert.ok(h.isError(wpick), `salon de bienvenue accepté : ${h.replyText(wpick)}`);
+    h.configure({ welcome: { join: { channelId: IDS.channels.staff, title: 'Annonce officielle', description: 'https://exemple.invalid' } } });
+    const prevV = await h.click(view(joinV), 'cmd:bienvenue:go:preview', { as: manager });
+    mark = h.fake.messageLog.length;
+    const wtest = await h.click(view(prevV), 'cmd:bienvenue:test:join', { as: manager });
+    assert.ok(h.isError(wtest), `test envoyé : ${h.replyText(wtest)}`);
+    assert.equal(staffMessages(mark).length, 0, 'message de test publié dans #staff');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
   }

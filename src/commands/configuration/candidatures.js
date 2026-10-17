@@ -58,6 +58,16 @@ function guardReview(interaction) {
     throw new UserError('Il faut la permission **Gérer les rôles** (ou **Gérer le serveur**) pour traiter les candidatures.');
   }
 }
+/**
+ * L'auteur doit lui-même pouvoir voir le salon et y écrire (comme /annonce et /flux) : sinon il
+ * ferait publier par le bot un panneau qu'il rédige dans un salon qui lui est fermé.
+ */
+function assertAuthorCanPost(interaction, channel) {
+  const perms = interaction.member && typeof channel?.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : null;
+  if (perms && !perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+    throw new UserError(`Vous ne pouvez pas écrire dans <#${channel.id}> : choisissez un salon où vous avez le droit de publier.`);
+  }
+}
 const svc = (client) => client.services.applications;
 const row = (component) => new ActionRowBuilder().addComponents(component);
 const homeButton = () => actionButton({ command: 'candidatures', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
@@ -473,6 +483,7 @@ module.exports = {
       const service = svc(client);
       const form = service.form(interaction.guildId, id);
       const ch = pickChannel(interaction);
+      if (ch) assertAuthorCanPost(interaction, ch);
       const patch = { panelChannelId: ch?.id ?? null, ...(form.panel_channel_id !== (ch?.id ?? null) ? { panelMessageId: null } : {}) };
       service.updateForm(interaction.guildId, form.id, patch);
       const notice = ch ? sendWarning(interaction.guild, ch) ?? `${ICONS.success} Le panneau sera publié dans ${ch} : cliquez sur « Publier ».` : `${ICONS.success} Salon du panneau retiré.`;
@@ -499,6 +510,8 @@ module.exports = {
       const service = svc(client);
       const form = service.form(interaction.guildId, id);
       if (!form.panel_channel_id) throw new UserError('Choisissez d\'abord le salon du panneau (menu « Salon du panneau »).');
+      const panelChannel = interaction.guild.channels?.cache?.get(form.panel_channel_id);
+      if (panelChannel) assertAuthorCanPost(interaction, panelChannel);
       await interaction.deferUpdate();
       let notice;
       try {
