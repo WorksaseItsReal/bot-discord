@@ -1,13 +1,33 @@
 'use strict';
 
-const { button, row, ButtonStyle } = require('./components');
+const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+const { brandFooter } = require('./embeds');
+const { ICONS, deleteButton } = require('./ui');
 
 /**
- * Pagination interactive à partir d'une liste de pages (EmbedBuilder[]).
+ * Source de pages construites à la demande (et mémorisées) : `paginate` n'appelle
+ * `build(i)` que pour les pages réellement affichées.
+ * @param {number} length nombre de pages
+ * @param {(index: number) => import('discord.js').EmbedBuilder} build
+ * @returns {{ length: number, at: (index: number) => import('discord.js').EmbedBuilder }}
+ */
+function lazyPages(length, build) {
+  const cache = new Map();
+  return {
+    length,
+    at(index) {
+      if (!cache.has(index)) cache.set(index, build(index));
+      return cache.get(index);
+    },
+  };
+}
+
+/**
+ * Pagination interactive à partir d'une liste de pages (EmbedBuilder[] ou `lazyPages`).
  * Gère les boutons précédent/suivant et désactive les composants à la fin.
  *
  * @param {import('discord.js').RepliableInteraction} interaction
- * @param {import('discord.js').EmbedBuilder[]} pages
+ * @param {import('discord.js').EmbedBuilder[] | ReturnType<typeof lazyPages>} pages
  * @param {{ timeout?: number, ephemeral?: boolean }} [opts]
  */
 async function paginate(interaction, pages, opts = {}) {
@@ -15,20 +35,43 @@ async function paginate(interaction, pages, opts = {}) {
   if (!pages.length) throw new Error('paginate: aucune page fournie');
 
   let index = 0;
-  const prevId = `page:prev:${interaction.id}`;
-  const nextId = `page:next:${interaction.id}`;
+  const ids = {
+    first: `page:first:${interaction.id}`,
+    prev: `page:prev:${interaction.id}`,
+    label: `page:label:${interaction.id}`,
+    next: `page:next:${interaction.id}`,
+    last: `page:last:${interaction.id}`,
+  };
+  const nav = (id, emoji, disabled) => new ButtonBuilder().setCustomId(id).setEmoji(emoji).setStyle(ButtonStyle.Secondary).setDisabled(disabled);
 
-  const controls = (disabled = false) =>
-    pages.length > 1
-      ? [
-          row(
-            button({ id: prevId, label: '◀', style: ButtonStyle.Secondary, disabled: disabled || index === 0 }),
-            button({ id: nextId, label: '▶', style: ButtonStyle.Secondary, disabled: disabled || index === pages.length - 1 }),
-          ),
-        ]
-      : [];
+  // ⏮ ◀ [ 2 / 5 ] ▶ ⏭  (+ 🗑️ sur les messages publics)
+  const controls = (disabled = false) => {
+    const buttons = [];
+    if (pages.length > 1) {
+      if (pages.length > 2) buttons.push(nav(ids.first, ICONS.first, disabled || index === 0));
+      buttons.push(nav(ids.prev, ICONS.back, disabled || index === 0));
+      buttons.push(new ButtonBuilder().setCustomId(ids.label).setLabel(`${index + 1} / ${pages.length}`).setStyle(ButtonStyle.Primary).setDisabled(true));
+      buttons.push(nav(ids.next, ICONS.next, disabled || index === pages.length - 1));
+      if (pages.length > 2) buttons.push(nav(ids.last, ICONS.last, disabled || index === pages.length - 1));
+    }
+    const rows = buttons.length ? [new ActionRowBuilder().addComponents(buttons)] : [];
+    if (!ephemeral) {
+      if (rows.length && buttons.length < 5) rows[0].addComponents(deleteButton(interaction.user.id));
+      else rows.push(new ActionRowBuilder().addComponents(deleteButton(interaction.user.id)));
+    }
+    return rows;
+  };
 
-  const render = () => ({ embeds: [pages[index].setFooter({ text: `Page ${index + 1}/${pages.length}` })], components: controls() });
+  // Conserve le texte de pied de page propre à chaque page (lu avant la première
+  // modification, page par page) et y ajoute « Page x/y ».
+  const baseFooters = new Map();
+  const render = () => {
+    const page = pages.at(index);
+    if (!baseFooters.has(index)) baseFooters.set(index, page.data?.footer?.text?.split(' • ').slice(1).join(' • ') || '');
+    const base = baseFooters.get(index);
+    const footer = pages.length > 1 ? `${base ? `${base} • ` : ''}Page ${index + 1}/${pages.length}` : base || undefined;
+    return { embeds: [page.setFooter(brandFooter(footer))], components: controls() };
+  };
 
   const message = interaction.deferred || interaction.replied
     ? await interaction.followUp({ ...render(), ephemeral, fetchReply: true })
@@ -36,19 +79,38 @@ async function paginate(interaction, pages, opts = {}) {
 
   if (pages.length <= 1) return;
 
+
   const collector = message.createMessageComponentCollector({
-    filter: (i) => i.user.id === interaction.user.id && [prevId, nextId].includes(i.customId),
+    filter: (i) => i.user.id === interaction.user.id && [ids.first, ids.prev, ids.next, ids.last].includes(i.customId),
     time: timeout,
   });
 
   collector.on('collect', async (i) => {
-    index = i.customId === nextId ? Math.min(index + 1, pages.length - 1) : Math.max(index - 1, 0);
-    await i.update(render());
+    if (i.customId === ids.first) index = 0;
+    else if (i.customId === ids.last) index = pages.length - 1;
+    else if (i.customId === ids.next) index = Math.min(index + 1, pages.length - 1);
+    else index = Math.max(index - 1, 0);
+    await i.update(render()).catch(() => {}); // interaction expirée : on ignore
   });
 
   collector.on('end', async () => {
-    await interaction.editReply({ components: controls(true) }).catch(() => {});
+    // On édite le message de pagination LUI-MÊME (qui peut être un followUp),
+    // pas forcément la réponse d'origine de l'interaction.
+    // Fin de navigation : seules restent les commandes encore utiles (🗑️).
+    await editPrompt(interaction, message, { components: ephemeral ? [] : [new ActionRowBuilder().addComponents(deleteButton(interaction.user.id))] });
   });
 }
 
-module.exports = { paginate };
+/**
+ * Édite le message `message` envoyé via l'interaction (réponse d'origine ou
+ * followUp, éphémère ou non) ; repli sur message.edit().
+ */
+async function editPrompt(interaction, message, payload) {
+  try {
+    await interaction.editReply({ ...payload, message: message?.id ?? '@original' });
+  } catch {
+    await message?.edit?.(payload).catch(() => {});
+  }
+}
+
+module.exports = { paginate, editPrompt, lazyPages };

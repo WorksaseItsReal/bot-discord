@@ -1,0 +1,209 @@
+'use strict';
+
+const {
+  AutoModerationRuleEventType: EventType,
+  AutoModerationRuleTriggerType: Trigger,
+  AutoModerationActionType: ActionType,
+  AutoModerationRuleKeywordPresetType: Preset,
+  PermissionFlagsBits,
+  ChannelType,
+} = require('discord.js');
+const { UserError } = require('../core/errors');
+
+/**
+ * Synchronisation avec l'AutoMod NATIF de Discord : les règles bloquent les
+ * messages AVANT leur envoi et fonctionnent même si le bot est hors ligne.
+ * Le bot complète ensuite avec ses filtres avancés (arnaques, multi-salons…).
+ */
+const PREFIX = 'Gadget · ';
+const NAMES = {
+  keywords: `${PREFIX}Mots interdits`,
+  preset: `${PREFIX}Contenu offensant`,
+  mentions: `${PREFIX}Mentions massives`,
+  spam: `${PREFIX}Spam suspect`,
+};
+const BLOCK_MESSAGE = 'Message bloqué par l\'AutoMod du serveur.';
+
+/** Mots du bot → mots-clés Discord (≤ 60 caractères, 1000 max, joker « * » conservé). Pur. */
+function toKeywords(words = []) {
+  return [...new Set(words.map((w) => String(w).trim().toLowerCase()).filter((w) => w && w.length <= 60 && /[\p{L}\p{N}]/u.test(w)))].slice(0, 1000);
+}
+
+function actions(logChannelId) {
+  const list = [{ type: ActionType.BlockMessage, metadata: { customMessage: BLOCK_MESSAGE } }];
+  if (logChannelId) list.push({ type: ActionType.SendAlertMessage, metadata: { channel: logChannelId } });
+  return list;
+}
+
+/** Limites Discord des exemptions d'une règle native. */
+const MAX_EXEMPT_ROLES = 20;
+const MAX_EXEMPT_CHANNELS = 50;
+
+/**
+ * Règles souhaitées pour une configuration AutoMod. Pur.
+ * Seuls les filtres ACTIFS du bot ont leur équivalent natif.
+ * @param {Array<{ name: string, detail: string }>} [truncated] reçoit les règles dont les
+ *   exemptions dépassent les limites de Discord (le surplus n'est pas appliqué nativement).
+ */
+function desiredRules(cfg, logChannelId, guild = null, truncated = null) {
+  // AutoMod désactivé : aucune règle native (elles bloqueraient encore les messages).
+  if (cfg?.enabled === false) return [];
+  const f = cfg.filters ?? {};
+  // Un rôle ou salon supprimé dans les exemptions ferait refuser TOUTES les règles par Discord.
+  const exists = (cache) => (id) => !cache || cache.has(id);
+  // Exemptions globales + exemptions propres au filtre (limites Discord : 20 rôles, 50 salons).
+  const exemptFor = (name, fc = {}) => {
+    const roles = [...new Set([...(cfg.ignoredRoles ?? []), ...(fc.exemptRoles ?? [])])].filter(exists(guild?.roles?.cache));
+    const channels = [...new Set([...(cfg.ignoredChannels ?? []), ...(fc.exemptChannels ?? [])])].filter(exists(guild?.channels?.cache));
+    const over = [
+      roles.length > MAX_EXEMPT_ROLES ? `${roles.length - MAX_EXEMPT_ROLES} rôle(s) au-delà de ${MAX_EXEMPT_ROLES} ignoré(s)` : null,
+      channels.length > MAX_EXEMPT_CHANNELS ? `${channels.length - MAX_EXEMPT_CHANNELS} salon(s) au-delà de ${MAX_EXEMPT_CHANNELS} ignoré(s)` : null,
+    ].filter(Boolean);
+    if (over.length && truncated) truncated.push({ name, detail: over.join(', ') });
+    return { exemptRoles: roles.slice(0, MAX_EXEMPT_ROLES), exemptChannels: channels.slice(0, MAX_EXEMPT_CHANNELS) };
+  };
+  const rules = [];
+  if (f.badWords?.enabled) {
+    const exempt = exemptFor(NAMES.keywords, f.badWords);
+    const keywords = toKeywords(f.badWords.words);
+    if (keywords.length) rules.push({ name: NAMES.keywords, triggerType: Trigger.Keyword, triggerMetadata: { keywordFilter: keywords }, ...exempt });
+    rules.push({ name: NAMES.preset, triggerType: Trigger.KeywordPreset, triggerMetadata: { presets: [Preset.Slurs, Preset.SexualContent] }, ...exempt });
+  }
+  if (f.antiMassMention?.enabled) {
+    const exempt = exemptFor(NAMES.mentions, f.antiMassMention);
+    // Le bot sanctionne à partir de `limit` mentions ; Discord bloque AU-DELÀ de la limite.
+    const limit = Math.min(50, Math.max(1, (f.antiMassMention.limit ?? 5) - 1));
+    rules.push({ name: NAMES.mentions, triggerType: Trigger.MentionSpam, triggerMetadata: { mentionTotalLimit: limit, mentionRaidProtectionEnabled: true }, ...exempt });
+  }
+  if (f.antiSpam?.enabled) rules.push({ name: NAMES.spam, triggerType: Trigger.Spam, ...exemptFor(NAMES.spam, f.antiSpam) });
+  return rules.map((r) => ({ ...r, eventType: EventType.MessageSend, actions: actions(logChannelId), enabled: true }));
+}
+
+function assertCanManage(guild) {
+  if (!guild.members.me?.permissions.has(PermissionFlagsBits.ManageGuild)) {
+    throw new UserError('Il me faut la permission **Gérer le serveur** pour gérer l\'AutoMod de Discord.');
+  }
+}
+
+/**
+ * Une seule opération à la fois par serveur (double clic, deux administrateurs) : sinon deux
+ * synchronisations simultanées créent chacune la même règle, et la copie n'est plus jamais mise à jour.
+ */
+const locks = new Map();
+function exclusive(guildId, fn) {
+  const run = (locks.get(guildId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.then(() => {}, () => {});
+  locks.set(guildId, tail);
+  tail.then(() => {
+    if (locks.get(guildId) === tail) locks.delete(guildId);
+  });
+  return run;
+}
+
+/** Règles natives créées par le bot. */
+async function ownRules(guild) {
+  const rules = await guild.autoModerationRules.fetch();
+  return [...rules.values()].filter((r) => r.name.startsWith(PREFIX));
+}
+
+/**
+ * Crée ou met à jour les règles natives. Une règle refusée par Discord (limite
+ * atteinte : 1 règle anti-spam, 1 anti-mentions… par serveur) est signalée, pas bloquante.
+ * Exemptions au-delà des limites de Discord : signalées dans `truncated` (jamais en silence).
+ * @returns {Promise<{ created: string[], updated: string[], removed: string[], failed: Array<{ name: string, reason: string }>, truncated: Array<{ name: string, detail: string }> }>}
+ */
+function sync(guild, cfg, logChannelId) {
+  return exclusive(guild.id, () => syncNow(guild, cfg, logChannelId));
+}
+
+async function syncNow(guild, cfg, logChannelId) {
+  assertCanManage(guild);
+  // Le salon d'alerte doit être un salon textuel visible par le bot, sinon toutes les règles échouent.
+  const logChannel = logChannelId ? guild.channels?.cache?.get(logChannelId) : null;
+  const alertChannelId = logChannel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(logChannel.type) ? logChannelId : null;
+  const truncated = [];
+  const desired = desiredRules(cfg, alertChannelId, guild, truncated);
+  const existing = await ownRules(guild);
+  const result = { created: [], updated: [], removed: [], failed: [], truncated };
+  for (const rule of desired) {
+    const [current, ...copies] = existing.filter((r) => r.name === rule.name);
+    // Copies du même nom (anciennes synchronisations simultanées) : supprimées, sinon elles
+    // continueraient d'appliquer une ancienne liste.
+    for (const copy of copies) {
+      if (await copy.delete().then(() => true, () => false)) result.removed.push(`${copy.name} (doublon)`);
+    }
+    try {
+      if (current) {
+        const { triggerType, ...editable } = rule; // le type d'une règle ne peut pas changer
+        void triggerType;
+        await current.edit(editable);
+        result.updated.push(rule.name);
+      } else {
+        await guild.autoModerationRules.create(rule);
+        result.created.push(rule.name);
+      }
+    } catch (err) {
+      const limitReached = /maximum|max.*rules|limit/i.test(err?.message ?? '');
+      result.failed.push({ name: rule.name, reason: limitReached ? 'une règle de ce type existe déjà sur le serveur' : err?.message ?? 'erreur inconnue' });
+    }
+  }
+  // Règles du bot devenues inutiles (filtre coupé, liste vidée) : retirées.
+  for (const r of existing) {
+    if (!desired.some((d) => d.name === r.name)) {
+      if (await r.delete().then(() => true, () => false)) result.removed.push(r.name);
+    }
+  }
+  return result;
+}
+
+/**
+ * Salon renouvelé (/channel renouveler) : les règles natives du bot, figées à leur dernière
+ * synchronisation, visent encore l'ancien identifiant (salon exempté, salon d'alerte). Seul cet
+ * identifiant est remplacé par celui de la copie : rien d'autre de la configuration n'est poussé
+ * (une synchronisation complète appliquerait aussi des changements pas encore synchronisés).
+ * @returns {Promise<{ updated: number, failed: number }>}
+ */
+function remapChannel(guild, oldId, newId) {
+  return exclusive(guild.id, async () => {
+    assertCanManage(guild);
+    const result = { updated: 0, failed: 0 };
+    for (const rule of await ownRules(guild)) {
+      const exempt = [...(rule.exemptChannels?.keys?.() ?? [])];
+      const ruleActions = rule.actions ?? [];
+      const exemptHit = exempt.includes(oldId);
+      const alertHit = ruleActions.some((a) => a.metadata?.channelId === oldId);
+      if (!exemptHit && !alertHit) continue;
+      const edit = {};
+      if (exemptHit) edit.exemptChannels = [...new Set(exempt.map((id) => (id === oldId ? newId : id)))];
+      if (alertHit) {
+        edit.actions = ruleActions.map((a) => ({
+          type: a.type,
+          metadata: {
+            durationSeconds: a.metadata?.durationSeconds ?? undefined,
+            channel: a.metadata?.channelId === oldId ? newId : a.metadata?.channelId ?? undefined,
+            customMessage: a.metadata?.customMessage ?? undefined,
+          },
+        }));
+      }
+      try {
+        await rule.edit(edit);
+        result.updated += 1;
+      } catch {
+        result.failed += 1;
+      }
+    }
+    return result;
+  });
+}
+
+/** Supprime les règles natives créées par le bot. @returns {Promise<number>} */
+function remove(guild) {
+  return exclusive(guild.id, async () => {
+    assertCanManage(guild);
+    let n = 0;
+    for (const r of await ownRules(guild)) n += await r.delete().then(() => 1, () => 0);
+    return n;
+  });
+}
+
+module.exports = { sync, remove, remapChannel, ownRules, desiredRules, toKeywords, NAMES, PREFIX, MAX_EXEMPT_ROLES, MAX_EXEMPT_CHANNELS };

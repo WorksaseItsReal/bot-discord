@@ -7,32 +7,52 @@ const { createLogger } = require('./logger');
 const logger = createLogger('events');
 
 /**
- * Charge les modules d'événements depuis src/events et les branche sur le client.
- * Chaque module exporte : { name, once?, execute(client, ...args) }.
+ * Charge les modules d'événements depuis src/events (ordre alphabétique, stable) et les branche
+ * sur le client. Chaque module exporte : { name, once?, prepend?, execute(client, ...args) }.
+ * `prepend: true` place l'écouteur AVANT les autres (client.prependListener) : un instantané pris
+ * avant les nettoyages des autres écouteurs (SEC4) ne dépend pas de l'ordre des fichiers.
  */
 class EventHandler {
   /** @param {import('discord.js').Client} client */
   constructor(client) {
     this.client = client;
     this.count = 0;
+    /** @type {{ file: string, reason: string }[]} modules non chargés */
+    this.failures = [];
   }
 
   loadAll(dir) {
     if (!fs.existsSync(dir)) return 0;
-    for (const entry of fs.readdirSync(dir)) {
+    for (const entry of fs.readdirSync(dir).sort()) {
       if (!entry.endsWith('.js')) continue;
-      const mod = require(path.join(dir, entry));
+      let mod;
+      try {
+        mod = require(path.join(path.resolve(dir), entry));
+      } catch (err) {
+        this.failures.push({ file: entry, reason: err?.message ?? String(err) });
+        logger.error(`Échec du chargement de l'événement ${entry} :`, err);
+        continue;
+      }
       const events = Array.isArray(mod) ? mod : [mod];
       for (const event of events) {
         if (!event?.name || typeof event.execute !== 'function') {
+          this.failures.push({ file: entry, reason: 'structure invalide' });
           logger.warn(`Événement ignoré (structure invalide) : ${entry}`);
           continue;
         }
-        const bound = (...args) => Promise.resolve(event.execute(this.client, ...args)).catch((err) =>
-          logger.error(`Erreur dans l'événement ${event.name} :`, err),
-        );
-        if (event.once) this.client.once(event.name, bound);
-        else this.client.on(event.name, bound);
+        const fail = (err) => logger.error(`Erreur dans l'événement ${event.name} :`, err);
+        // try/catch : une exception SYNCHRONE d'un écouteur non async (erreur SQLite…) sortirait
+        // du .catch, interromprait l'emit et les écouteurs suivants (AutoMod) ne seraient jamais appelés.
+        const bound = (...args) => {
+          try {
+            return Promise.resolve(event.execute(this.client, ...args)).catch(fail);
+          } catch (err) {
+            fail(err);
+            return Promise.resolve();
+          }
+        };
+        if (event.once) (event.prepend ? this.client.prependOnceListener : this.client.once).call(this.client, event.name, bound);
+        else (event.prepend ? this.client.prependListener : this.client.on).call(this.client, event.name, bound);
         this.count += 1;
       }
     }

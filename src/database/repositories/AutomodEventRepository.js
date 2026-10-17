@@ -1,0 +1,79 @@
+'use strict';
+
+/** Conservation des infractions AutoMod (statistiques et sanctions progressives). */
+const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Journal des infractions AutoMod. Sert aux sanctions progressives (compte
+ * récent par membre, qui survit aux redémarrages) et à /automod stats.
+ */
+class AutomodEventRepository {
+  /** @param {import('better-sqlite3').Database} db */
+  constructor(db) {
+    this.insertStmt = db.prepare(
+      'INSERT INTO automod_events (guild_id, user_id, filter, action, channel_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    this.countRecentStmt = db.prepare('SELECT COUNT(*) AS n FROM automod_events WHERE guild_id = ? AND user_id = ? AND created_at >= ?');
+    this.totalStmt = db.prepare('SELECT COUNT(*) AS n, COUNT(DISTINCT user_id) AS users FROM automod_events WHERE guild_id = ? AND created_at >= ?');
+    this.byFilterStmt = db.prepare(
+      'SELECT filter, COUNT(*) AS n FROM automod_events WHERE guild_id = ? AND created_at >= ? GROUP BY filter ORDER BY n DESC',
+    );
+    this.byActionStmt = db.prepare(
+      'SELECT action, COUNT(*) AS n FROM automod_events WHERE guild_id = ? AND created_at >= ? GROUP BY action ORDER BY n DESC',
+    );
+    this.topUsersStmt = db.prepare(
+      'SELECT user_id, COUNT(*) AS n FROM automod_events WHERE guild_id = ? AND created_at >= ? GROUP BY user_id ORDER BY n DESC LIMIT ?',
+    );
+    this.pruneStmt = db.prepare('DELETE FROM automod_events WHERE created_at < ?');
+    this.getStmt = db.prepare('SELECT * FROM automod_events WHERE id = ? AND guild_id = ?');
+    this.removeStmt = db.prepare('DELETE FROM automod_events WHERE id = ? AND guild_id = ?');
+    this.setTimeoutStmt = db.prepare('UPDATE automod_events SET timeout_until = ? WHERE id = ? AND guild_id = ?');
+  }
+
+  /** @returns {number} identifiant de l'infraction (bouton « Faux positif » du log) */
+  add({ guildId, userId, filter, action, channelId = null, at = Date.now() }) {
+    return Number(this.insertStmt.run(guildId, userId, filter, action, channelId, at).lastInsertRowid);
+  }
+
+  /**
+   * Fin prévue du timeout posé par l'AutoMod pour cette infraction (0 = aucun timeout posé) :
+   * « Faux positif » ne lève que ce timeout-là, jamais un autre posé entre-temps.
+   */
+  setTimeoutUntil(guildId, id, until) {
+    return this.setTimeoutStmt.run(until, id, guildId).changes > 0;
+  }
+
+  /** Infraction d'un serveur (jamais celle d'un autre serveur), ou null. */
+  get(guildId, id) {
+    return this.getStmt.get(id, guildId) ?? null;
+  }
+
+  /** Supprime une infraction (faux positif) : elle ne compte plus pour l'escalade. @returns {boolean} */
+  remove(guildId, id) {
+    return this.removeStmt.run(id, guildId).changes > 0;
+  }
+
+  /** Infractions d'un membre depuis `since` (ms). */
+  countRecent(guildId, userId, since) {
+    return this.countRecentStmt.get(guildId, userId, since).n;
+  }
+
+  /** Statistiques d'un serveur depuis `since`. */
+  stats(guildId, since, top = 5) {
+    const total = this.totalStmt.get(guildId, since);
+    return {
+      total: total.n,
+      users: total.users,
+      byFilter: this.byFilterStmt.all(guildId, since),
+      byAction: this.byActionStmt.all(guildId, since),
+      topUsers: this.topUsersStmt.all(guildId, since, top),
+    };
+  }
+
+  /** Supprime les entrées plus anciennes que la durée de conservation. */
+  prune(now = Date.now()) {
+    return this.pruneStmt.run(now - RETENTION_MS).changes;
+  }
+}
+
+module.exports = { AutomodEventRepository, RETENTION_MS };

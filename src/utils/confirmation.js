@@ -1,7 +1,8 @@
 'use strict';
 
-const { button, row, ButtonStyle } = require('./components');
-const { embeds } = require('./embeds');
+const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+const { card, status, ICONS, subtext } = require('./ui');
+const { editPrompt } = require('./pagination');
 
 /**
  * Demande de confirmation interactive pour les actions dangereuses.
@@ -17,32 +18,45 @@ async function confirm(interaction, opts) {
   const cancelId = `cancel:${interaction.id}`;
 
   const components = [
-    row(
-      button({ id: confirmId, label: confirmLabel, style: ButtonStyle.Danger }),
-      button({ id: cancelId, label: 'Annuler', style: ButtonStyle.Secondary }),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(confirmId).setLabel(confirmLabel).setEmoji(ICONS.success).setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(cancelId).setLabel('Annuler').setEmoji(ICONS.error).setStyle(ButtonStyle.Secondary),
     ),
   ];
 
-  const payload = { embeds: [embeds.warning(description, 'Confirmation requise')], components, ephemeral: true };
+  const prompt = card({
+    tone: 'warning',
+    icon: ICONS.warning,
+    title: 'Confirmation requise',
+    description: [description, '', subtext(`Sans réponse sous ${Math.round(timeout / 1000)} secondes, l'action est annulée.`)],
+  });
+  const payload = { embeds: [prompt], components, ephemeral: true };
   const message = interaction.deferred || interaction.replied
     ? await interaction.followUp({ ...payload, fetchReply: true })
     : await interaction.reply({ ...payload, fetchReply: true });
 
+  let click;
   try {
-    const click = await message.awaitMessageComponent({
+    click = await message.awaitMessageComponent({
       filter: (i) => i.user.id === interaction.user.id && [confirmId, cancelId].includes(i.customId),
       time: timeout,
     });
-    const confirmed = click.customId === confirmId;
-    await click.update({
-      embeds: [confirmed ? embeds.info('Action confirmée.') : embeds.warning('Action annulée.')],
-      components: [],
-    });
-    return confirmed;
   } catch {
-    await interaction.editReply({ embeds: [embeds.warning('Délai dépassé, action annulée.')], components: [] }).catch(() => {});
+    // Édite le message de confirmation lui-même (souvent un followUp après un deferReply).
+    await editPrompt(interaction, message, { embeds: [status.warn('Délai dépassé : action annulée.')], components: [] });
     return false;
   }
+  const confirmed = click.customId === confirmId;
+  await click
+    .update({
+      embeds: [confirmed ? status.wait('Confirmé, exécution en cours…') : status.warn('Action annulée. Rien n\'a été modifié.')],
+      components: [],
+    })
+    .catch(() => {});
+  // Si l'action échoue ensuite, le gestionnaire d'erreurs remplacera ce message
+  // « exécution en cours » par la carte d'erreur (au lieu d'un second message).
+  if (confirmed) interaction.pendingConfirmation = { message };
+  return confirmed;
 }
 
 module.exports = { confirm };

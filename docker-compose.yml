@@ -1,0 +1,33 @@
+# Exemple de déploiement : `docker compose up -d --build`
+# Prérequis : un fichier .env (copie de .env.example) avec DISCORD_TOKEN et CLIENT_ID.
+# Enregistrer les commandes : `docker compose run --rm bot node scripts/deploy-commands.js`
+# Sauvegarde ponctuelle :      `docker compose exec bot node scripts/backup-db.js`
+services:
+  bot:
+    build: .
+    image: inspecteur-gadget:latest
+    container_name: inspecteur-gadget
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      # Forcés pour l'image : la base vit dans le volume nommé ci-dessous.
+      NODE_ENV: production
+      DATABASE_PATH: /app/data/gadget.sqlite
+      HEALTH_PORT: "8080"
+      HEALTH_HOST: 0.0.0.0
+    volumes:
+      - gadget-data:/app/data
+    # /healthz et /metrics accessibles depuis l'hôte uniquement (pas d'exposition publique).
+    ports:
+      - "127.0.0.1:8080:8080"
+    # L'arrêt propre (scheduler, sauvegarde, base) a besoin de quelques secondes.
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gadget-data:

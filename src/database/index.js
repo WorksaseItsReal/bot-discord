@@ -29,6 +29,12 @@ class DatabaseManager {
     }
     this.db = new Database(this.filePath);
     this.db.pragma('journal_mode = WAL');
+    // WAL + NORMAL : écritures bien plus rapides, sans risque de corruption (seule la
+    // dernière transaction peut être perdue en cas de coupure de courant).
+    this.db.pragma('synchronous = NORMAL');
+    // Attend jusqu'à 5 s au lieu d'échouer immédiatement si la base est verrouillée
+    // (ex : sauvegarde externe ou script de migration lancé en parallèle).
+    this.db.pragma('busy_timeout = 5000');
     this.db.pragma('foreign_keys = ON');
     this.migrate();
     logger.info(`Base de données prête (${this.filePath})`);
@@ -45,14 +51,19 @@ class DatabaseManager {
     );
     const applied = new Set(this.db.prepare('SELECT id FROM _migrations').all().map((r) => r.id));
     const insert = this.db.prepare('INSERT INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
+    const isApplied = this.db.prepare('SELECT 1 FROM _migrations WHERE id = ?');
+    // IMMEDIATE + revérification : deux processus (bot + `npm run migrate`) ne peuvent
+    // pas appliquer la même migration deux fois.
     const run = this.db.transaction((migration) => {
+      if (isApplied.get(migration.id)) return false;
       this.db.exec(migration.up);
       insert.run(migration.id, migration.name, Date.now());
+      return true;
     });
+    assertMigrationIds(migrations);
     for (const migration of migrations) {
       if (applied.has(migration.id)) continue;
-      run(migration);
-      logger.info(`Migration appliquée : #${migration.id} ${migration.name}`);
+      if (run.immediate(migration)) logger.info(`Migration appliquée : #${migration.id} ${migration.name}`);
     }
   }
 
@@ -66,6 +77,21 @@ class DatabaseManager {
       this.db.close();
       this.db = null;
     }
+  }
+}
+
+/**
+ * Les migrations sont reconnues par leur id : un id réutilisé serait ignoré sans bruit sur
+ * les bases existantes. On exige des ids entiers, uniques et croissants (des trous sont
+ * permis : un numéro sauté reste réservé et ne doit jamais être réutilisé).
+ */
+function assertMigrationIds(list) {
+  let previous = 0;
+  for (const m of list) {
+    if (!Number.isInteger(m.id) || m.id <= previous) {
+      throw new Error(`Migration #${m.id} (${m.name}) : les ids doivent être des entiers uniques et croissants (précédent : #${previous}).`);
+    }
+    previous = m.id;
   }
 }
 

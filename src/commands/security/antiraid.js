@@ -1,70 +1,925 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
-const { embeds, successReply } = require('../../utils/embeds');
+const {
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  ChannelType,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  RoleSelectMenuBuilder,
+  UserSelectMenuBuilder,
+} = require('discord.js');
+const { truncate } = require('../../utils/embeds');
+const { card, field, wide, kv, ICONS, subtext, bullets, actionButton, buttonRows, ButtonStyle } = require('../../utils/ui');
+const { discordTimestamp } = require('../../utils/time');
+const { fitList } = require('../../services/LoggingService');
+const { assertAdmin } = require('../../services/ModerationService');
+const { newAccountAction } = require('../../services/AntiRaidService');
+const { UserError } = require('../../core/errors');
+const S = require('../../utils/secur');
+
+/**
+ * /antiraid : UN tableau de bord interactif (éphémère) pour tout configurer.
+ * Remplace les anciennes sous-commandes enable/disable/status/set : chaque
+ * réglage de `/antiraid set` a son menu, son bouton ou son formulaire.
+ * « Administrateur » est revérifiée à chaque clic.
+ *
+ * Vues : home · joins · accounts · destructive · alerts · whitelist · presets
+ */
+
+// ---------------------------------------------------------------- métadonnées
+
+const ACTION_LABELS = { kick: `${ICONS.kick} Expulsion`, ban: `${ICONS.ban} Bannissement`, lockdown: '🚨 Lockdown' };
+const EXECUTOR_LABELS = { strip: 'Retrait des rôles', ban: 'Bannissement', none: 'Aucune' };
+const WAVE_ACTIONS = {
+  kick: { label: 'Expulser les arrivants', emoji: ICONS.kick, description: 'Les membres arrivés pendant la vague sont expulsés' },
+  ban: { label: 'Bannir les arrivants', emoji: ICONS.ban, description: 'Les membres arrivés pendant la vague sont bannis' },
+  lockdown: { label: 'Lockdown', emoji: '🚨', description: 'Tous les salons écrits passent en lecture seule' },
+};
+const NEW_ACCOUNT_ACTIONS = {
+  kick: { label: 'Expulsion', emoji: ICONS.kick, description: 'Le compte peut revenir plus tard' },
+  ban: { label: 'Bannissement', emoji: ICONS.ban, description: 'Le compte ne peut plus revenir' },
+};
+const EXECUTOR_ACTIONS = {
+  strip: { label: 'Retrait des rôles', emoji: '🎭', description: 'Retire tous les rôles que je peux gérer' },
+  ban: { label: 'Bannissement', emoji: ICONS.ban, description: 'Bannit l\'auteur des suppressions' },
+  none: { label: 'Aucune', emoji: '🔕', description: 'Alerte seulement, sans sanction' },
+};
+
+/** Bornes des réglages numériques : [min, max]. Mêmes possibilités que l'ancien `/antiraid set`. */
+const BOUNDS = {
+  joinThreshold: [2, 1000],
+  joinWindowSeconds: [1, 3600],
+  minAccountAgeDays: [0, 3650],
+  channelDeleteThreshold: [0, 100],
+  roleDeleteThreshold: [0, 100],
+  banThreshold: [0, 100],
+  kickThreshold: [0, 100],
+  destructiveWindowSeconds: [1, 3600],
+};
+
+const MAX_WL = 25;
+
+/** Préréglages : seuls les réglages de détection changent (salon d'alerte et whitelist conservés). */
+const PRESETS = {
+  faible: {
+    label: 'Faible',
+    emoji: '🟢',
+    description: 'Peu de faux positifs : vagues de 20 arrivées en 10 s (expulsion), pas de filtre d\'âge ni d\'anti-bot, seuils de destruction larges.',
+    patch: { enabled: true, joinThreshold: 20, joinWindowSeconds: 10, action: 'kick', minAccountAgeDays: 0, antiBot: false, newAccountAction: 'kick', channelDeleteThreshold: 5, roleDeleteThreshold: 5, banThreshold: 10, kickThreshold: 0, destructiveWindowSeconds: 10, punishExecutor: 'strip' },
+  },
+  equilibre: {
+    label: 'Équilibré',
+    emoji: '🟡',
+    description: 'Recommandé : 10 arrivées en 10 s (expulsion), comptes de moins d\'1 jour expulsés, anti-bot, 3 suppressions en 10 s → rôles retirés.',
+    patch: { enabled: true, joinThreshold: 10, joinWindowSeconds: 10, action: 'kick', minAccountAgeDays: 1, antiBot: true, newAccountAction: 'kick', channelDeleteThreshold: 3, roleDeleteThreshold: 3, banThreshold: 5, kickThreshold: 0, destructiveWindowSeconds: 10, punishExecutor: 'strip' },
+  },
+  strict: {
+    label: 'Strict',
+    emoji: '🔴',
+    description: 'Serveur ciblé : 6 arrivées en 10 s → lockdown, comptes de moins de 7 jours bannis, anti-bot, 2 suppressions (ou 5 expulsions) en 15 s → bannissement.',
+    patch: { enabled: true, joinThreshold: 6, joinWindowSeconds: 10, action: 'lockdown', minAccountAgeDays: 7, antiBot: true, newAccountAction: 'ban', channelDeleteThreshold: 2, roleDeleteThreshold: 2, banThreshold: 3, kickThreshold: 5, destructiveWindowSeconds: 15, punishExecutor: 'ban' },
+  },
+};
+
+const NAV = [
+  { value: 'home', label: 'Accueil', emoji: '🏠', description: 'État, interrupteur et dernier déclenchement' },
+  { value: 'joins', label: 'Vague d\'arrivées', emoji: '🌊', description: 'Seuil, fenêtre et action en cas de raid' },
+  { value: 'accounts', label: 'Comptes récents & bots', emoji: '🐣', description: 'Âge minimal du compte, anti-bot' },
+  { value: 'destructive', label: 'Destruction', emoji: '💣', description: 'Suppressions massives de salons, rôles, bans, expulsions' },
+  { value: 'alerts', label: 'Alertes', emoji: '🔔', description: 'Salon où publier les alertes' },
+  { value: 'whitelist', label: 'Whitelist', emoji: '🔐', description: 'Membres et rôles jamais sanctionnés' },
+  { value: 'presets', label: 'Préréglages', emoji: '🎚️', description: 'Faible, Équilibré ou Strict en un clic' },
+];
+
+// ---------------------------------------------------------------- helpers
+
+const guard = (interaction) => assertAdmin(interaction);
+
+/** Options des niveaux de sécurité (Secur, sinon configuration du bot). */
+function levelOpts(client) {
+  return client.services?.secur?.levelOpts?.() ?? {
+    botOwnerIds: client.config?.ownerIds ?? [],
+    trustBotOwners: Boolean(client.config?.securTrustBotOwners),
+    botId: client.user?.id ?? null,
+  };
+}
+
+/**
+ * Verrou de Secur (secur.verrou) : les modifications exigent AUSSI le niveau owner. Contrôlé
+ * APRÈS guard() ; nav, go, simulate et alerttest restent ouverts aux administrateurs.
+ */
+function assertUnlocked(client, interaction) {
+  const cfg = client.services.config.get(interaction.guildId);
+  if (!cfg.secur?.verrou) return;
+  if (!S.hasOwnerLevel(interaction.guild, interaction.user.id, cfg, levelOpts(client))) {
+    throw new UserError(`${ICONS.lock} Verrou de Secur actif : ${S.OWNER_LEVEL_MESSAGE}`);
+  }
+}
+
+/**
+ * Modules Secur ban / kick actifs qui HÉRITENT leur limite des seuils historiques (limit null) :
+ * banThreshold / kickThreshold sont alors LE seuil de Secur. Pur.
+ */
+const INHERITED = Object.freeze({ ban: 'banThreshold', kick: 'kickThreshold' });
+function inheritedModules(cfg) {
+  return Object.keys(INHERITED).filter((k) => S.moduleMode(cfg, k) !== 'off' && !Number.isInteger(S.moduleConfig(cfg, k).limit));
+}
+
+/**
+ * Relever un seuil repris par Secur affaiblit Secur : même exigence que /secur (niveau owner), que
+ * le verrou soit posé ou non.
+ */
+function assertSecurLimitRaise(client, interaction, cfg, patch) {
+  const next = { ...cfg, antiraid: { ...(cfg.antiraid ?? {}), ...patch } };
+  const raised = inheritedModules(cfg).filter((k) => INHERITED[k] in patch && S.effectiveLimit(next, k) > S.effectiveLimit(cfg, k));
+  if (!raised.length || S.hasOwnerLevel(interaction.guild, interaction.user.id, cfg, levelOpts(client))) return;
+  throw new UserError(`${ICONS.lock} Ce seuil est aussi celui de Secur (${raised.map((k) => S.SECUR_MODULES[k].label).join(', ')}, limite héritée) : le relever affaiblit Secur. ${S.OWNER_LEVEL_MESSAGE}`);
+}
+
+/** Tranche Secur ban / kick (modules hérités) pour le journal : un relèvement y est classé critique. */
+function securSlice(cfg) {
+  const modules = Object.fromEntries(inheritedModules(cfg).map((k) => [k, S.moduleConfig(cfg, k)]));
+  return Object.keys(modules).length ? { secur: { modules } } : {};
+}
+
+/** Membre sur la blacklist de sécurité (SEC3, optionnelle). */
+function isBlacklisted(client, guildId, userId) {
+  try {
+    return Boolean(client.services.blacklist?.has?.(guildId, userId));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Accès de whitelist donnés par un auteur qui n'est pas owner : EN ATTENTE (SEC1 recordGrant :
+ * carte critique hors filtres, MP, Approuver / Révoquer). La ligne en base est créée tout de
+ * suite (avant toute attente) ; la carte part en parallèle, attendue APRÈS la réponse.
+ * @param {Array<{ kind: 'user'|'wlrole', subjectId: string }>} grants
+ * @returns {{ pending: boolean, done: Promise<unknown> }}
+ */
+function startGrants(client, interaction, grants) {
+  const secur = client.services.secur;
+  const none = { pending: false, done: Promise.resolve() };
+  if (!secur?.recordGrant || !grants.length) return none;
+  if (S.hasOwnerLevel(interaction.guild, interaction.user.id, client.services.config.get(interaction.guildId), levelOpts(client))) return none;
+  // Appel direct : recordGrant écrit la ligne en base de façon synchrone, avant sa première attente.
+  const done = Promise.all(grants.map((g) => {
+    try {
+      return Promise.resolve(secur.recordGrant(interaction.guild, { ...g, grantedBy: interaction.user.id })).catch(() => null);
+    } catch {
+      return null;
+    }
+  }));
+  return { pending: true, done };
+}
+
+/**
+ * Journalise un changement de réglage APRÈS la réponse. Avec Secur : journal de SEC1 (tranche
+ * de configuration avant / après ; changement critique → alerte hors filtres et MP, même logs
+ * coupés). Sans Secur : ancien journal de l'AntiRaid. Best-effort : n'échoue jamais.
+ * @param {{ disabled?: boolean, before?: object|null, after?: object|null, source?: string }} [opts]
+ */
+async function journal(client, interaction, changes, { disabled = false, before = null, after = null, source = '/antiraid' } = {}) {
+  try {
+    const secur = client.services.secur;
+    if (secur?.journal && before && after) {
+      const lines = (Array.isArray(changes) ? changes : [changes]).filter(Boolean);
+      await secur.journal(interaction.guild, { actorId: interaction.user.id, actor: interaction.user, source, before, after, changes: lines });
+      return;
+    }
+    await client.services.antiraid?.logConfigChange?.(interaction.guild, interaction.user, changes, { disabled });
+  } catch {
+    /* journal best-effort */
+  }
+}
+
+/** Tranche { clé: valeur } d'un objet. Pur. */
+const pick = (obj, keys) => Object.fromEntries(keys.map((k) => [k, obj?.[k] ?? null]));
+
+/**
+ * Lignes « géré par Secur » des vues destruction et whitelist : modules actifs (chargés), et
+ * « la whitelist ne protège pas en mode max ». Vide sans Secur actif.
+ */
+function securNotes(client, guildId, kind) {
+  const active = (client.services.secur?.moduleStatus?.(guildId) ?? []).filter((m) => m.loaded && m.mode !== 'off');
+  if (!active.length) return [];
+  const out = [];
+  const modes = [...new Set(active.map((m) => m.mode))].join(' et ');
+  if (kind === 'destructive') {
+    const inherited = inheritedModules(client.services.config.get(guildId));
+    const covered = active.filter((m) => ['channelDelete', 'roleDelete', 'ban', 'kick'].includes(m.key));
+    const replaced = covered.filter((m) => !inherited.includes(m.key));
+    const reused = covered.filter((m) => inherited.includes(m.key));
+    if (replaced.length) out.push(`🛡️ **Géré par Secur** : ${replaced.map((m) => `${m.label} (mode ${m.mode})`).join(', ')}. Ces seuils ne s'appliquent plus à ces actions : réglez-les dans /secur panneau.`);
+    if (reused.length) out.push(`🛡️ **Repris par Secur** : ${reused.map((m) => `${m.label} (mode ${m.mode})`).join(', ')}. Secur utilise CE seuil (limite héritée) : le relever affaiblit Secur et demande le niveau owner.`);
+  } else out.push(`🛡️ **Géré par Secur (mode ${modes})** : ${active.length} module(s) anti-nuke actif(s).`);
+  const max = active.filter((m) => m.mode === 'max');
+  if (max.length) out.push(`${ICONS.warning} **La whitelist ne protège pas en mode max** (${max.slice(0, 4).map((m) => m.label).join(', ')}${max.length > 4 ? '…' : ''}) : seuls les owners et les bots de confiance y sont exemptés.`);
+  return out;
+}
+
+/** « +<@a> −<@b> » : entrées ajoutées et retirées d'une liste de whitelist. Pur. */
+function listDiff(before, after, mention) {
+  const old = new Set(before ?? []);
+  const now = new Set(after ?? []);
+  const added = [...now].filter((id) => !old.has(id)).map((id) => `+${mention(id)}`);
+  const removed = [...old].filter((id) => !now.has(id)).map((id) => `−${mention(id)}`);
+  return fitList([...added, ...removed], 900);
+}
+/** Clé propre d'un catalogue (« constructor », « toString »… refusés). */
+const own = (obj, key) => typeof key === 'string' && Object.hasOwn(obj, key);
+const cfgOf = (client, guildId) => client.services.config.get(guildId);
+const threshold = (n) => (n ? `**${n}**` : 'Désactivé');
+const onOff = (v) => (v ? '🟢 Oui' : '🔴 Non');
+const SECTION = 'security';
+
+function navRow(current) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('cmd:antiraid:nav')
+      .setPlaceholder('Aller à…')
+      .addOptions(NAV.map((o) => ({ ...o, default: o.value === current }))),
+  );
+}
+
+const backHome = () => actionButton({ command: 'antiraid', action: 'go', args: ['home'], label: 'Accueil', emoji: '🏠' });
+
+const input = (id, label, { value, placeholder, max = 5, required = false } = {}) => {
+  const t = new TextInputBuilder().setCustomId(id).setLabel(truncate(label, 45)).setStyle(TextInputStyle.Short).setMaxLength(max).setRequired(required);
+  if (value != null && String(value) !== '') t.setValue(String(value).slice(0, max));
+  if (placeholder) t.setPlaceholder(placeholder.slice(0, 100));
+  return new ActionRowBuilder().addComponents(t);
+};
+
+/** Entier borné saisi dans un formulaire (vide = inchangé). */
+function intField(interaction, id, key, label) {
+  let raw;
+  try {
+    raw = interaction.fields.getTextInputValue(id)?.trim();
+  } catch {
+    return undefined;
+  }
+  if (!raw) return undefined;
+  const [min, max] = BOUNDS[key];
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) throw new UserError(`${label} : entrez un nombre entier entre ${min} et ${max}.`);
+  return n;
+}
+
+/** Valeur voulue par un bouton « on/off » ; anciens boutons sans valeur : inversion. */
+function target(state, current) {
+  if (state === 'on') return true;
+  if (state === 'off') return false;
+  return !current;
+}
+
+/** Résumé des seuils de destruction. Pur. */
+function destructiveText(c) {
+  return kv([
+    ['Salons supprimés', threshold(c.channelDeleteThreshold)],
+    ['Rôles supprimés', threshold(c.roleDeleteThreshold)],
+    ['Bannissements', threshold(c.banThreshold)],
+    ['Expulsions', threshold(c.kickThreshold)],
+    ['Sanction de l\'auteur', EXECUTOR_LABELS[c.punishExecutor] ?? c.punishExecutor],
+  ]);
+}
+
+function lastTriggerText(client, guildId) {
+  const last = client.services.antiraid?.lastTriggerOf?.(guildId);
+  if (!last) return '*Aucun depuis le démarrage du bot*';
+  return `**${truncate(last.title, 80)}** · ${discordTimestamp(last.at, 'R')}${last.description ? `\n${subtext(truncate(last.description.replace(/\n/g, ' '), 200))}` : ''}`;
+}
+
+// ---------------------------------------------------------------- vues
+
+function homeView(client, guildId, notice) {
+  const cfg = cfgOf(client, guildId);
+  const c = cfg.antiraid;
+  const wl = cfg.whitelist ?? { users: [], roles: [] };
+  const wlCount = (wl.users?.length ?? 0) + (wl.roles?.length ?? 0);
+  return {
+    embeds: [
+      card({
+        tone: c.enabled ? 'success' : 'neutral',
+        section: SECTION,
+        icon: ICONS.shield,
+        title: 'AntiRaid · Tableau de bord',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          c.enabled ? '🟢 La protection est **active**.' : '🔴 La protection est **désactivée**.',
+          subtext('Choisissez une section dans le menu pour la régler.'),
+        ],
+        fields: [
+          field('⚡', 'Action (vague)', ACTION_LABELS[c.action] ?? c.action),
+          field(ICONS.user, 'Comptes récents / bots', ACTION_LABELS[newAccountAction(c)]),
+          field(ICONS.bot, 'Anti-bot', onOff(c.antiBot)),
+          field(ICONS.members, 'Vague d\'arrivées', `**${c.joinThreshold}** en **${c.joinWindowSeconds} s**`),
+          field(ICONS.date, 'Âge min. du compte', c.minAccountAgeDays ? `**${c.minAccountAgeDays}** j` : 'Aucun'),
+          field(ICONS.channel, 'Alertes', c.alertChannel ? `<#${c.alertChannel}>` : 'Logs sécurité'),
+          field(ICONS.check, 'Whitelist', `**${wlCount}** entrée${wlCount > 1 ? 's' : ''}`),
+          wide('💣', `Actions destructrices (en ${c.destructiveWindowSeconds} s)`, destructiveText(c)),
+          wide('🚨', 'Dernier déclenchement', lastTriggerText(client, guildId)),
+        ],
+        footer: 'Le propriétaire du serveur et la whitelist ne sont jamais sanctionnés',
+      }),
+    ],
+    components: [
+      navRow('home'),
+      ...buttonRows(
+        c.enabled
+          ? actionButton({ command: 'antiraid', action: 'toggle', args: ['off'], label: 'Désactiver', emoji: '🔴', style: ButtonStyle.Danger })
+          : actionButton({ command: 'antiraid', action: 'toggle', args: ['on'], label: 'Activer', emoji: '🟢', style: ButtonStyle.Success }),
+        actionButton({ command: 'antiraid', action: 'simulate', label: 'Simuler', emoji: '🧪', style: ButtonStyle.Primary }),
+        actionButton({ command: 'antiraid', action: 'go', args: ['presets'], label: 'Préréglages', emoji: '🎚️' }),
+        actionButton({ command: 'antiraid', action: 'go', args: ['home'], label: 'Actualiser', emoji: ICONS.refresh }),
+        // Secur (anti-nuke) : réponse éphémère, le tableau de bord reste en place.
+        actionButton({ command: 'secur', action: 'open', args: ['home'], label: 'Anti-nuke', emoji: ICONS.shield }),
+      ),
+    ],
+  };
+}
+
+function joinsView(client, guildId, notice) {
+  const c = cfgOf(client, guildId).antiraid;
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: '🌊',
+        title: 'Vague d\'arrivées',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          `Si **${c.joinThreshold}** membres rejoignent le serveur en moins de **${c.joinWindowSeconds} s**, l'action choisie est appliquée et une alerte est publiée.`,
+          subtext('Une alerte (et un lockdown) au plus par minute ; en expulsion/bannissement, chaque nouvelle vague est sanctionnée.'),
+        ],
+        fields: [
+          field(ICONS.members, 'Seuil', `**${c.joinThreshold}** arrivées`),
+          field(ICONS.time, 'Fenêtre', `**${c.joinWindowSeconds}** s`),
+          field('⚡', 'Action', ACTION_LABELS[c.action] ?? c.action),
+        ],
+        footer: `Seuil : ${BOUNDS.joinThreshold.join(' à ')} · Fenêtre : ${BOUNDS.joinWindowSeconds.join(' à ')} s`,
+      }),
+    ],
+    components: [
+      navRow('joins'),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('cmd:antiraid:action')
+          .setPlaceholder('Action en cas de vague…')
+          .addOptions(Object.entries(WAVE_ACTIONS).map(([value, a]) => ({ value, ...a, default: c.action === value }))),
+      ),
+      ...buttonRows(
+        actionButton({ command: 'antiraid', action: 'set', args: ['joins'], label: 'Seuil et fenêtre', emoji: ICONS.settings, style: ButtonStyle.Primary }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function accountsView(client, guildId, notice) {
+  const c = cfgOf(client, guildId).antiraid;
+  const current = newAccountAction(c);
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: '🐣',
+        title: 'Comptes récents & bots',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          'Les comptes trop récents et les bots ajoutés hors whitelist sont sanctionnés **dès leur arrivée**, indépendamment de l\'action de vague.',
+        ],
+        fields: [
+          field(ICONS.date, 'Âge minimal', c.minAccountAgeDays ? `**${c.minAccountAgeDays}** jour(s)` : 'Aucun (désactivé)'),
+          field(ICONS.bot, 'Anti-bot', onOff(c.antiBot)),
+          field(ICONS.shield, 'Sanction', ACTION_LABELS[current]),
+        ],
+        footer: '0 jour = pas de filtre d\'âge',
+      }),
+    ],
+    components: [
+      navRow('accounts'),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('cmd:antiraid:newaccount')
+          .setPlaceholder('Sanction des comptes récents et bots…')
+          .addOptions(Object.entries(NEW_ACCOUNT_ACTIONS).map(([value, a]) => ({ value, ...a, default: current === value }))),
+      ),
+      ...buttonRows(
+        c.antiBot
+          ? actionButton({ command: 'antiraid', action: 'antibot', args: ['off'], label: 'Anti-bot : oui', emoji: ICONS.bot, style: ButtonStyle.Success })
+          : actionButton({ command: 'antiraid', action: 'antibot', args: ['on'], label: 'Anti-bot : non', emoji: ICONS.bot }),
+        actionButton({ command: 'antiraid', action: 'set', args: ['accounts'], label: 'Âge minimal', emoji: ICONS.settings, style: ButtonStyle.Primary }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function destructiveView(client, guildId, notice) {
+  const c = cfgOf(client, guildId).antiraid;
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: '💣',
+        title: 'Actions destructrices',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          `Un membre qui supprime trop de salons, de rôles, bannit ou expulse trop de membres en **${c.destructiveWindowSeconds} s** déclenche une alerte et la sanction choisie.`,
+          subtext('0 = surveillance désactivée pour ce type d\'action. Détection via le journal d\'audit et les sanctions faites avec le bot. Bannir ou expulser un membre arrivé il y a moins de 10 min (raider) n\'est pas compté.'),
+          ...securNotes(client, guildId, 'destructive'),
+        ],
+        fields: [
+          field(ICONS.channel, 'Salons supprimés', threshold(c.channelDeleteThreshold)),
+          field(ICONS.role, 'Rôles supprimés', threshold(c.roleDeleteThreshold)),
+          field(ICONS.ban, 'Bannissements', threshold(c.banThreshold)),
+          field(ICONS.kick, 'Expulsions', threshold(c.kickThreshold)),
+          field(ICONS.time, 'Fenêtre', `**${c.destructiveWindowSeconds}** s`),
+          field(ICONS.shield, 'Sanction de l\'auteur', EXECUTOR_LABELS[c.punishExecutor] ?? c.punishExecutor),
+        ],
+        footer: 'Le bot, le propriétaire et la whitelist sont exclus',
+      }),
+    ],
+    components: [
+      navRow('destructive'),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('cmd:antiraid:executor')
+          .setPlaceholder('Sanction de l\'auteur…')
+          .addOptions(Object.entries(EXECUTOR_ACTIONS).map(([value, a]) => ({ value, ...a, default: c.punishExecutor === value }))),
+      ),
+      ...buttonRows(
+        actionButton({ command: 'antiraid', action: 'set', args: ['destructive'], label: 'Seuils et fenêtre', emoji: ICONS.settings, style: ButtonStyle.Primary }),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+function alertsView(client, guild, notice) {
+  const cfg = cfgOf(client, guild.id);
+  const id = cfg.antiraid.alertChannel;
+  const menu = new ChannelSelectMenuBuilder()
+    .setCustomId('cmd:antiraid:alertch')
+    .setPlaceholder('Salon d\'alerte (vide : logs sécurité)')
+    .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    .setMinValues(0)
+    .setMaxValues(1);
+  if (id && guild.channels?.cache?.has?.(id)) menu.setDefaultChannels(id);
+  const security = cfg.logChannels?.security;
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: '🔔',
+        title: 'Alertes',
+        description: [
+          notice ? `${notice}\n` : null,
+          'Chaque déclenchement publie une alerte dans le salon d\'alerte **et** dans les logs sécurité (une seule fois si c\'est le même salon).',
+          id && guild.channels?.cache && !guild.channels.cache.has(id) ? `\n${ICONS.warning} Le salon d'alerte a été supprimé : choisissez-en un autre.` : null,
+        ],
+        fields: [
+          field(ICONS.channel, 'Salon d\'alerte', id ? `<#${id}>` : '*Aucun*'),
+          field(ICONS.list, 'Logs sécurité', security ? `<#${security}>` : '*Non configurés* (/logs)'),
+        ],
+        footer: 'Videz le menu pour n\'utiliser que les logs sécurité',
+      }),
+    ],
+    components: [
+      navRow('alerts'),
+      new ActionRowBuilder().addComponents(menu),
+      ...buttonRows(
+        id ? actionButton({ command: 'antiraid', action: 'alerttest', label: 'Tester l\'alerte', emoji: '🧪', style: ButtonStyle.Primary }) : null,
+        backHome(),
+      ),
+    ],
+  };
+}
+
+/** Rôle géré par une intégration (Booster, rôle de bot…) : jamais whitelistable (comme /whitelist). */
+const managedRole = (guild, id) => Boolean(guild.roles?.cache?.get?.(id)?.managed);
+
+/** Entrées de whitelist présélectionnées : existantes en cache (si connu), hors rôles gérés, 25 au plus. */
+function whitelistDefaults(cfg, guild) {
+  const wl = cfg.whitelist ?? {};
+  const roleCache = guild.roles?.cache;
+  const roles = (wl.roles ?? []).filter((r) => (!roleCache || roleCache.has(r)) && !managedRole(guild, r)).slice(0, MAX_WL);
+  const users = (wl.users ?? []).slice(0, MAX_WL);
+  return { users, roles };
+}
+
+function whitelistView(client, guild, notice) {
+  const cfg = cfgOf(client, guild.id);
+  const wl = cfg.whitelist ?? {};
+  const { users, roles } = whitelistDefaults(cfg, guild);
+  const userMenu = new UserSelectMenuBuilder().setCustomId('cmd:antiraid:wlusers').setPlaceholder('Membres whitelistés (aucun)').setMinValues(0).setMaxValues(MAX_WL);
+  if (users.length) userMenu.setDefaultUsers(...users);
+  const roleMenu = new RoleSelectMenuBuilder().setCustomId('cmd:antiraid:wlroles').setPlaceholder('Rôles whitelistés (aucun)').setMinValues(0).setMaxValues(MAX_WL);
+  if (roles.length) roleMenu.setDefaultRoles(...roles);
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: '🔐',
+        title: 'Whitelist de sécurité',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          'Ces membres et rôles échappent à **toutes** les sanctions automatiques de l\'AntiRaid (vague, comptes récents, bots, destruction).',
+          subtext('Les menus remplacent la sélection actuelle. Aussi disponible : /whitelist. Un ajout fait par un non-owner reste en attente d\'approbation.'),
+          ...securNotes(client, guild.id, 'whitelist'),
+        ],
+        fields: [
+          wide(ICONS.user, `Membres (${wl.users?.length ?? 0})`, fitList((wl.users ?? []).map((u) => `<@${u}>`)) ?? '*Aucun*'),
+          wide(ICONS.role, `Rôles (${wl.roles?.length ?? 0})`, fitList((wl.roles ?? []).map((r) => `<@&${r}>`)) ?? '*Aucun*'),
+        ],
+        footer: `${MAX_WL} membres et ${MAX_WL} rôles par menu · les entrées au-delà sont conservées`,
+      }),
+    ],
+    components: [
+      navRow('whitelist'),
+      new ActionRowBuilder().addComponents(userMenu),
+      new ActionRowBuilder().addComponents(roleMenu),
+      ...buttonRows(backHome()),
+    ],
+  };
+}
+
+function presetsView(notice) {
+  return {
+    embeds: [
+      card({
+        tone: 'info',
+        section: SECTION,
+        icon: '🎚️',
+        title: 'Préréglages',
+        description: [
+          notice ? `${ICONS.success} ${notice}\n` : null,
+          'Applique une configuration complète et **active** l\'AntiRaid. Le salon d\'alerte et la whitelist **sont conservés**.',
+        ],
+        fields: Object.values(PRESETS).map((p) => wide(p.emoji, p.label, p.description)),
+      }),
+    ],
+    components: [
+      navRow('presets'),
+      ...buttonRows(
+        ...Object.entries(PRESETS).map(([key, p]) => actionButton({ command: 'antiraid', action: 'preset', args: [key], label: p.label, emoji: p.emoji, style: key === 'equilibre' ? ButtonStyle.Primary : ButtonStyle.Secondary })),
+        backHome(),
+      ),
+    ],
+  };
+}
+
+/** Rend une vue à partir de son identifiant. */
+function render(client, guild, view = 'home', notice) {
+  const [name] = String(view).split(/[:.]/);
+  switch (name) {
+    case 'joins':
+      return joinsView(client, guild.id, notice);
+    case 'accounts':
+      return accountsView(client, guild.id, notice);
+    case 'destructive':
+      return destructiveView(client, guild.id, notice);
+    case 'alerts':
+      return alertsView(client, guild, notice);
+    case 'whitelist':
+      return whitelistView(client, guild, notice);
+    case 'presets':
+      return presetsView(notice);
+    default:
+      return homeView(client, guild.id, notice);
+  }
+}
+
+/** Ancien nom (panneau d'état) : l'accueil du tableau de bord. */
+function renderPanel(client, guildId, notice) {
+  return homeView(client, guildId, notice);
+}
+
+// ---------------------------------------------------------------- simulation
+
+/**
+ * Ce que ferait l'AntiRaid avec la configuration actuelle, sans rien exécuter.
+ * @param {object} c config `antiraid`
+ * @param {{ has?: (flag: bigint) => boolean } | null} perms permissions du bot (null : inconnues)
+ * @returns {{ lines: string[], warnings: string[] }}
+ */
+function simulate(c, perms, { alertChannelOk = true } = {}) {
+  const can = (flag) => !perms?.has || perms.has(flag);
+  const lines = [];
+  const warnings = [];
+  const sanction = (a) => (a === 'ban' ? 'banni' : 'expulsé');
+
+  lines.push(`🌊 **${c.joinThreshold}** arrivées en **${c.joinWindowSeconds} s** → ${c.action === 'lockdown' ? 'lockdown du serveur' : `chaque arrivant ${c.action === 'ban' ? 'banni' : 'expulsé'}`} + alerte.`);
+  lines.push(c.minAccountAgeDays
+    ? `🐣 Un compte créé il y a moins de **${c.minAccountAgeDays}** jour(s) serait **${sanction(newAccountAction(c))}** à son arrivée.`
+    : '🐣 Âge du compte non vérifié.');
+  lines.push(c.antiBot ? `🤖 Un bot ajouté hors whitelist serait **${sanction(newAccountAction(c))}**.` : '🤖 Les bots ajoutés sont acceptés.');
+  const destructive = [
+    c.channelDeleteThreshold && `${c.channelDeleteThreshold} salons supprimés`,
+    c.roleDeleteThreshold && `${c.roleDeleteThreshold} rôles supprimés`,
+    c.banThreshold && `${c.banThreshold} bannissements`,
+    c.kickThreshold && `${c.kickThreshold} expulsions`,
+  ].filter(Boolean);
+  lines.push(destructive.length
+    ? `💣 ${destructive.join(' ou ')} en **${c.destructiveWindowSeconds} s** → ${c.punishExecutor === 'none' ? 'alerte seule' : `auteur : ${EXECUTOR_LABELS[c.punishExecutor]?.toLowerCase()}`}.`
+    : '💣 Surveillance des actions destructrices désactivée.');
+
+  const needsKick = c.action === 'kick' || ((c.minAccountAgeDays || c.antiBot) && newAccountAction(c) === 'kick');
+  const needsBan = c.action === 'ban' || ((c.minAccountAgeDays || c.antiBot) && newAccountAction(c) === 'ban') || (destructive.length && c.punishExecutor === 'ban');
+  if (needsKick && !can(PermissionFlagsBits.KickMembers)) warnings.push('Il me manque **Expulser des membres**.');
+  if (needsBan && !can(PermissionFlagsBits.BanMembers)) warnings.push('Il me manque **Bannir des membres**.');
+  if (c.action === 'lockdown' && !can(PermissionFlagsBits.ManageChannels)) warnings.push('Il me manque **Gérer les salons** (lockdown).');
+  if (c.action === 'lockdown' && !can(PermissionFlagsBits.ManageRoles)) warnings.push('Il me manque **Gérer les rôles** (lockdown : permissions des salons).');
+  if (destructive.length && c.punishExecutor === 'strip' && !can(PermissionFlagsBits.ManageRoles)) warnings.push('Il me manque **Gérer les rôles** (retrait des rôles).');
+  if (destructive.length && !can(PermissionFlagsBits.ViewAuditLog)) warnings.push('Il me manque **Voir les logs du serveur** (détection des destructions).');
+  if (!alertChannelOk) warnings.push('Le salon d\'alerte est introuvable.');
+  if (!c.enabled) warnings.push('L\'AntiRaid est **désactivé** : rien de tout cela ne se produirait.');
+  return { lines, warnings };
+}
+
+function simulationCard(client, guild) {
+  const c = cfgOf(client, guild.id).antiraid;
+  const perms = guild.members?.me?.permissions ?? null;
+  const alertChannelOk = !c.alertChannel || !guild.channels?.cache || guild.channels.cache.has(c.alertChannel);
+  const { lines, warnings } = simulate(c, perms, { alertChannelOk });
+  return card({
+    tone: warnings.length ? 'warning' : 'success',
+    section: SECTION,
+    icon: '🧪',
+    title: 'Simulation de l\'AntiRaid',
+    description: [
+      warnings.length ? `${ICONS.warning} **${warnings.length}** point(s) à vérifier.` : `${ICONS.success} Tout est prêt : voici ce qui se passerait.`,
+      '',
+      ...lines,
+    ],
+    fields: [warnings.length ? wide(ICONS.warning, 'À vérifier', bullets(warnings)) : null],
+    footer: 'Simulation : aucune sanction ni alerte réelle',
+  });
+}
+
+// ---------------------------------------------------------------- formulaires
+
+function settingsModal(kind, c) {
+  if (kind === 'joins') {
+    return new ModalBuilder()
+      .setCustomId('cmd:antiraid:setsubmit:joins')
+      .setTitle('Vague d\'arrivées')
+      .addComponents(
+        input('joinThreshold', `Arrivées déclenchant l'alerte (${BOUNDS.joinThreshold.join(' à ')})`, { value: c.joinThreshold, max: 4, required: true }),
+        input('joinWindowSeconds', `Fenêtre en secondes (${BOUNDS.joinWindowSeconds.join(' à ')})`, { value: c.joinWindowSeconds, max: 4, required: true }),
+      );
+  }
+  if (kind === 'accounts') {
+    return new ModalBuilder()
+      .setCustomId('cmd:antiraid:setsubmit:accounts')
+      .setTitle('Comptes récents')
+      .addComponents(input('minAccountAgeDays', `Âge minimal du compte (jours, 0 à ${BOUNDS.minAccountAgeDays[1]})`, { value: c.minAccountAgeDays ?? 0, max: 4, required: true }));
+  }
+  return new ModalBuilder()
+    .setCustomId('cmd:antiraid:setsubmit:destructive')
+    .setTitle('Actions destructrices')
+    .addComponents(
+      input('channelDeleteThreshold', 'Salons supprimés (0 = désactivé, max 100)', { value: c.channelDeleteThreshold, max: 3 }),
+      input('roleDeleteThreshold', 'Rôles supprimés (0 = désactivé, max 100)', { value: c.roleDeleteThreshold, max: 3 }),
+      input('banThreshold', 'Bannissements (0 = désactivé, max 100)', { value: c.banThreshold, max: 3 }),
+      input('kickThreshold', 'Expulsions (0 = désactivé, max 100)', { value: c.kickThreshold ?? 0, max: 3 }),
+      input('destructiveWindowSeconds', 'Fenêtre en secondes (1 à 3600)', { value: c.destructiveWindowSeconds, max: 4 }),
+    );
+}
+
+const SETTING_FIELDS = {
+  joins: [['joinThreshold', 'Seuil'], ['joinWindowSeconds', 'Fenêtre']],
+  accounts: [['minAccountAgeDays', 'Âge minimal']],
+  destructive: [['channelDeleteThreshold', 'Salons supprimés'], ['roleDeleteThreshold', 'Rôles supprimés'], ['banThreshold', 'Bannissements'], ['kickThreshold', 'Expulsions'], ['destructiveWindowSeconds', 'Fenêtre']],
+};
+
+// ---------------------------------------------------------------- commande
 
 module.exports = {
   category: 'security',
+  cooldown: 3_000,
+  render,
+  renderPanel,
+  simulate,
+  PRESETS,
+  BOUNDS,
+  securHooks: { levelOpts, assertUnlocked, isBlacklisted, startGrants, journal },
   data: new SlashCommandBuilder()
     .setName('antiraid')
-    .setDescription('Configuration de l\'AntiRaid.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .setDMPermission(false)
-    .addSubcommand((s) => s.setName('enable').setDescription('Active l\'AntiRaid.'))
-    .addSubcommand((s) => s.setName('disable').setDescription('Désactive l\'AntiRaid.'))
-    .addSubcommand((s) => s.setName('status').setDescription('Affiche la configuration AntiRaid.'))
-    .addSubcommand((s) =>
-      s.setName('set').setDescription('Règle les paramètres AntiRaid.')
-        .addIntegerOption((o) => o.setName('join_seuil').setDescription('Nb d\'arrivées déclenchant une alerte').setMinValue(2))
-        .addIntegerOption((o) => o.setName('join_fenetre').setDescription('Fenêtre en secondes').setMinValue(1))
-        .addIntegerOption((o) => o.setName('age_min_jours').setDescription('Âge de compte minimal (jours)').setMinValue(0))
-        .addBooleanOption((o) => o.setName('anti_bot').setDescription('Sanctionner les bots ajoutés'))
-        .addStringOption((o) => o.setName('action').setDescription('Action sur détection').addChoices({ name: 'kick', value: 'kick' }, { name: 'ban', value: 'ban' }, { name: 'lockdown', value: 'lockdown' }))
-        .addChannelOption((o) => o.setName('alertes').setDescription('Salon d\'alertes').addChannelTypes(ChannelType.GuildText))),
+    .setDescription('Ouvre le tableau de bord de l\'AntiRaid : tout se configure depuis ici.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction, client) {
-    const sub = interaction.options.getSubcommand();
-    const { config } = client.services;
-    const guildId = interaction.guild.id;
+    guard(interaction);
+    await interaction.reply({ ...render(client, interaction.guild, 'home'), ephemeral: true });
+  },
 
-    if (sub === 'enable' || sub === 'disable') {
-      config.update(guildId, { antiraid: { enabled: sub === 'enable' } });
-      return interaction.reply(successReply(`AntiRaid **${sub === 'enable' ? 'activé' : 'désactivé'}**.`, { ephemeral: true }));
-    }
-    if (sub === 'status') {
-      const c = config.get(guildId).antiraid;
-      return interaction.reply({
-        embeds: [embeds.security('🛡️ AntiRaid').setDescription(
-          [
-            `État : **${c.enabled ? 'activé' : 'désactivé'}**`,
-            `Arrivées : **${c.joinThreshold}** / **${c.joinWindowSeconds}s**`,
-            `Âge min. compte : **${c.minAccountAgeDays}j**`,
-            `Anti-bot : **${c.antiBot ? 'oui' : 'non'}**`,
-            `Action : **${c.action}**`,
-            `Salon alertes : ${c.alertChannel ? `<#${c.alertChannel}>` : '—'}`,
-            `Seuils destructifs : ${c.channelDeleteThreshold} salons / ${c.roleDeleteThreshold} rôles / ${c.banThreshold} bans en ${c.destructiveWindowSeconds}s`,
-          ].join('\n'),
-        )],
-        ephemeral: true,
-      });
-    }
-    if (sub === 'set') {
+  buttons: {
+    /** Menu de navigation. */
+    async nav(interaction, client) {
+      guard(interaction);
+      await interaction.update(render(client, interaction.guild, interaction.values?.[0] ?? 'home'));
+    },
+    /** cmd:antiraid:go:<vue> */
+    async go(interaction, client, [view]) {
+      guard(interaction);
+      await interaction.update(render(client, interaction.guild, view ?? 'home'));
+    },
+    /** cmd:antiraid:toggle:<on|off> — interrupteur global. */
+    async toggle(interaction, client, [state]) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const before = Boolean(cfgOf(client, interaction.guildId).antiraid?.enabled);
+      const enabled = target(state, before);
+      client.services.config.update(interaction.guildId, { antiraid: { enabled } });
+      await interaction.update(render(client, interaction.guild, 'home', `AntiRaid **${enabled ? 'activé' : 'désactivé'}**.`));
+      if (before !== enabled) await journal(client, interaction, `AntiRaid **${enabled ? 'activé' : 'désactivé'}**.`, { disabled: !enabled, before: { antiraid: { enabled: before } }, after: { antiraid: { enabled } } });
+    },
+    /** cmd:antiraid:antibot:<on|off> */
+    async antibot(interaction, client, [state]) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const before = Boolean(cfgOf(client, interaction.guildId).antiraid?.antiBot);
+      const antiBot = target(state, before);
+      client.services.config.update(interaction.guildId, { antiraid: { antiBot } });
+      await interaction.update(render(client, interaction.guild, 'accounts', `Anti-bot **${antiBot ? 'activé' : 'désactivé'}**.`));
+      if (before !== antiBot) await journal(client, interaction, `Anti-bot : **${antiBot ? 'activé' : 'désactivé'}**.`, { before: { antiraid: { antiBot: before } }, after: { antiraid: { antiBot } } });
+    },
+    /** Menu : action en cas de vague. */
+    async action(interaction, client) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const action = interaction.values?.[0];
+      if (!own(WAVE_ACTIONS, action)) throw new UserError('Action inconnue.');
+      const previous = cfgOf(client, interaction.guildId).antiraid?.action ?? null;
+      const changed = previous !== action;
+      client.services.config.update(interaction.guildId, { antiraid: { action } });
+      await interaction.update(render(client, interaction.guild, 'joins', `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`));
+      if (changed) await journal(client, interaction, `Action en cas de vague : **${WAVE_ACTIONS[action].label}**.`, { before: { antiraid: { action: previous } }, after: { antiraid: { action } } });
+    },
+    /** Menu : sanction des comptes récents et bots. */
+    async newaccount(interaction, client) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const value = interaction.values?.[0];
+      if (!own(NEW_ACCOUNT_ACTIONS, value)) throw new UserError('Sanction inconnue.');
+      const previous = newAccountAction(cfgOf(client, interaction.guildId).antiraid);
+      const changed = previous !== value;
+      client.services.config.update(interaction.guildId, { antiraid: { newAccountAction: value } });
+      await interaction.update(render(client, interaction.guild, 'accounts', `Comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`));
+      if (changed) await journal(client, interaction, `Sanction des comptes récents et bots : **${NEW_ACCOUNT_ACTIONS[value].label}**.`, { before: { antiraid: { newAccountAction: previous } }, after: { antiraid: { newAccountAction: value } } });
+    },
+    /** Menu : sanction de l'auteur d'actions destructrices. */
+    async executor(interaction, client) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const punishExecutor = interaction.values?.[0];
+      if (!own(EXECUTOR_ACTIONS, punishExecutor)) throw new UserError('Sanction inconnue.');
+      const previous = cfgOf(client, interaction.guildId).antiraid?.punishExecutor ?? null;
+      const changed = previous !== punishExecutor;
+      client.services.config.update(interaction.guildId, { antiraid: { punishExecutor } });
+      await interaction.update(render(client, interaction.guild, 'destructive', `Sanction de l'auteur : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`));
+      if (changed) await journal(client, interaction, `Sanction de l'auteur d'actions destructrices : **${EXECUTOR_ACTIONS[punishExecutor].label}**.`, { before: { antiraid: { punishExecutor: previous } }, after: { antiraid: { punishExecutor } } });
+    },
+    /** cmd:antiraid:set:<joins|accounts|destructive> — ouvre le formulaire de réglages. */
+    async set(interaction, client, [kind]) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      if (!own(SETTING_FIELDS, kind)) throw new UserError('Réglage inconnu.');
+      await interaction.showModal(settingsModal(kind, cfgOf(client, interaction.guildId).antiraid));
+    },
+    /** cmd:antiraid:setsubmit:<joins|accounts|destructive> */
+    async setsubmit(interaction, client, [kind]) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const fields = own(SETTING_FIELDS, kind) ? SETTING_FIELDS[kind] : null;
+      if (!fields) throw new UserError('Réglage inconnu.');
       const patch = {};
-      const map = {
-        join_seuil: 'joinThreshold', join_fenetre: 'joinWindowSeconds', age_min_jours: 'minAccountAgeDays',
-      };
-      for (const [opt, key] of Object.entries(map)) {
-        const v = interaction.options.getInteger(opt);
-        if (v !== null) patch[key] = v;
+      for (const [key, label] of fields) {
+        const v = intField(interaction, key, key, label);
+        if (v !== undefined) patch[key] = v;
       }
-      const antiBot = interaction.options.getBoolean('anti_bot');
-      if (antiBot !== null) patch.antiBot = antiBot;
-      const action = interaction.options.getString('action');
-      if (action) patch.action = action;
-      const alerts = interaction.options.getChannel('alertes');
-      if (alerts) patch.alertChannel = alerts.id;
-      config.update(guildId, { antiraid: patch });
-      return interaction.reply(successReply('Paramètres AntiRaid mis à jour.', { ephemeral: true }));
-    }
+      if (!Object.keys(patch).length) throw new UserError('Aucune valeur saisie : rien n\'a été modifié.');
+      const cfgBefore = cfgOf(client, interaction.guildId);
+      assertSecurLimitRaise(client, interaction, cfgBefore, patch);
+      const before = { ...cfgBefore.antiraid };
+      client.services.config.update(interaction.guildId, { antiraid: patch });
+      const n = Object.keys(patch).length;
+      await interaction.update(render(client, interaction.guild, kind, `${n} paramètre${n > 1 ? 's' : ''} mis à jour.`));
+      const changes = fields.filter(([key]) => key in patch && patch[key] !== before[key]).map(([key, label]) => `${label} : ${before[key] ?? 0} → ${patch[key]}`);
+      if (changes.length) await journal(client, interaction, changes, { before: { antiraid: pick(before, Object.keys(patch)), ...securSlice(cfgBefore) }, after: { antiraid: { ...patch }, ...securSlice(cfgOf(client, interaction.guildId)) } });
+    },
+    /** Sélecteur du salon d'alerte (vide : logs sécurité seulement). */
+    async alertch(interaction, client) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const id = interaction.values?.[0] ?? null;
+      if (id) {
+        if (!/^\d{17,20}$/.test(id)) throw new UserError('Salon invalide.');
+        const ch = interaction.guild.channels?.cache?.get(id);
+        if (ch && ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(ch.type)) throw new UserError('Choisissez un salon textuel.');
+      }
+      const before = cfgOf(client, interaction.guildId).antiraid?.alertChannel ?? null;
+      client.services.config.update(interaction.guildId, { antiraid: { alertChannel: id } });
+      await interaction.update(render(client, interaction.guild, 'alerts', id ? `${ICONS.success} Alertes → <#${id}>.` : `${ICONS.success} Salon d'alerte retiré : les alertes vont dans les logs sécurité.`));
+      const where = (c) => (c ? `<#${c}>` : 'logs sécurité');
+      if (before !== id) await journal(client, interaction, `Salon d'alerte : ${where(before)} → ${where(id)}`, { before: { antiraid: { alertChannel: before } }, after: { antiraid: { alertChannel: id } } });
+    },
+    /** Envoie une alerte de test dans le salon d'alerte. */
+    async alerttest(interaction, client) {
+      guard(interaction);
+      const id = cfgOf(client, interaction.guildId).antiraid.alertChannel;
+      if (!id) throw new UserError('Aucun salon d\'alerte configuré.');
+      await interaction.deferUpdate();
+      const channel = interaction.guild.channels?.cache?.get(id) ?? (await interaction.guild.channels?.fetch?.(id).catch(() => null));
+      let ok = false;
+      if (channel?.send) {
+        ok = await channel
+          .send({
+            embeds: [card({ tone: 'info', section: SECTION, icon: '🧪', title: 'Alerte de test', description: 'Ce salon reçoit bien les alertes AntiRaid.', fields: [field(ICONS.user, 'Demandé par', `${interaction.user}`)] })],
+          })
+          .then(() => true, () => false);
+      }
+      await interaction.editReply(render(client, interaction.guild, 'alerts', ok ? `${ICONS.success} Alerte de test envoyée dans <#${id}>.` : `${ICONS.error} Impossible d'écrire dans <#${id}> : vérifiez mes permissions.`));
+    },
+    /** Sélecteur des membres whitelistés (remplace la sélection visible). */
+    async wlusers(interaction, client) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const cfg = cfgOf(client, interaction.guildId);
+      const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id));
+      const shown = new Set(whitelistDefaults(cfg, interaction.guild).users);
+      const hidden = (cfg.whitelist?.users ?? []).filter((id) => !shown.has(id));
+      const users = [...new Set([...picked, ...hidden])];
+      const previous = cfg.whitelist?.users ?? [];
+      const added = users.filter((id) => !previous.includes(id));
+      const black = added.filter((id) => isBlacklisted(client, interaction.guildId, id));
+      if (black.length) throw new UserError(`${black.map((id) => `<@${id}>`).join(', ')} : sur la blacklist de sécurité, ne peut pas être whitelisté.`);
+      client.services.config.update(interaction.guildId, { whitelist: { users } });
+      const grants = startGrants(client, interaction, added.map((id) => ({ kind: 'user', subjectId: id })));
+      const pendingNote = grants.pending ? ` ${ICONS.lock} ${added.length} ajout(s) **en attente d'approbation** : n'exempte(nt) pas encore.` : '';
+      await interaction.update(render(client, interaction.guild, 'whitelist', `${users.length} membre(s) whitelisté(s).${pendingNote}`));
+      await grants.done;
+      const diff = listDiff(previous, users, (id) => `<@${id}>`);
+      // Accès en attente : sa carte critique (Approuver / Révoquer) tient lieu d'alerte ; le journal reste un log.
+      if (diff) await journal(client, interaction, `Whitelist (membres) : ${diff}`, grants.pending ? { before: {}, after: {} } : { before: { whitelist: { users: previous } }, after: { whitelist: { users } } });
+    },
+    /** Sélecteur des rôles whitelistés (remplace la sélection visible ; rôles supprimés nettoyés). */
+    async wlroles(interaction, client) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const cfg = cfgOf(client, interaction.guildId);
+      const picked = (interaction.values ?? []).filter((id) => /^\d{17,20}$/.test(id) && id !== interaction.guildId);
+      // Rôle géré (Booster, rôle de bot) : n'importe qui l'obtient sans contrôle du serveur → immunité totale.
+      const managed = picked.filter((id) => managedRole(interaction.guild, id) || interaction.roles?.get?.(id)?.managed);
+      if (managed.length) {
+        throw new UserError(`${managed.map((id) => `<@&${id}>`).join(', ')} : rôle géré par une intégration (boost, bot…), il ne peut pas être whitelisté. Whitelistez plutôt le bot ou le membre concerné.`);
+      }
+      const shown = new Set(whitelistDefaults(cfg, interaction.guild).roles);
+      const cache = interaction.guild.roles?.cache;
+      // Rôles gérés d'une ancienne configuration : retirés au passage.
+      const hidden = (cfg.whitelist?.roles ?? []).filter((id) => !shown.has(id) && (!cache || cache.has(id)) && !managedRole(interaction.guild, id));
+      const roles = [...new Set([...picked, ...hidden])];
+      const previous = cfg.whitelist?.roles ?? [];
+      const added = roles.filter((id) => !previous.includes(id));
+      client.services.config.update(interaction.guildId, { whitelist: { roles } });
+      const grants = startGrants(client, interaction, added.map((id) => ({ kind: 'wlrole', subjectId: id })));
+      const pendingNote = grants.pending ? ` ${ICONS.lock} ${added.length} ajout(s) **en attente d'approbation** : n'exempte(nt) pas encore.` : '';
+      await interaction.update(render(client, interaction.guild, 'whitelist', `${roles.length} rôle(s) whitelisté(s).${pendingNote}`));
+      await grants.done;
+      const diff = listDiff(previous, roles, (id) => `<@&${id}>`);
+      if (diff) await journal(client, interaction, `Whitelist (rôles) : ${diff}`, grants.pending ? { before: {}, after: {} } : { before: { whitelist: { roles: previous } }, after: { whitelist: { roles } } });
+    },
+    /** cmd:antiraid:preset:<faible|equilibre|strict> */
+    async preset(interaction, client, [key]) {
+      guard(interaction);
+      assertUnlocked(client, interaction);
+      const preset = own(PRESETS, key) ? PRESETS[key] : null;
+      if (!preset) throw new UserError('Préréglage inconnu.');
+      const cfgBefore = cfgOf(client, interaction.guildId);
+      assertSecurLimitRaise(client, interaction, cfgBefore, preset.patch);
+      const current = cfgBefore.antiraid ?? {};
+      const changed = Object.entries(preset.patch).some(([k, v]) => current[k] !== v);
+      client.services.config.update(interaction.guildId, { antiraid: preset.patch });
+      await interaction.update(render(client, interaction.guild, 'home', `Préréglage ${preset.emoji} **${preset.label}** appliqué. Salon d'alerte et whitelist conservés.`));
+      if (changed) await journal(client, interaction, `Préréglage ${preset.emoji} **${preset.label}** appliqué (AntiRaid activé).`, { before: { antiraid: pick(current, Object.keys(preset.patch)), ...securSlice(cfgBefore) }, after: { antiraid: { ...preset.patch }, ...securSlice(cfgOf(client, interaction.guildId)) } });
+    },
+    /** Simulation sans effet : nouveau message éphémère (le tableau de bord reste en place). */
+    async simulate(interaction, client) {
+      guard(interaction);
+      await interaction.reply({ embeds: [simulationCard(client, interaction.guild)], ephemeral: true });
+    },
   },
 };

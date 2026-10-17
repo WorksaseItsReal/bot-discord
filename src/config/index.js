@@ -8,6 +8,19 @@ require('dotenv').config();
  * Les secrets ne vivent QUE dans le process.env (fichier .env non commité).
  */
 
+/**
+ * Nombre optionnel lu depuis l'environnement (ex : HEALTH_PORT).
+ * Renvoie `null` si absent, hors bornes ou non entier quand `integer` est demandé
+ * (la fonction correspondante reste alors désactivée).
+ */
+function parseNumberEnv(value, { min = 0, max = Number.MAX_SAFE_INTEGER, integer = true } = {}) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const n = Number(String(value).trim());
+  if (!Number.isFinite(n) || n < min || n > max) return null;
+  if (integer && !Number.isInteger(n)) return null;
+  return n;
+}
+
 function parseList(value) {
   if (!value) return [];
   return value
@@ -20,9 +33,47 @@ const config = {
   token: process.env.DISCORD_TOKEN || '',
   clientId: process.env.CLIENT_ID || '',
   devGuildId: process.env.DEV_GUILD_ID || '',
+  /**
+   * Serveur des commandes de portée « owner » (/bot) : enregistrées UNIQUEMENT sur ce serveur,
+   * jamais globalement. Vide = ces commandes ne sont déployées nulle part.
+   */
+  ownerGuildId: process.env.OWNER_GUILD_ID || '',
   ownerIds: parseList(process.env.OWNER_IDS),
+  /**
+   * Secur : les propriétaires du bot (OWNER_IDS) ont le niveau « propriétaire-bot » (exemptés,
+   * gestion des owners de sécurité) seulement si SECUR_TRUST_BOT_OWNERS=on. Coupé par défaut.
+   */
+  securTrustBotOwners: /^(on|true|1|oui|yes)$/i.test(String(process.env.SECUR_TRUST_BOT_OWNERS ?? '').trim()),
   databasePath: process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'gadget.sqlite'),
-  logLevel: process.env.LOG_LEVEL || 'info',
+  logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
+  /** `json` : une ligne JSON par entrée (agrégateurs de logs) ; sinon texte coloré. */
+  logFormat: (process.env.LOG_FORMAT || 'text').trim().toLowerCase(),
+  /** Port du serveur /healthz + /metrics (désactivé si non défini). */
+  healthPort: parseNumberEnv(process.env.HEALTH_PORT, { min: 0, max: 65535 }),
+  healthHost: process.env.HEALTH_HOST || '127.0.0.1',
+  /** Sauvegardes SQLite : dossier, rétention et intervalle automatique (heures, désactivé si non défini). */
+  dbBackupDir: process.env.DB_BACKUP_DIR || '',
+  dbBackupKeep: parseNumberEnv(process.env.DB_BACKUP_KEEP, { min: 1, max: 10_000 }) ?? 14,
+  dbBackupIntervalHours: parseNumberEnv(process.env.DB_BACKUP_INTERVAL_HOURS, { min: 0.1, max: 24 * 24, integer: false }),
+  /**
+   * Lecture des flux RSS (/flux) : seule fonction qui fait des requêtes HTTP sortantes.
+   * FEEDS_NETWORK=off la coupe (hébergement sans accès sortant, tests).
+   */
+  feedsNetwork: !/^(off|false|0|non|no)$/i.test(String(process.env.FEEDS_NETWORK ?? '').trim()),
+  /**
+   * Téléchargement de pièces jointes depuis le CDN de Discord (avatar et bannière du bot,
+   * fichier de /embed texte) : hôtes Discord uniquement. CDN_NETWORK=off le coupe.
+   */
+  cdnNetwork: !/^(off|false|0|non|no)$/i.test(String(process.env.CDN_NETWORK ?? '').trim()),
+  /** Présence du bot (statuts tournants, réglage global) : voir src/utils/presence.js. */
+  presenceStatuses: process.env.PRESENCE_STATUSES || '',
+  presenceIntervalMinutes: parseNumberEnv(process.env.PRESENCE_INTERVAL_MINUTES, { min: 1, max: 1440, integer: false }),
+  /**
+   * Intent GuildPresences (PRIVILÉGIÉ, désactivé par défaut) : PRESENCE_INTENT=on l'active pour le
+   * rôle soutien par statut personnalisé. Le cache des présences reste vide (mémoire) : le compteur
+   * « En ligne » de /compteurs n'est donc toujours pas proposé.
+   */
+  presenceIntent: /^(on|true|1|oui|yes)$/i.test(String(process.env.PRESENCE_INTENT ?? '').trim()),
   env: process.env.NODE_ENV || 'development',
   version: require('../../package.json').version,
   colors: {
@@ -33,6 +84,9 @@ const config = {
     info: 0x5865f2,
     moderation: 0xeb459e,
     security: 0xe67e22,
+    fun: 0xf47fff,
+    utility: 0x1abc9c,
+    projects: 0x5865f2,
   },
   emojis: {
     success: '✅',
@@ -56,4 +110,4 @@ function validate(opts = {}) {
   return errors;
 }
 
-module.exports = { config, validate, parseList };
+module.exports = { config, validate, parseList, parseNumberEnv };

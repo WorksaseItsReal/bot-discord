@@ -49,6 +49,7 @@ function assertCanModerate(moderator, target, me, opts = {}) {
   if (!canActOnByHierarchy(actorInfo, targetInfo)) {
     throw new UserError(`Vous ne pouvez pas ${action} ce membre : son rôle est supérieur ou égal au vôtre.`);
   }
+  assertRankAllows(moderator, target, me, action);
 
   // Le bot doit aussi être au-dessus de la cible
   const botInfo = {
@@ -60,4 +61,24 @@ function assertCanModerate(moderator, target, me, opts = {}) {
   }
 }
 
-module.exports = { canActOnByHierarchy, assertCanModerate };
+/**
+ * Rangs de /permissions (cibles protégées) : refus si le rang de la cible dépasse celui de
+ * l'auteur, et toute action sur un rang 4 ou plus (owner de sécurité) si l'auteur n'est pas de
+ * rang 5 (propriétaire). Le bot lui-même (AutoMod, escalades automatiques) n'est pas concerné.
+ * Sans service de niveaux (tests, client partiel) : rien.
+ */
+function assertRankAllows(moderator, target, me, action) {
+  if (!moderator || moderator.id === me?.id || moderator.user?.bot) return;
+  const ranks = moderator.client?.services?.permissions ?? target.client?.services?.permissions;
+  if (typeof ranks?.rankOf !== 'function') return;
+  const actorRank = ranks.rankOf(moderator);
+  const targetRank = ranks.rankOf(target);
+  if (targetRank >= 4 && actorRank < 5) {
+    throw new UserError(`Impossible de ${action} ce membre : c'est un owner de sécurité. Seul le propriétaire du serveur le peut.`);
+  }
+  if (targetRank > actorRank) {
+    throw new UserError(`Vous ne pouvez pas ${action} ce membre : son niveau de permissions (${targetRank}) est supérieur au vôtre (${actorRank}).`);
+  }
+}
+
+module.exports = { canActOnByHierarchy, assertCanModerate, assertRankAllows };

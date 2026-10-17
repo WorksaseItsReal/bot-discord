@@ -41,8 +41,9 @@ class ReminderRepository {
     return this.deleteStmt.run(id, userId).changes > 0;
   }
 
+  /** @returns {boolean} true si une ligne a été supprimée */
   deleteById(id) {
-    this.deleteByIdStmt.run(id);
+    return this.deleteByIdStmt.run(id).changes > 0;
   }
 }
 

@@ -12,6 +12,8 @@
 
 ```
 Discord → events/interactionCreate.js
+        → hardenInteraction() (core/interactionSafety.js) : réponses sûres, embeds tronqués
+        → preflight : serveur uniquement ? permissions du bot ? cooldown ?
         → client.commands.get(name).execute(interaction, client)
             → services.* (logique métier)
                 → repositories.* (SQLite)
@@ -41,7 +43,22 @@ Discord → events/interactionCreate.js
 ## Gestion des erreurs
 
 - `UserError` : erreur attendue et sûre à montrer (permission, hiérarchie, cible invalide…). Affichée telle quelle.
-- Toute autre erreur : loggée avec stack, réponse générique à l'utilisateur, **jamais** de crash (handlers `unhandledRejection` / `uncaughtException`).
+- Erreur de l'API Discord connue (`core/apiErrors.js`) : message français explicite (permissions, membre parti…).
+- Toute autre erreur : loggée avec stack et un **code de référence** affiché à l'utilisateur, **jamais** de crash (handlers `unhandledRejection` / `uncaughtException`, écouteur `error` du client).
+
+## Contrat d'une commande
+
+```js
+module.exports = {
+  data: new SlashCommandBuilder()...,   // validé au chargement + par tests/commands.registry.test.js
+  guildOnly: false,                     // optionnel : autorise les MP (défaut : serveur uniquement)
+  cooldown: 5_000,                      // optionnel : ms entre deux usages par membre (défaut 2 s)
+  botPermissions: [PermissionFlagsBits.ManageChannels], // optionnel : vérifiées avant exécution
+  ownerOnly: true,                      // optionnel : réservé à OWNER_IDS
+  async execute(interaction, client) {},
+  async autocomplete(interaction, client) {}, // requis si une option a setAutocomplete(true)
+};
+```
 
 ## Composants & thème
 
