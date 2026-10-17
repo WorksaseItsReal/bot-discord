@@ -448,6 +448,22 @@ async function applyFix(guild, plan, reason) {
   return out;
 }
 
+/**
+ * Les réponses REST de discord.js ne mettent pas le cache à jour (rôle, serveur : c'est la
+ * passerelle qui le fait) : la vue recalculée attend que le plan change, 2 s au plus.
+ */
+async function waitForCache(guild, recompute, plan, { timeout = 2_000, step = 50 } = {}) {
+  const before = JSON.stringify(plan.changes);
+  const until = Date.now() + timeout;
+  for (let i = 0; Date.now() < until; i += 1) {
+    const next = recompute();
+    if (!next || JSON.stringify(next.changes) !== before) return true;
+    // Les événements de la passerelle arrivent en général dans les tours suivants de la boucle.
+    await new Promise((resolve) => (i < 20 ? setImmediate(resolve) : setTimeout(resolve, step)));
+  }
+  return false;
+}
+
 /** Carte du log server.securityFix. Pure. */
 function fixLogCard(plan, user, res) {
   return card({
@@ -532,6 +548,7 @@ module.exports = {
         }
         const reason = truncate(`Audit de sécurité par ${interaction.user.tag ?? interaction.user.username ?? interaction.user.id}`, 400);
         const res = await applyFix(guild, plan, reason);
+        if (res.done) await waitForCache(guild, () => fixPlan(guild, client.services.config.get(guild.id), id, { groups: analyze(guild, client.services.config.get(guild.id)) }), plan);
         const notice = res.failed
           ? `${ICONS.warning} « ${def.label} » : ${res.done} modification(s), ${res.failed} échec(s).`
           : `${ICONS.success} « ${def.label} » : ${res.done} modification(s) appliquée(s).`;
