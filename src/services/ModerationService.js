@@ -8,7 +8,7 @@ const { card, field, wide, ICONS, userLine, subtext, buttonRows, deleteButton, a
 const { permissionLabel } = require('../utils/permissionNames');
 const { snowflake, SNOWFLAKE } = require('../utils/buttonGuard');
 const { UserError } = require('../core/errors');
-const { sanctionState } = require('../database/repositories/SanctionRepository');
+const { sanctionState, awaitingLift } = require('../database/repositories/SanctionRepository');
 const { createLogger } = require('../core/logger');
 
 const logger = createLogger('moderation');
@@ -862,7 +862,8 @@ class ModerationService {
    */
   async lift(guild, sanction, moderator, reason) {
     const lift = LIFTS[sanction?.type];
-    if (!lift || sanctionState(sanction) !== 'active') throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
+    // Échue mais pas encore levée (levée automatique en attente ou en échec) : levable aussi.
+    if (!lift || (sanctionState(sanction) !== 'active' && !awaitingLift(sanction))) throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
     const userId = sanction.user_id;
     if (lift.type === 'unban') {
       if (!guild.members?.me?.permissions?.has(PermissionFlagsBits.BanMembers)) {

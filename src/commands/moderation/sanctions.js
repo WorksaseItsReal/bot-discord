@@ -16,7 +16,7 @@ const { TYPE_LABELS, SANCTIONS, LIFTS, MAX_REASON, normalizeReason, sanctionIcon
 const { snowflake } = require('../../utils/buttonGuard');
 const { UserError } = require('../../core/errors');
 const { confirm } = require('../../utils/confirmation');
-const { isEnforced, sanctionState } = require('../../database/repositories/SanctionRepository');
+const { isEnforced, awaitingLift, sanctionState } = require('../../database/repositories/SanctionRepository');
 
 /**
  * /sanctions : gestion des sanctions (« cases ») et des notes de modération.
@@ -59,7 +59,9 @@ function enforcedRefusal(sanctions) {
   if (!sanctions.length) return null;
   const lines = sanctions.map((s) => {
     const label = TYPE_LABELS[s.type] ?? s.type;
-    const until = s.expires_at ? ` jusqu'au ${discordTimestamp(s.expires_at, 'f')}` : '';
+    const until = awaitingLift(s)
+      ? ` échue, **levée en attente**`
+      : s.expires_at ? ` jusqu'au ${discordTimestamp(s.expires_at, 'f')}` : '';
     const lift = LIFT_COMMANDS[s.type] ? `levez-la d'abord avec ${LIFT_COMMANDS[s.type]}` : 'levez-la d\'abord';
     return `• ${code(`#${s.id}`)} **${label}**${until} → ${lift}`;
   });
@@ -72,7 +74,7 @@ function enforcedRefusal(sanctions) {
 function sanctionLine(s, now = Date.now()) {
   const label = TYPE_LABELS[s.type] ?? s.type;
   const state = sanctionState(s, now);
-  const badge = state === 'active' ? ' · 🟢 En cours' : state === 'revoked' ? ` · ${ICONS.unlock} Levée` : state === 'expired' ? ` · ${ICONS.expires} Expirée` : '';
+  const badge = state === 'active' ? ' · 🟢 En cours' : state === 'revoked' ? ` · ${ICONS.unlock} Levée` : state === 'expired' ? ` · ${ICONS.expires} Expirée${awaitingLift(s, now) ? ' (levée en attente)' : ''}` : '';
   const head = `${sanctionIcon(s.type)} **${label}** ${code(`#${s.id}`)} · ${discordTimestamp(s.created_at, 'd')}${badge}`;
   const details = [
     `par <@${s.moderator_id}>`,
@@ -157,14 +159,16 @@ function caseView(client, guild, id, notice) {
   const editCount = edits.length ? repo.countEdits(guild.id, s.id) : 0;
   const notes = notesRepo?.listBySanction(guild.id, s.id, 5) ?? [];
   const noteCount = notes.length ? notesRepo.countBySanction(guild.id, s.id) : 0;
-  const lift = state === 'active' ? LIFTS[s.type] : null;
+  // Échue mais pas encore levée (levée automatique en attente ou en échec) : « Lever » reste proposé.
+  const pending = awaitingLift(s);
+  const lift = state === 'active' || pending ? LIFTS[s.type] : null;
 
   const stateText = {
     active: s.expires_at ? `Prend fin ${discordTimestamp(s.expires_at, 'R')}.` : s.type === 'ban' ? 'Définitive, jusqu\'à un débannissement.' : 'Sans échéance, jusqu\'à sa levée.',
     revoked: s.revoked_at ? `Levée ${discordTimestamp(s.revoked_at, 'R')}${s.revoked_by ? ` par <@${s.revoked_by}>` : ' automatiquement'}.` : 'Levée avant son échéance.',
     expired: s.expires_at ? `Arrivée à échéance ${discordTimestamp(s.expires_at, 'R')}.` : 'Arrivée à échéance.',
     done: 'Sanction ponctuelle, sans durée.',
-  }[state];
+  }[state] + (pending ? ' La **levée automatique est en attente** : la sanction est toujours appliquée.' : '');
 
   const duration = s.duration_ms ? `**${formatDuration(s.duration_ms)}**` : s.type === 'ban' || s.type === 'mute' ? 'Définitive' : null;
   const revokedField =
@@ -514,7 +518,8 @@ module.exports = {
       if (!sanction) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
       // Effacer une trace de modération : l'auteur de la sanction ou « Gérer le serveur ».
       assertCanEdit(interaction, sanction, 'la supprimer');
-      const refusal = isEnforced(sanction) ? enforcedRefusal([sanction]) : null;
+      // En vigueur, ou échue mais pas encore levée (ban / rôle Muted toujours en place).
+      const refusal = isEnforced(sanction) || awaitingLift(sanction) ? enforcedRefusal([sanction]) : null;
       if (refusal) throw new UserError(refusal);
       if (!repo.delete(guildId, id)) throw new UserError(`Aucune sanction ${code(`#${id}`)} trouvée sur ce serveur.`);
       const fields = [
@@ -558,7 +563,8 @@ module.exports = {
       requirePermission(interaction, 'ManageGuild');
       const user = interaction.options.getUser('membre');
       const refuseIfEnforced = () => {
-        const refusal = enforcedRefusal(repo.listEnforced(guildId, user.id));
+        const pending = repo.listActive(guildId, user.id).filter((s) => awaitingLift(s));
+        const refusal = enforcedRefusal([...repo.listEnforced(guildId, user.id), ...pending]);
         if (refusal) throw new UserError(refusal);
       };
       refuseIfEnforced();
@@ -699,7 +705,7 @@ module.exports = {
       guard(interaction);
       const s = getSanction(client, interaction.guildId, parseId(rawId));
       const lift = LIFTS[s.type];
-      if (!lift || sanctionState(s) !== 'active') throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
+      if (!lift || (sanctionState(s) !== 'active' && !awaitingLift(s))) throw new UserError('Cette sanction n\'est plus en vigueur : il n\'y a rien à lever.');
       requirePermission(interaction, lift.permission);
       await interaction.deferUpdate();
       await client.services.moderation.lift(interaction.guild, s, interaction.member, `Levée via la fiche #${s.id} par ${interaction.user.tag ?? interaction.user.username}`);

@@ -10,6 +10,10 @@ const assert = require('node:assert/strict');
 const { PermissionFlagsBits: P } = require('discord.js');
 const { createHarness, IDS } = require('./harness');
 const { nextId } = require('./lib/ids');
+const { freshMember } = require('./lib/overrides');
+
+const opt = (name, type, value) => ({ name, type, value });
+const sub = (name, options = []) => [{ name, type: 1, options }];
 
 const can = (h, userId, channelId, flag = P.SendMessages) => (BigInt(h.permissionsIn(userId, channelId)) & flag) === flag;
 const overwritesOf = (h, channelId) => JSON.parse(JSON.stringify(h.fake.channels.get(channelId).permission_overwrites))
@@ -156,6 +160,45 @@ test('R11 /lock duree échu pendant un lockdown : les surcharges de rôle neutra
     assert.equal(can(h, IDS.users.target, general), false, 'salon rouvert pendant le lockdown');
     await h.slash('unlockall', [], { as: 'admin' });
     assert.deepEqual(overwritesOf(h, general), before, 'surcharge du rôle Membre perdue après la levée');
+    assert.equal(h.problemCount(), 0, h.formatProblems());
+  } finally {
+    await h.close();
+  }
+});
+
+test('R12 tempban échu dont la levée a échoué : /sanctions remove et clear refusent, la fiche propose « Lever »', async () => {
+  const h = await createHarness();
+  h.configureAll();
+  h.configure({ moderation: { confirmDangerous: false } });
+  try {
+    const victim = await freshMember(h, 'Victime');
+    await h.slash('tempban', [opt('membre', 6, victim), opt('duree', 3, '1h')], { as: 'mod' });
+    assert.ok(h.fake.bans.has(victim));
+    const db = h.client.database.db;
+    const row = db.prepare("SELECT id FROM sanctions WHERE user_id = ? AND type = 'tempban'").get(victim);
+    db.prepare('UPDATE sanctions SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, row.id);
+    // Débannissement automatique refusé une fois (permission retirée un moment).
+    h.fake.inject({ method: 'DELETE', route: /\/bans\// }, { status: 403, code: 50013, times: 1 });
+    await h.client.services.scheduler.tick();
+    await h.settle();
+    assert.ok(h.fake.bans.has(victim));
+
+    const rm = await h.slash('sanctions', sub('remove', [opt('id', 4, row.id)]), { as: 'mod' });
+    assert.ok(h.isError(rm), `suppression acceptée : ${h.replyText(rm)}`);
+    assert.match(h.replyText(rm), /levée|lever/i);
+    const clear = await h.slash('sanctions', sub('clear', [opt('membre', 6, victim)]), { as: 'admin' });
+    assert.ok(h.isError(clear), `casier effacé : ${h.replyText(clear)}`);
+    assert.ok(db.prepare('SELECT id FROM sanctions WHERE id = ?').get(row.id), 'ligne supprimée');
+
+    const view = await h.slash('sanctions', sub('voir', [opt('id', 4, row.id)]), { as: 'mod' });
+    assert.match(h.replyText(view), /en attente/i);
+    const card = h.messagesOf(view)[0];
+    const liftId = `cmd:sanctions:lift:${row.id}`;
+    assert.ok(h.findComponent(card, liftId), 'bouton « Lever » absent de la fiche d\'une sanction échue non levée');
+    const lifted = await h.click(card, liftId, { as: 'mod' });
+    assert.ok(!h.isError(lifted), h.replyText(lifted));
+    assert.equal(h.fake.bans.has(victim), false, 'toujours banni après « Lever »');
+    assert.equal(db.prepare('SELECT active FROM sanctions WHERE id = ?').get(row.id).active, 0);
     assert.equal(h.problemCount(), 0, h.formatProblems());
   } finally {
     await h.close();
