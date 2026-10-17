@@ -137,6 +137,31 @@ class AnnouncementService {
   }
 
   /**
+   * @everyone publié à l'échéance par le bot, au nom de l'auteur : hors de portée de l'écouteur
+   * Secur (messages du bot ignorés). Le module everyone doit toujours l'autoriser (activé depuis
+   * la programmation, auteur sorti de la whitelist) : sinon, l'annonce n'est pas publiée.
+   * @returns {string|null} raison du refus (définitif), ou null
+   */
+  #securIssue(guild, row) {
+    const secur = this.client.services?.secur;
+    if (row.role_id !== guild.id || typeof secur?.assertAllowed !== 'function') return null;
+    const member = guild.members?.cache?.get(row.author_id) ?? null;
+    try {
+      secur.assertAllowed({ guild, user: member?.user ?? { id: row.author_id }, member }, 'everyone');
+      return null;
+    } catch (e) {
+      if (!e?.isUserError) throw e;
+      return 'mention @everyone bloquée par la sécurité (module « Mentions @everyone » de /secur)';
+    }
+  }
+
+  /** Signale à Secur un @everyone publié pour l'auteur (best-effort, jamais bloquant). */
+  async #reportEveryone(guild, row) {
+    if (row.role_id !== guild.id || !row.author_id) return;
+    await this.client.services?.moderation?.reportDestructiveAction?.(guild, { id: row.author_id }, 'everyone');
+  }
+
+  /**
    * Publie une annonce. @returns {Promise<{ ok: true } | { ok: false, permanent: boolean, reason: string }>}
    */
   async publish(guild, row) {
@@ -214,7 +239,7 @@ class AnnouncementService {
     // Occurrence suivante calculée AVANT l'envoi : si le calcul échoue, rien n'est publié
     // (sinon l'annonce, jamais marquée envoyée, repartirait à chaque tick).
     const next = nextAfter(fresh.anchor_at, fresh.repeat, fresh.time_zone, fresh.runs, Date.now());
-    const mentionIssue = await this.#authorMentionIssue(guild, fresh);
+    const mentionIssue = await this.#authorMentionIssue(guild, fresh) ?? this.#securIssue(guild, fresh);
     if (mentionIssue) return this.#disable(guild, fresh, mentionIssue);
     if (!this.repo.reserve(fresh.id)) return; // « Envoyer maintenant » en cours
     let result;
@@ -230,6 +255,7 @@ class AnnouncementService {
       const upcoming = next && next.at <= now ? nextAfter(fresh.anchor_at, fresh.repeat, fresh.time_zone, next.runs, now) : next;
       this.repo.markSent(fresh.id, { now, nextRun: upcoming?.at ?? null, runs: upcoming?.runs ?? fresh.runs + 1 });
       logger.info(`Annonce #${fresh.id} publiée (serveur ${guild.id})${upcoming ? `, prochaine ${new Date(upcoming.at).toISOString()}` : ''}.`);
+      await this.#reportEveryone(guild, fresh);
       return;
     }
     this.repo.release(fresh.id);

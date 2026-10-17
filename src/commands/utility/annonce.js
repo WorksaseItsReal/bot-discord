@@ -174,6 +174,14 @@ function permsIn(interaction, channelId) {
   return interaction.member && typeof channel?.permissionsFor === 'function' ? channel.permissionsFor(interaction.member) : interaction.memberPermissions;
 }
 
+/**
+ * @everyone publié PAR LE BOT pour l'auteur : hors de portée de l'écouteur Secur (messages du bot
+ * ignorés). Pré-contrôle du module everyone, comme /embed texte (UserError si refus).
+ */
+function assertEveryoneAllowed(client, interaction, roleId) {
+  if (roleId && roleId === interaction.guildId) client.services.secur?.assertAllowed?.(interaction, 'everyone');
+}
+
 /** Brouillon de l'auteur, ou UserError. */
 function ownDraft(client, interaction, id) {
   const row = /^\d{1,10}$/.test(id ?? '') ? client.repositories.announcements.get(interaction.guildId, Number(id)) : null;
@@ -221,6 +229,7 @@ module.exports = {
     if (!REPEATS[repeat]) throw new UserError('Répétition inconnue.');
     const role = interaction.options.getRole('role');
     assertMentionAllowed(guild, role?.id ?? null, permsIn(interaction, channel.id));
+    assertEveryoneAllowed(client, interaction, role?.id ?? null);
     if (client.repositories.announcements.countScheduled(guild.id) >= MAX_SCHEDULED) {
       throw new UserError(`${MAX_SCHEDULED} annonces programmées au maximum : supprimez-en une avec \`/annonce liste\`.`);
     }
@@ -254,6 +263,7 @@ module.exports = {
       const draft = ownDraft(client, interaction, id);
       assertChannel(interaction, draft.channel_id);
       assertMentionAllowed(interaction.guild, draft.role_id, permsIn(interaction, draft.channel_id));
+      assertEveryoneAllowed(client, interaction, draft.role_id);
       const repo = client.repositories.announcements;
       if (repo.countScheduled(interaction.guildId) >= MAX_SCHEDULED) throw new UserError(`${MAX_SCHEDULED} annonces programmées au maximum.`);
       let runAt = draft.next_run;
@@ -301,16 +311,21 @@ module.exports = {
         throw new UserError(`Vous ne pouvez pas écrire dans <#${row.channel_id}> : vous ne pouvez pas y publier cette annonce.`);
       }
       assertMentionAllowed(interaction.guild, row.role_id, perms);
+      // Publication immédiate : contrôlée au nom de celui qui clique.
+      assertEveryoneAllowed(client, interaction, row.role_id);
       await interaction.deferUpdate();
       let notice;
+      let sent = false;
       try {
         const after = await client.services.announcements.sendNow(interaction.guild, row.id, interaction.user);
+        sent = true;
         notice = `${ICONS.success} Annonce \`#${row.id}\` publiée dans <#${row.channel_id}>${after?.status === 'done' ? ' (envoi unique : terminée)' : ''}.`;
       } catch (e) {
         if (!e?.isUserError) throw e;
         notice = `${ICONS.error} ${e.message}`;
       }
       await interaction.editReply(listView(client, interaction.guild, Number(page) || 0, notice));
+      if (sent && row.role_id === interaction.guildId) await client.services.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'everyone');
     },
 
     /** cmd:annonce:adelete:<id>:<page> */

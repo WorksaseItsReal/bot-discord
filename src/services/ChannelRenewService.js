@@ -2,6 +2,7 @@
 
 const { ChannelType, PermissionFlagsBits, PermissionsBitField, ChannelFlags } = require('discord.js');
 const channelRemap = require('../utils/channelRemap');
+const nativeAutoMod = require('./NativeAutoMod');
 const { permissionLabel } = require('../utils/permissionNames');
 const { UserError } = require('../core/errors');
 const { createLogger } = require('../core/logger');
@@ -112,13 +113,18 @@ function hasRow(db, table, where, ...params) {
   return Boolean(db.prepare(`SELECT 1 FROM "${table}" WHERE ${where} LIMIT 1`).get(...params));
 }
 
-/** Permissions accordées par les surcharges que le bot ne possède pas (noms de flags). Pur. */
+/**
+ * Permissions des surcharges que la copie ne pourrait pas recopier (noms de flags). À la création
+ * d'un salon, Discord n'accepte que les permissions que le bot possède, qu'elles soient ACCORDÉES
+ * ou REFUSÉES, et « Gérer les permissions » (bit ManageRoles) dans une surcharge est réservé à un
+ * bot Administrateur : sinon, 50013 après la confirmation forte. Pur.
+ */
 function missingGrantedPermissions(overwrites, botPerms) {
   const have = new PermissionsBitField(botPerms ?? 0n);
   if (have.has(PermissionFlagsBits.Administrator)) return [];
-  let granted = 0n;
-  for (const o of overwrites) granted |= BigInt(o.allow?.bitfield ?? o.allow ?? 0n);
-  return new PermissionsBitField(granted).toArray().filter((flag) => !have.has(PermissionsBitField.Flags[flag]));
+  let touched = 0n;
+  for (const o of overwrites) touched |= BigInt(o.allow?.bitfield ?? o.allow ?? 0n) | BigInt(o.deny?.bitfield ?? o.deny ?? 0n);
+  return new PermissionsBitField(touched).toArray().filter((flag) => flag === 'ManageRoles' || !have.has(PermissionsBitField.Flags[flag]));
 }
 
 /**
@@ -271,7 +277,8 @@ class ChannelRenewService {
       }
       const missing = missingGrantedPermissions(overwrites, botPerms.bitfield);
       if (missing.length) {
-        throw new UserError(`Les permissions de ce salon accordent des droits que je n'ai pas : ${missing.slice(0, 6).map((f) => `**${permissionLabel(f)}**`).join(', ')}${missing.length > 6 ? '…' : ''}.`);
+        const manage = missing.includes('ManageRoles') ? ' (« Gérer les permissions » dans un salon ne se recopie que si je suis Administrateur)' : '';
+        throw new UserError(`Les permissions de ce salon accordent ou refusent des droits que je n'ai pas : ${missing.slice(0, 6).map((f) => `**${permissionLabel(f)}**`).join(', ')}${missing.length > 6 ? '…' : ''}${manage}.`);
       }
     }
   }
@@ -386,6 +393,17 @@ class ChannelRenewService {
           notes.push('Message épinglé (sticky) non republié : relancez /sticky.');
           logger.debug('Sticky non republié :', e?.message);
         }
+      }
+
+      // Règles AutoMod natives de Discord : figées à la dernière synchronisation, elles visent
+      // encore l'ancien identifiant (salon exempté, salon d'alerte) alors que le bilan annonce
+      // l'AutoMod reporté → rebranchées sur la copie (seul l'identifiant change).
+      if (report?.configPaths?.some((p) => p.startsWith('automod.') || p === 'logChannels.automod')) {
+        const remapped = await nativeAutoMod.remapChannel(guild, source.id, created.id).catch((e) => {
+          logger.debug('Règles AutoMod natives non rebranchées :', e?.message);
+          return null;
+        });
+        if (!remapped || remapped.failed) notes.push('Règles AutoMod natives de Discord non rebranchées sur la copie : /automod → AutoMod de Discord → Synchroniser.');
       }
 
       // 6. Salon système / AFK du serveur.

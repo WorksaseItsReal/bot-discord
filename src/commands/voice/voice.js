@@ -61,6 +61,21 @@ function canActOn(interaction, member) {
   }
 }
 
+/**
+ * Déconnexions vocales faites PAR LE BOT pour l'auteur : signées du bot dans le journal d'audit
+ * (27), elles échapperaient au module Secur voiceKick. Pré-contrôle AVANT (UserError si `count`
+ * déconnexions atteindraient le seuil), puis signalement après coup au nom de l'auteur. Se
+ * déconnecter soi-même ne compte pas (aucune entrée d'audit quand on le fait à la main). Les
+ * déplacements (move, rassembler) ne sont pas comptés par le module (SECUR_MODULES : audit 27 seul).
+ */
+function preCheckDisconnects(client, interaction, count) {
+  if (count > 0) client?.services?.secur?.assertAllowed?.(interaction, 'voiceKick', { count });
+}
+
+async function reportDisconnects(client, interaction, count) {
+  if (count > 0) await client?.services?.moderation?.reportDestructiveAction?.(interaction.guild, interaction.user, 'voiceKick', { count });
+}
+
 /** Membre connecté en vocal, ou erreur claire. */
 async function voiceMember(guild, userId) {
   const member = await guild.members.fetch(userId).catch(() => null);
@@ -374,7 +389,7 @@ module.exports = {
         .addChannelOption((o) => o.setName('depuis').setDescription('Ne vider que ce salon (par défaut : tous les vocaux)').addChannelTypes(ChannelType.GuildVoice))
         .addBooleanOption((o) => o.setName('bots').setDescription('Déplacer aussi les bots (non par défaut)'))),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
     const ownerId = interaction.user.id;
 
@@ -383,19 +398,22 @@ module.exports = {
     if (sub === 'cleanup') {
       const channel = interaction.options.getChannel('salon');
       assertCanActIn(interaction, interaction.guild.channels?.cache?.get(channel.id) ?? channel, PermissionFlagsBits.MoveMembers, 'déconnecter des membres');
+      // Membres au rôle supérieur ou égal (ou propriétaire, ou le bot) : ignorés.
+      const targets = [...channel.members.values()].filter((m) => canActOn(interaction, m));
+      const protectedCount = channel.members.size - targets.length;
+      const others = (list) => list.filter((m) => m.id !== interaction.user.id).length;
+      preCheckDisconnects(client, interaction, others(targets));
       await interaction.deferReply({ ephemeral: true });
       let n = 0;
       let failed = 0;
-      let protectedCount = 0;
-      for (const m of channel.members.values()) {
-        // Membres au rôle supérieur ou égal (ou propriétaire, ou le bot) : ignorés.
-        if (!canActOn(interaction, m)) {
-          protectedCount += 1;
-          continue;
-        }
-        await m.voice.disconnect(`Cleanup vocal par ${interaction.user.tag}`).then(() => (n += 1)).catch(() => (failed += 1));
+      const done = [];
+      for (const m of targets) {
+        await m.voice.disconnect(`Cleanup vocal par ${interaction.user.tag}`).then(() => {
+          n += 1;
+          done.push(m);
+        }).catch(() => (failed += 1));
       }
-      return interaction.editReply({
+      await interaction.editReply({
         embeds: [
           card({
             tone: n ? 'caution' : 'neutral',
@@ -414,6 +432,7 @@ module.exports = {
           }),
         ],
       });
+      return reportDisconnects(client, interaction, others(done));
     }
 
     const user = interaction.options.getUser('membre');
@@ -434,8 +453,10 @@ module.exports = {
       assertCanActOn(interaction, member, 'déconnecter');
       const from = member.voice.channel;
       assertCanActIn(interaction, from, PermissionFlagsBits.MoveMembers, 'déconnecter des membres');
+      const counted = member.id === interaction.user.id ? 0 : 1;
+      preCheckDisconnects(client, interaction, counted);
       await member.voice.disconnect(`Par ${interaction.user.tag}`);
-      return interaction.reply({
+      await interaction.reply({
         embeds: [
           card({
             tone: 'caution',
@@ -447,6 +468,7 @@ module.exports = {
           }),
         ],
       });
+      return reportDisconnects(client, interaction, counted);
     }
     if (sub === 'mute' || sub === 'unmute') {
       requirePermission(interaction, PermissionFlagsBits.MuteMembers, 'Couper le micro des membres');
