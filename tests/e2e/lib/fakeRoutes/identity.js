@@ -13,6 +13,11 @@ const DATA_URI = /^data:image\/[a-z]+;base64,[A-Za-z0-9+/]+=*$/;
 
 module.exports = (fake, route, helpers) => {
   fake.profileEdits = [];
+  // /embed texte : notifier des rôles ou @everyone est le BUT de l'option quand l'auteur l'a
+  // demandé explicitement (mentionner_roles / notifier_tous) ; le bot vérifie lui-même ses
+  // permissions natives (comme /annonce dans lib/chaos.js). Sans ces options, toute mention de
+  // masse reste une violation relevée par le harnais.
+  fake.intendedPingLabels.push(/^\/embed texte\b.*\b(mentionner_roles|notifier_tous)[=:]true\b/);
   const hash = (data) => crypto.createHash('md5').update(String(data)).digest('hex');
 
   /** Problèmes d'un corps de profil (images, longueurs). */

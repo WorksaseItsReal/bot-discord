@@ -1,7 +1,7 @@
 'use strict';
 
 const { EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-const { brand, brandFooter, truncate, LIMITS, sanitizeEmbeds, THEMABLE } = require('./embeds');
+const { brand, brandFooter, truncate, LIMITS, sanitizeEmbeds, THEMABLE, themeColor, isThemable } = require('./embeds');
 const { categoryMeta } = require('./categories');
 
 /**
@@ -210,6 +210,21 @@ function fitEmbeds(embeds, { guildId = null } = {}) {
   return sanitizeEmbeds(Array.isArray(embeds) ? embeds : [embeds], { guildId });
 }
 
+/**
+ * Carte prête à l'envoi direct (builder conservé, ex. logs) avec la couleur du thème du serveur :
+ * une COPIE recolorée si la carte est marquée et que le serveur a un thème, sinon la carte
+ * elle-même. Ne modifie jamais la carte d'origine.
+ * @template T
+ * @param {T} embed
+ * @param {string|null} guildId
+ * @returns {T|EmbedBuilder}
+ */
+function themed(embed, guildId) {
+  const color = themeColor(guildId);
+  if (color == null || !isThemable(embed) || typeof embed?.toJSON !== 'function') return embed;
+  return new EmbedBuilder(embed.toJSON()).setColor(color);
+}
+
 /** Champ « icône + libellé ». Inline par défaut (grille de 3). */
 function field(icon, label, value, inline = true) {
   return { name: icon ? `${icon} ${label}` : label, value: value == null || !String(value).trim() ? EMPTY : String(value), inline };
@@ -333,6 +348,7 @@ module.exports = {
   EMPTY,
   card,
   fitEmbeds,
+  themed,
   field,
   wide,
   blank,

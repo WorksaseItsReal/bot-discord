@@ -15,7 +15,8 @@ const CHILD_TABLES = [
 ];
 
 /** Tables sans lien avec un serveur. */
-const GLOBAL_TABLES = ['_migrations'];
+// bot_settings : réglages de l'instance (console /bot), sans serveur par conception.
+const GLOBAL_TABLES = ['_migrations', 'bot_settings'];
 
 /**
  * Tables à guild_id dont les lignes appartiennent au MEMBRE : détachées du serveur (plus aucune

@@ -102,7 +102,7 @@ module.exports = {
   /** @param {import('discord.js').AutocompleteInteraction} interaction */
   async autocomplete(interaction, client) {
     const focused = interaction.options.getFocused().toLowerCase().replace(/^\//, '');
-    const choices = [...visibleCommands(client, interaction.user.id).values()]
+    const choices = [...visibleCommands(client, interaction.user?.id).values()]
       .filter((c) => c.data.name.toLowerCase().includes(focused) || describe(c).toLowerCase().includes(focused))
       .sort((a, b) => a.data.name.localeCompare(b.data.name))
       .slice(0, 25)

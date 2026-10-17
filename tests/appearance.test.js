@@ -84,6 +84,21 @@ test('sanitizeEmbeds / fitEmbeds : couleur du thème sur les seules cartes marqu
   });
 });
 
+test('themed (envoi direct d\'un builder, logs) : copie recolorée, carte d\'origine intacte', () => {
+  const { themed } = require('../src/utils/ui');
+  withTheme(() => {
+    const brand = logCard({ category: 'members', title: 'Arrivée' });
+    const copy = themed(brand, GUILD);
+    assert.notEqual(copy, brand);
+    assert.equal(copy.toJSON().color, RED);
+    assert.equal(brand.toJSON().color, TONES.info, 'original non modifié');
+    const danger = logCard({ category: 'moderation', tone: 'danger', title: 'Ban' });
+    assert.equal(themed(danger, GUILD), danger);
+    assert.equal(themed(brand, null), brand);
+    assert.equal(themed(brand, '222222222222222222'), brand);
+  });
+});
+
 test('réponses d\'interaction : normalizeOptions thème avec le serveur de l\'interaction', () => {
   withTheme(() => {
     const { options } = normalizeOptions({ embeds: [card({ title: 'x' }), status.warn('Attention')] }, { guildId: GUILD });

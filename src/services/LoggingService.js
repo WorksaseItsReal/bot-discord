@@ -2,7 +2,7 @@
 
 const { PermissionFlagsBits, ChannelType, OverwriteType, embedLength } = require('discord.js');
 const { createLogger } = require('../core/logger');
-const { card, wide, ICONS, fitEmbeds } = require('../utils/ui');
+const { card, wide, ICONS, fitEmbeds, themed } = require('../utils/ui');
 const { LOG_CATEGORIES, EVENT_CATEGORY } = require('../utils/logCatalog');
 const { canReadCached } = require('../utils/channelAccess');
 
@@ -413,9 +413,9 @@ class LoggingService {
   }
 
   async #sendOne(channel, { guildId, embed, components, ctx }) {
-    // Carte assainie (limites Discord) et thème du serveur appliqué aux cartes « marque ».
+    // Thème du serveur appliqué aux cartes « marque » (copie recolorée, carte d'origine intacte).
     const build = () => {
-      const payload = { embeds: fitEmbeds([embed], { guildId }) };
+      const payload = { embeds: [themed(embed, guildId)] };
       if (components?.length) payload.components = components;
       return payload;
     };
